@@ -3,13 +3,16 @@ package deviceapi
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/webauthn"
 )
 
 // reservedHandles can't be registered (§4). abuse and postmaster deliver to a
@@ -89,8 +92,8 @@ func (a *API) createMailbox() http.Handler {
 			writeErr(w, http.StatusBadRequest, "keys must be 32 bytes")
 			return
 		}
-		if len(req.PasskeyKey) == 0 {
-			writeErr(w, http.StatusBadRequest, "passkey key required")
+		if !webauthn.ValidCredentialKey(req.PasskeyKey) {
+			writeErr(w, http.StatusBadRequest, "passkey key must be a P-256 point")
 			return
 		}
 		// The entitlement authorizes exactly the request-signing key the device
@@ -105,6 +108,20 @@ func (a *API) createMailbox() http.Handler {
 		if !ed25519.Verify(req.MailboxKey, chain, req.KeyChainSig) {
 			writeErr(w, http.StatusBadRequest, "key chain signature does not verify")
 			return
+		}
+
+		// Record the initial mailbox key in the write-once log before the mailbox
+		// exists, so every legitimate key — not just later rotations — has an
+		// auditable entry and the broker has a baseline (§9). Fail closed: a
+		// mailbox is never created whose first key wasn't logged.
+		address := req.Handle + a.mailDomain
+		if a.keylog != nil {
+			h := sha256.Sum256(req.MailboxKey)
+			id := a.provisioner.MailboxID(address)
+			if err := a.keylog.AppendMailboxKeyHash(r.Context(), hex.EncodeToString(id), h[:], time.Now().Unix()); err != nil {
+				writeErr(w, http.StatusInternalServerError, "could not record key")
+				return
+			}
 		}
 
 		id, err := a.provisioner.Create(r.Context(), routing.NewMailbox{

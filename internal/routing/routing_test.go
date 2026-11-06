@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -256,7 +257,6 @@ func TestKeyProvider(t *testing.T) {
 		{"address", s.AddressKey, ks.sign.Public().(ed25519.PublicKey)},
 		{"mailbox", s.MailboxKey, ks.mailbox.Public().(ed25519.PublicKey)},
 		{"owner-change", s.OwnerChangeKey, ks.ownerChange.Public().(ed25519.PublicKey)},
-		{"passkey", s.PasskeyKey, ks.passkey.Public().(ed25519.PublicKey)},
 	}
 	for _, c := range cases {
 		pub, ok := c.get(keyID)
@@ -272,8 +272,8 @@ func TestKeyProvider(t *testing.T) {
 	}
 }
 
-// A record missing a key (e.g. no passkey registered yet) resolves false for
-// that class rather than returning a short slice as a public key.
+// A record missing a key for a class resolves false for that class rather than
+// returning a short slice as a public key.
 func TestKeyProviderRejectsShortKey(t *testing.T) {
 	routingKey, macKey := keys(t)
 	s := newStore(t, newMemBlobs(), routingKey, macKey)
@@ -282,12 +282,12 @@ func TestKeyProviderRejectsShortKey(t *testing.T) {
 	ks := newKeyset(t)
 	id := s.MailboxID("a@fountbox.com")
 	rec := ks.record(id)
-	rec.PasskeyKey = nil
+	rec.OwnerChangeKey = nil
 	if err := s.Upsert(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.PasskeyKey(hex.EncodeToString(id)); ok {
-		t.Fatal("a nil passkey must not resolve")
+	if _, ok := s.OwnerChangeKey(hex.EncodeToString(id)); ok {
+		t.Fatal("a nil owner-change key must not resolve")
 	}
 	// The other keys still resolve.
 	if _, ok := s.AddressKey(hex.EncodeToString(id)); !ok {
@@ -512,6 +512,48 @@ func TestRenewEntitlement(t *testing.T) {
 		t.Fatal("expiry changed on a mismatched renewal")
 	}
 	if err := s.RenewEntitlement(ctx, make([]byte, 32), []byte("lic-1"), 900); !errors.Is(err, routing.ErrNoMailbox) {
+		t.Fatalf("err = %v, want ErrNoMailbox", err)
+	}
+}
+
+func TestRotateKeys(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	ks := newKeyset(t)
+	id := s.MailboxID("a@fountbox.com")
+	rec := ks.record(id)
+	rec.LicenseHash = []byte("lic-1")
+	rec.EntitlementExp = 500
+	if err := s.Upsert(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	nk := newKeyset(t)
+	newMailbox := nk.mailbox.Public().(ed25519.PublicKey)
+	hash, err := s.RotateKeys(ctx, id, routing.RotatedKeys{
+		DecryptionKey:  nk.dec.PublicKey().Bytes(),
+		SigningKey:     nk.sign.Public().(ed25519.PublicKey),
+		MailboxKey:     newMailbox,
+		OwnerChangeKey: nk.ownerChange.Public().(ed25519.PublicKey),
+		PasskeyKey:     nk.passkey.Public().(ed25519.PublicKey),
+	})
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	want := sha256.Sum256(newMailbox)
+	if !bytes.Equal(hash, want[:]) {
+		t.Fatal("returned hash is not sha256 of the new mailbox key")
+	}
+	snap, _ := s.Snapshot(id)
+	if !bytes.Equal(snap.MailboxKey, newMailbox) || !bytes.Equal(snap.SigningKey, nk.sign.Public().(ed25519.PublicKey)) {
+		t.Fatal("keys did not rotate")
+	}
+	// License, entitlement, and id are untouched by a rotation.
+	if !bytes.Equal(snap.LicenseHash, []byte("lic-1")) || snap.EntitlementExp != 500 || !bytes.Equal(snap.MailboxID, id) {
+		t.Fatal("rotation disturbed license/entitlement/id")
+	}
+	if _, err := s.RotateKeys(ctx, make([]byte, 32), routing.RotatedKeys{}); !errors.Is(err, routing.ErrNoMailbox) {
 		t.Fatalf("err = %v, want ErrNoMailbox", err)
 	}
 }

@@ -85,12 +85,14 @@ func run() error {
 	}
 
 	api := deviceapi.New(deviceapi.Options{
-		Store:       st,
-		Resolver:    resolver,
-		Entitlement: cfg.Secrets.EntitlementVerifyKey,
-		Provisioner: provisioner,
-		Mutator:     mutator,
-		MailDomain:  cfg.MailDomain,
+		Store:          st,
+		Resolver:       resolver,
+		Entitlement:    cfg.Secrets.EntitlementVerifyKey,
+		Provisioner:    provisioner,
+		Mutator:        mutator,
+		MailDomain:     cfg.MailDomain,
+		RecoveryRPID:   cfg.RecoveryRPID,
+		RecoveryOrigin: cfg.RecoveryOrigin,
 	})
 	apiSrv := &http.Server{
 		Addr:              cfg.DeviceAPIAddr,

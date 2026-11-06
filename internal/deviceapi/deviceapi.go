@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -73,7 +74,6 @@ type KeyProvider interface {
 	AddressKey(keyID string) (ed25519.PublicKey, bool)     // request signing key (address-class routes)
 	MailboxKey(keyID string) (ed25519.PublicKey, bool)     // POST /address
 	OwnerChangeKey(keyID string) (ed25519.PublicKey, bool) // PUT /routing
-	PasskeyKey(keyID string) (ed25519.PublicKey, bool)     // POST /recover
 }
 
 // NewKeyResolver adapts a KeyProvider to the signer classes guard verifies
@@ -93,9 +93,10 @@ func (r providerResolver) Resolve(class signer, keyID string) (ed25519.PublicKey
 		return r.p.MailboxKey(keyID)
 	case sigOwnerChange:
 		return r.p.OwnerChangeKey(keyID)
-	case sigPasskey:
-		return r.p.PasskeyKey(keyID)
 	default:
+		// sigPasskey is deliberately absent: a passkey is an ES256 WebAuthn
+		// credential, not an Ed25519 request signer, so POST /recover is
+		// authenticated by a body assertion (internal/webauthn), not here.
 		return nil, false
 	}
 }
@@ -117,6 +118,7 @@ var routes = map[string]route{
 	"GET /mail/{id}":     {sigAddress, "M2", "Returns a message and its signature"},
 	"DELETE /mail/{id}":  {sigAddress, "M2", "Confirms receipt and deletes"},
 	"GET /boots/{id}":    {sigNone, "M2", "Returns a boot's attestation"},
+	"GET /recover/{id}":  {sigNone, "M2", "Issues a recovery challenge bound to a mailbox and new keys (§5)"},
 	"POST /recover":      {sigPasskey, "M2", "Accepts a new mailbox key after a lost device (§5)"},
 	"POST /entitlement":  {sigAddress, "M2", "Renews the mailbox's entitlement"},
 	"POST /pause":        {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
@@ -130,15 +132,23 @@ var routes = map[string]route{
 type Provisioner interface {
 	Available(ctx context.Context, address string) (bool, error)
 	Create(ctx context.Context, p routing.NewMailbox) (mailboxID []byte, err error)
+	// MailboxID is the id Create will assign an address (the keyed hash, §4), so
+	// the handler can record the initial mailbox key in the write-once log before
+	// the mailbox goes live.
+	MailboxID(address string) []byte
 }
 
-// Mutator applies the per-mailbox routing writes behind the signed write routes
-// (design §8 POST /address, PUT /routing, POST /entitlement). routing.Store
+// Mutator is the per-mailbox routing layer behind the signed write routes
+// (design §8 POST /address, PUT /routing, POST /entitlement, POST /recover).
+// RotateKeys and PasskeyOf back recovery: the latter reads the registered
+// passkey credential key the assertion is verified against. routing.Store
 // implements it; nil leaves those routes as 501 stubs.
 type Mutator interface {
 	AddAddress(ctx context.Context, p routing.NewAddress) (mailboxID []byte, err error)
 	SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error
 	RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error
+	RotateKeys(ctx context.Context, mailboxID []byte, k routing.RotatedKeys) (newMailboxKeyHash []byte, err error)
+	PasskeyOf(mailboxID []byte) (credPubKey []byte, ok bool)
 }
 
 // Options configures the API. Store is required; the rest enable the routes that
@@ -148,34 +158,52 @@ type Options struct {
 	Resolver    KeyResolver       // per-mailbox signer keys (address/mailbox/owner-change/passkey)
 	Entitlement ed25519.PublicKey // verifies device entitlements; nil disables entitlement routes
 	Provisioner Provisioner       // mailbox creation + handle checks
-	Mutator     Mutator           // per-mailbox routing writes (address/routing/entitlement)
+	Mutator     Mutator           // per-mailbox routing writes (address/routing/entitlement/recover)
 	MailDomain  string            // e.g. "@fountbox.com"; a handle's address is name+domain
+
+	// RecoveryRPID is the WebAuthn Relying Party id (the Fount domain serving
+	// the passkey's associated-domain file) that POST /recover verifies passkey
+	// assertions against. Empty leaves recovery as a 501 stub. RecoveryOrigin,
+	// when set, additionally pins the assertion's clientDataJSON origin.
+	RecoveryRPID   string
+	RecoveryOrigin string
 }
 
 type API struct {
-	mux         *http.ServeMux
-	store       store.Store
-	resolver    KeyResolver
-	entVerify   ed25519.PublicKey
-	provisioner Provisioner
-	mutator     Mutator
-	mailDomain  string
-	nonces      *nonceCache
+	mux           *http.ServeMux
+	store         store.Store
+	resolver      KeyResolver
+	entVerify     ed25519.PublicKey
+	provisioner   Provisioner
+	mutator       Mutator
+	mailDomain    string
+	recoverRPID   string
+	recoverOrigin string
+	recoverKey    []byte // per-boot HMAC key for stateless recovery challenges
+	keylog        store.KeyLog
+	nonces        *nonceCache
 }
 
 func New(o Options) *API {
 	a := &API{
-		mux:         http.NewServeMux(),
-		store:       o.Store,
-		resolver:    o.Resolver,
-		entVerify:   o.Entitlement,
-		provisioner: o.Provisioner,
-		mutator:     o.Mutator,
-		mailDomain:  o.MailDomain,
-		nonces:      newNonceCache(),
+		mux:           http.NewServeMux(),
+		store:         o.Store,
+		resolver:      o.Resolver,
+		entVerify:     o.Entitlement,
+		provisioner:   o.Provisioner,
+		mutator:       o.Mutator,
+		mailDomain:    o.MailDomain,
+		recoverRPID:   o.RecoveryRPID,
+		recoverOrigin: o.RecoveryOrigin,
+		recoverKey:    make([]byte, 32),
+		nonces:        newNonceCache(),
+	}
+	if _, err := rand.Read(a.recoverKey); err != nil {
+		panic("deviceapi: cannot read random for recovery challenge key: " + err.Error())
 	}
 	mail, _ := o.Store.(store.MailReader) // nil in dev (discard store) -> routes stay 501
 	boots, _ := o.Store.(store.BootStore) // same
+	a.keylog, _ = o.Store.(store.KeyLog)  // same; nil leaves POST /recover 501
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail, boots)))
 	}
@@ -206,8 +234,20 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.renewEntitlement()
 	case boots != nil && pattern == "GET /boots/{id}":
 		return a.getBoot(boots)
+	case a.recoveryLive() && pattern == "GET /recover/{id}":
+		return a.issueRecoveryChallenge()
+	case a.recoveryLive() && pattern == "POST /recover":
+		return a.recover()
 	}
 	return a.stub(pattern, rt)
+}
+
+// recoveryLive reports whether POST /recover and its challenge endpoint can run:
+// a Relying Party id to verify assertions against, a Mutator to rotate keys, and
+// the write-once key log to record the new key in. Missing any leaves recovery a
+// 501 stub, so an edge can never rotate a mailbox key without logging it (§9).
+func (a *API) recoveryLive() bool {
+	return a.recoverRPID != "" && a.mutator != nil && a.keylog != nil
 }
 
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }
@@ -251,8 +291,7 @@ func claimsFrom(ctx context.Context) (*entitlement.Claims, bool) {
 func (a *API) authorize(class signer, r *http.Request, body []byte) (context.Context, error) {
 	tsRaw := r.Header.Get("Fount-Timestamp")
 	nonce := r.Header.Get("Fount-Nonce")
-	sigB64 := r.Header.Get("Fount-Signature")
-	if tsRaw == "" || nonce == "" || sigB64 == "" {
+	if tsRaw == "" || nonce == "" {
 		return nil, fmt.Errorf("missing signature headers")
 	}
 	ts, err := strconv.ParseInt(tsRaw, 10, 64)
@@ -264,6 +303,18 @@ func (a *API) authorize(class signer, r *http.Request, body []byte) (context.Con
 	}
 	if !a.nonces.useOnce(nonce, time.Unix(ts, 0)) {
 		return nil, fmt.Errorf("nonce replay")
+	}
+
+	// A lost device has no request-signing key, so POST /recover carries no
+	// Fount-Signature; the handler authenticates it by the passkey assertion in
+	// the body (§5). The timestamp and nonce above still bound envelope replay.
+	if class == sigPasskey {
+		return r.Context(), nil
+	}
+
+	sigB64 := r.Header.Get("Fount-Signature")
+	if sigB64 == "" {
+		return nil, fmt.Errorf("missing signature headers")
 	}
 	sig, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {

@@ -1,9 +1,14 @@
 package deviceapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +19,20 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
+
+// testCredential returns a P-256 passkey credential: the ECDSA private key and
+// its 65-byte SEC1 uncompressed public key, the form the edge stores and
+// internal/webauthn verifies assertions against.
+func testCredential(t *testing.T) (*ecdsa.PrivateKey, []byte) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := append([]byte{0x04},
+		append(priv.X.FillBytes(make([]byte, 32)), priv.Y.FillBytes(make([]byte, 32))...)...)
+	return priv, pub
+}
 
 type fakeProv struct {
 	available map[string]bool
@@ -40,6 +59,13 @@ func (f *fakeProv) Create(_ context.Context, p routing.NewMailbox) ([]byte, erro
 	return make([]byte, 32), nil
 }
 
+func (f *fakeProv) MailboxID(string) []byte {
+	if f.id != nil {
+		return f.id
+	}
+	return make([]byte, 32)
+}
+
 type deviceKeys struct {
 	signPub  ed25519.PublicKey
 	signPriv ed25519.PrivateKey
@@ -57,8 +83,7 @@ func newDeviceKeys(t *testing.T) deviceKeys {
 	op, _, _ := ed25519.GenerateKey(rand.Reader)
 	dec := make([]byte, 32)
 	rand.Read(dec)
-	pk := make([]byte, 32)
-	rand.Read(pk)
+	_, pk := testCredential(t)
 	return deviceKeys{sp, spriv, mp, mpriv, op, dec, pk}
 }
 
@@ -143,6 +168,31 @@ func TestCreateMailbox(t *testing.T) {
 	}
 	if string(got.LicenseHash) != "license-hash" {
 		t.Fatal("license hash not carried from entitlement")
+	}
+}
+
+func TestCreateMailboxLogsInitialKey(t *testing.T) {
+	ks := newRecoverStore() // implements store.KeyLog, so creation logs the key
+	prov := &fakeProv{id: make([]byte, 32)}
+	verifyPub, backend, _ := ed25519.GenerateKey(rand.Reader)
+	api := New(Options{
+		Store:       ks,
+		Entitlement: verifyPub,
+		Provisioner: prov,
+		MailDomain:  "@fountbox.com",
+	})
+	dk := newDeviceKeys(t)
+	tok := entToken(t, backend, dk.signPub, time.Now().Add(time.Hour))
+
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, mailboxPost(t, dk.signPriv, tok, dk.request(t), "mk-log"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	want := sha256.Sum256(dk.mboxPub)
+	got := ks.appends[hex.EncodeToString(prov.id)]
+	if len(got) != 1 || !bytes.Equal(got[0], want[:]) {
+		t.Fatalf("creation did not log the initial mailbox key (entries=%d)", len(got))
 	}
 }
 

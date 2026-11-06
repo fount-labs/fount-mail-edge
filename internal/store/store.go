@@ -106,6 +106,18 @@ type BootStore interface {
 	ReadBoot(ctx context.Context, bootIDHex string) (Boot, error)
 }
 
+// KeyLog is the write-once mailbox-key log the broker audits (design §9): every
+// mailbox key a mailbox has ever been given is appended here and never changed,
+// so a key the host swapped in while a device was off is visible on the next
+// sync. Appends are single objects that are never overwritten. The production
+// target is a separate S3 bucket with Object Lock (compliance mode, write-once)
+// on its own egress host; the in-bucket prefix realStore writes today is the M2
+// stand-in, and moving it to that bucket is a documented infra seam. The discard
+// store does not implement it, so POST /recover stays 501 in dev.
+type KeyLog interface {
+	AppendMailboxKeyHash(ctx context.Context, mailboxIDHex string, keyHash []byte, at int64) error
+}
+
 type realStore struct {
 	dir    Directory
 	blobs  Blobs
@@ -244,6 +256,22 @@ func (s *realStore) ReadBoot(ctx context.Context, bootIDHex string) (Boot, error
 		return Boot{}, fmt.Errorf("store: parse boot object: %w", err)
 	}
 	return b, nil
+}
+
+func keyLogPrefix(mailboxIDHex string) string { return "edge/keylog/" + mailboxIDHex + "/" }
+
+// AppendMailboxKeyHash records one mailbox-key hash in the write-once log. Each
+// append is a distinct object (timestamp plus random suffix in the key) so an
+// entry is never overwritten; the broker lists the prefix to read a mailbox's
+// whole key history. The caller passes a validated hex mailbox id, so the object
+// key can't widen beyond the keylog prefix.
+func (s *realStore) AppendMailboxKeyHash(ctx context.Context, mailboxIDHex string, keyHash []byte, at int64) error {
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%s%d-%s", keyLogPrefix(mailboxIDHex), at, hex.EncodeToString(suffix))
+	return s.blobs.Put(ctx, key, keyHash)
 }
 
 type discard struct{}

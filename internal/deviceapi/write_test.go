@@ -3,6 +3,7 @@ package deviceapi
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -92,11 +93,12 @@ func mutatorAPI(t *testing.T, rt *routing.Store) (*API, ed25519.PrivateKey) {
 }
 
 type mbox struct {
-	id      []byte
-	idHex   string
-	sign    ed25519.PrivateKey
-	mailbox ed25519.PrivateKey
-	owner   ed25519.PrivateKey
+	id          []byte
+	idHex       string
+	sign        ed25519.PrivateKey
+	mailbox     ed25519.PrivateKey
+	owner       ed25519.PrivateKey
+	passkeyPriv *ecdsa.PrivateKey // the registered passkey; recovery signs assertions with it
 }
 
 func createMbox(t *testing.T, rt *routing.Store, address, license string) mbox {
@@ -106,8 +108,7 @@ func createMbox(t *testing.T, rt *routing.Store, address, license string) mbox {
 	_, op, _ := ed25519.GenerateKey(rand.Reader)
 	dec := make([]byte, 32)
 	rand.Read(dec)
-	pk := make([]byte, 32)
-	rand.Read(pk)
+	passkeyPriv, pk := testCredential(t)
 	id, err := rt.Create(context.Background(), routing.NewMailbox{
 		Address:        address,
 		LicenseHash:    []byte(license),
@@ -121,7 +122,7 @@ func createMbox(t *testing.T, rt *routing.Store, address, license string) mbox {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return mbox{id: id, idHex: hex.EncodeToString(id), sign: sp, mailbox: mp, owner: op}
+	return mbox{id: id, idHex: hex.EncodeToString(id), sign: sp, mailbox: mp, owner: op, passkeyPriv: passkeyPriv}
 }
 
 // --- POST /address ---------------------------------------------------------
@@ -132,8 +133,7 @@ func childBody(t *testing.T, address string, parentMailboxKey ed25519.PrivateKey
 	_, cOwner, _ := ed25519.GenerateKey(rand.Reader)
 	cDec := make([]byte, 32)
 	rand.Read(cDec)
-	cPass := make([]byte, 32)
-	rand.Read(cPass)
+	_, cPass := testCredential(t)
 	req := addressRequest{
 		Address:        address,
 		DecryptionKey:  cDec,

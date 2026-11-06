@@ -232,6 +232,17 @@ func (s *Store) Snapshot(mailboxID []byte) (Mailbox, bool) {
 	return m.clone(), true
 }
 
+// PasskeyOf returns a copy of a mailbox's registered passkey credential key
+// (design §8 POST /recover verifies the WebAuthn assertion against it). Reports
+// false if no mailbox has that id.
+func (s *Store) PasskeyOf(mailboxID []byte) ([]byte, bool) {
+	m, ok := s.Snapshot(mailboxID)
+	if !ok {
+		return nil, false
+	}
+	return m.PasskeyKey, true
+}
+
 func (m *Mailbox) clone() Mailbox {
 	c := *m
 	for dst, src := range map[*[]byte][]byte{
@@ -297,14 +308,10 @@ func (s *Store) MailboxKey(keyID string) (ed25519.PublicKey, bool) {
 func (s *Store) OwnerChangeKey(keyID string) (ed25519.PublicKey, bool) {
 	return s.key(keyID, (*Mailbox).ownerChangeKey)
 }
-func (s *Store) PasskeyKey(keyID string) (ed25519.PublicKey, bool) {
-	return s.key(keyID, (*Mailbox).passkeyKey)
-}
 
 func (m *Mailbox) signingKey() []byte     { return m.SigningKey }
 func (m *Mailbox) mailboxKey() []byte     { return m.MailboxKey }
 func (m *Mailbox) ownerChangeKey() []byte { return m.OwnerChangeKey }
-func (m *Mailbox) passkeyKey() []byte     { return m.PasskeyKey }
 
 func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey, bool) {
 	m, ok := s.lookup(keyID)
@@ -515,6 +522,45 @@ func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64,
 		return err
 	}
 	return nil
+}
+
+// RotatedKeys is the new key set a recovery (or move) installs on an existing
+// mailbox (design §5). The mailbox id, license, entitlement, sequence, and owner
+// list are unchanged; only the device-held keys rotate, so the old signing key
+// stops being accepted and new mail seals to the new decryption key.
+type RotatedKeys struct {
+	DecryptionKey  []byte
+	SigningKey     []byte
+	MailboxKey     []byte
+	OwnerChangeKey []byte
+	PasskeyKey     []byte
+}
+
+// RotateKeys replaces a mailbox's device-held keys and returns the SHA-256 of the
+// new mailbox key, which the caller records in the write-once key log (§9) so the
+// rotation is auditable. The authorization — a passkey assertion over an edge
+// challenge and the new mailbox key's signature over the new key chain — is the
+// handler's job, checked before calling this. ErrNoMailbox if the mailbox is
+// absent.
+func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	if !ok {
+		return nil, ErrNoMailbox
+	}
+	prev := *m
+	m.DecryptionKey = k.DecryptionKey
+	m.SigningKey = k.SigningKey
+	m.MailboxKey = k.MailboxKey
+	m.OwnerChangeKey = k.OwnerChangeKey
+	m.PasskeyKey = k.PasskeyKey
+	if err := s.persist(ctx); err != nil {
+		*m = prev // the old slice headers are intact; we replaced, never mutated
+		return nil, err
+	}
+	h := sha256.Sum256(k.MailboxKey)
+	return h[:], nil
 }
 
 // RenewEntitlement updates the mailbox's stored entitlement expiry (design §8

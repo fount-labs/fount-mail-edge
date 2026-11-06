@@ -61,6 +61,8 @@ type Config struct {
 	S3Bucket          string // mail bucket name
 	S3Region          string // bucket region, e.g. us-east-1
 	S3Endpoint        string // bucket root URL; derived from bucket+region if unset
+	RecoveryRPID      string // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
+	RecoveryOrigin    string // optional: pins the assertion's clientDataJSON origin (e.g. https://mail.fount.sh)
 	Dev               bool
 	Secrets           Secrets
 }
@@ -96,6 +98,8 @@ func Load() (*Config, error) {
 		S3Bucket:          os.Getenv("S3_BUCKET"),
 		S3Region:          os.Getenv("S3_REGION"),
 		S3Endpoint:        os.Getenv("S3_ENDPOINT"),
+		RecoveryRPID:      os.Getenv("RECOVERY_RP_ID"), // PLACEHOLDER: the Fount RP domain serving the passkey AASA; confirm before deploy
+		RecoveryOrigin:    os.Getenv("RECOVERY_ORIGIN"),
 		Dev:               dev,
 	}
 	if v := os.Getenv("MAX_MESSAGE_BYTES"); v != "" {

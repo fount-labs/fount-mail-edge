@@ -12,6 +12,7 @@ import (
 
 	"github.com/fount-labs/fount-mail-edge/internal/entitlement"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/webauthn"
 )
 
 // maxOwners caps a PUT /routing owner list. The owner list is small by design
@@ -53,8 +54,8 @@ func (a *API) createAddress() http.Handler {
 			writeErr(w, http.StatusBadRequest, "keys must be 32 bytes")
 			return
 		}
-		if len(req.PasskeyKey) == 0 {
-			writeErr(w, http.StatusBadRequest, "passkey key required")
+		if !webauthn.ValidCredentialKey(req.PasskeyKey) {
+			writeErr(w, http.StatusBadRequest, "passkey key must be a P-256 point")
 			return
 		}
 		// The mailbox key authorizes the new address. guard already verified the
