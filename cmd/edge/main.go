@@ -126,6 +126,7 @@ func run() error {
 	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
 	go func() { errc <- ignoreClosed(acmeSrv.ListenAndServe()) }()
 	go startCertLoop(ctx, cfg, k, certMgr, challenges)
+	go startRetentionSweep(ctx, st)
 	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
 		cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
 
@@ -214,6 +215,37 @@ func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *c
 		func(ctx context.Context, host string) (*tls.Certificate, error) {
 			return issuer.Issue(ctx, host, k.TLS)
 		})
+}
+
+// startRetentionSweep runs the §6 retention sweep once at startup and then daily,
+// expiring unfetched mail past the hold and writing a signed expiry record for
+// each. The discard store (dev) is not a Sweeper, so this is a no-op there.
+func startRetentionSweep(ctx context.Context, st store.Store) {
+	sweeper, ok := st.(store.Sweeper)
+	if !ok {
+		return
+	}
+	run := func() {
+		n, err := sweeper.Sweep(ctx, time.Now())
+		if err != nil {
+			log.Printf("edge: retention sweep error: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("edge: retention sweep expired %d message(s)", n)
+		}
+	}
+	run()
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
 }
 
 // health serves the shim's /health and /ready probes. /ready is not-ready until

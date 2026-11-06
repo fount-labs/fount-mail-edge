@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,11 @@ var ErrMailboxFull = errors.New("store: mailbox full")
 // DefaultMaxMailboxBytes is the per-mailbox storage cap when New is given no
 // WithMaxMailboxBytes option: about 2 GB of unfetched mail (§6).
 const DefaultMaxMailboxBytes int64 = 2 << 30
+
+// DefaultRetention is how long unfetched mail is held before the sweep expires
+// it (design §6: "Holds unfetched mail for 30 days"). Override with
+// WithRetention.
+const DefaultRetention = 30 * 24 * time.Hour
 
 type Store interface {
 	// Put stores one raw message for one envelope recipient and returns its
@@ -67,12 +73,16 @@ type Directory interface {
 	NextSequence(ctx context.Context, mailboxID []byte) (uint64, error)
 }
 
-// Object is one entry in a Blobs listing: an object's full key and its size in
-// bytes. Size lets the store report GET /mail sizes and sum a mailbox's usage
-// for the storage quota without a per-object fetch (S3's listing carries it).
+// Object is one entry in a Blobs listing: an object's full key, its size in
+// bytes, and when it was last written. Size lets the store report GET /mail
+// sizes and sum a mailbox's usage for the storage quota; Modified (S3's
+// LastModified, set once at receipt since objects are never rewritten) lets the
+// retention sweep decide a message's age without fetching it. Both come from
+// the listing, so neither needs a per-object fetch.
 type Object struct {
-	Key  string
-	Size int64
+	Key      string
+	Size     int64
+	Modified time.Time // zero if the backend didn't report it
 }
 
 // Blobs is the durable object store (S3). Put returns only once the write is
@@ -136,13 +146,24 @@ type KeyLog interface {
 	AppendMailboxKeyHash(ctx context.Context, mailboxIDHex string, keyHash []byte, at int64) error
 }
 
+// Sweeper expires unfetched mail past the retention window (design §6). The edge
+// runs it periodically. realStore implements it; the discard store does not, so
+// dev has no sweep.
+type Sweeper interface {
+	// Sweep deletes every message older than the retention window as of now,
+	// writing a signed expiry record for each before it deletes the message, and
+	// returns how many it expired.
+	Sweep(ctx context.Context, now time.Time) (expired int, err error)
+}
+
 type realStore struct {
 	dir        Directory
 	blobs      Blobs
 	sign       ed25519.PrivateKey
 	bootID     []byte
 	now        func() time.Time
-	maxMailbox int64 // per-mailbox storage cap; <=0 is unlimited
+	maxMailbox int64         // per-mailbox storage cap; <=0 is unlimited
+	retention  time.Duration // unfetched-mail hold; <=0 disables the sweep
 }
 
 // Option tunes a realStore built by New.
@@ -152,11 +173,15 @@ type Option func(*realStore)
 // unlimited. Without it New uses DefaultMaxMailboxBytes.
 func WithMaxMailboxBytes(n int64) Option { return func(s *realStore) { s.maxMailbox = n } }
 
+// WithRetention sets how long unfetched mail is held before Sweep expires it
+// (§6). A value <= 0 disables the sweep. Without it New uses DefaultRetention.
+func WithRetention(d time.Duration) Option { return func(s *realStore) { s.retention = d } }
+
 // New builds the real store. bootID is this boot's 16-byte identifier (it ends
 // up in every object so the broker can check the signature against the right
 // boot's attestation, §9).
 func New(dir Directory, blobs Blobs, sign ed25519.PrivateKey, bootID []byte, opts ...Option) Store {
-	s := &realStore{dir: dir, blobs: blobs, sign: sign, bootID: bootID, now: time.Now, maxMailbox: DefaultMaxMailboxBytes}
+	s := &realStore{dir: dir, blobs: blobs, sign: sign, bootID: bootID, now: time.Now, maxMailbox: DefaultMaxMailboxBytes, retention: DefaultRetention}
 	for _, o := range opts {
 		o(s)
 	}
@@ -347,6 +372,129 @@ func (s *realStore) AppendMailboxKeyHash(ctx context.Context, mailboxIDHex strin
 	}
 	key := fmt.Sprintf("%s%d-%s", keyLogPrefix(mailboxIDHex), at, hex.EncodeToString(suffix))
 	return s.blobs.Put(ctx, key, keyHash)
+}
+
+// --- Retention sweep (design §6) -------------------------------------------
+
+// ExpiryRecord is what the edge writes when the sweep deletes an unfetched
+// message. The sender already got a 250 and the edge can't read who they were,
+// so this tells the broker which per-mailbox sequence number expired — turning
+// what would otherwise look like withheld mail (a gap in the counter, §8) into
+// an accountable expiry the app can report to the owner. Signed by the boot's
+// mail-sign key, so the broker trusts it against that boot's attestation (§9).
+type ExpiryRecord struct {
+	MailboxID  string `json:"mailbox_id"`  // hex
+	EdgeID     string `json:"edge_id"`     // hex
+	Sequence   uint64 `json:"sequence"`    // the per-mailbox number that expired
+	ReceivedAt int64  `json:"received_at"` // unix ms, from the message header
+	ExpiredAt  int64  `json:"expired_at"`  // unix seconds, when the sweep ran
+	BootID     string `json:"boot_id"`     // hex boot that swept it (whose key signs)
+}
+
+func expiryKey(mailboxIDHex string, seq uint64) string {
+	return fmt.Sprintf("edge/expiry/%s/%d", mailboxIDHex, seq)
+}
+
+// Sweep expires mail past the retention window. For each too-old object it reads
+// the header to recover the mailbox id and sequence, writes the signed expiry
+// record FIRST, then deletes the message — so a message is never deleted without
+// an expiry record (which would reopen the false-withheld-mail gap). It is
+// idempotent: the expiry record key is the mailbox id + sequence, so a retried
+// sweep rewrites the same record and retries the delete.
+func (s *realStore) Sweep(ctx context.Context, now time.Time) (int, error) {
+	if s.retention <= 0 {
+		return 0, nil
+	}
+	objs, err := s.blobs.List(ctx, "edge/mail/")
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-s.retention)
+	signPub := s.sign.Public().(ed25519.PublicKey)
+	expired := 0
+	for _, o := range objs {
+		// Never delete a message we can't date: a zero Modified (backend didn't
+		// report it) or one still inside the window is left alone.
+		if o.Modified.IsZero() || !o.Modified.Before(cutoff) {
+			continue
+		}
+		raw, err := s.blobs.Get(ctx, o.Key)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue // already gone
+			}
+			return expired, err
+		}
+		p, err := Parse(raw, signPub)
+		if err != nil {
+			continue // not a message this boot's key signed; leave it
+		}
+		if err := s.writeExpiry(ctx, p, now); err != nil {
+			return expired, err
+		}
+		if err := s.blobs.Delete(ctx, o.Key); err != nil {
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
+}
+
+// writeExpiry stores the signed expiry record for one expired message.
+func (s *realStore) writeExpiry(ctx context.Context, p *Parsed, now time.Time) error {
+	rec := ExpiryRecord{
+		MailboxID:  hex.EncodeToString(p.MailboxID),
+		EdgeID:     hex.EncodeToString(p.EdgeID),
+		Sequence:   p.Sequence,
+		ReceivedAt: p.ReceivedAt.UnixMilli(),
+		ExpiredAt:  now.UTC().Unix(),
+		BootID:     hex.EncodeToString(s.bootID),
+	}
+	body, err := marshalExpiry(rec, s.sign)
+	if err != nil {
+		return err
+	}
+	return s.blobs.Put(ctx, expiryKey(rec.MailboxID, rec.Sequence), body)
+}
+
+// marshalExpiry encodes a record as b64url(json).b64url(sig), the same compact
+// signed-token shape internal/entitlement uses, so the broker verifies it the
+// same way.
+func marshalExpiry(rec ExpiryRecord, sign ed25519.PrivateKey) ([]byte, error) {
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return nil, err
+	}
+	sig := ed25519.Sign(sign, payload)
+	enc := base64.RawURLEncoding
+	return []byte(enc.EncodeToString(payload) + "." + enc.EncodeToString(sig)), nil
+}
+
+// ParseExpiryRecord decodes and verifies an expiry record against signPub. It is
+// the broker's reference (and backs the sweep tests); the edge never reads one
+// back.
+func ParseExpiryRecord(b []byte, signPub ed25519.PublicKey) (ExpiryRecord, error) {
+	parts := strings.Split(string(b), ".")
+	if len(parts) != 2 {
+		return ExpiryRecord{}, errors.New("store: malformed expiry record")
+	}
+	enc := base64.RawURLEncoding
+	payload, err := enc.DecodeString(parts[0])
+	if err != nil {
+		return ExpiryRecord{}, fmt.Errorf("store: expiry payload: %w", err)
+	}
+	sig, err := enc.DecodeString(parts[1])
+	if err != nil {
+		return ExpiryRecord{}, fmt.Errorf("store: expiry sig: %w", err)
+	}
+	if !ed25519.Verify(signPub, payload, sig) {
+		return ExpiryRecord{}, errors.New("store: expiry signature does not verify")
+	}
+	var rec ExpiryRecord
+	if err := json.Unmarshal(payload, &rec); err != nil {
+		return ExpiryRecord{}, fmt.Errorf("store: expiry json: %w", err)
+	}
+	return rec, nil
 }
 
 type discard struct{}

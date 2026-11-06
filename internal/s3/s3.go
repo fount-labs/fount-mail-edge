@@ -122,8 +122,9 @@ type listResult struct {
 	IsTruncated bool     `xml:"IsTruncated"`
 	NextToken   string   `xml:"NextContinuationToken"`
 	Contents    []struct {
-		Key  string `xml:"Key"`
-		Size int64  `xml:"Size"`
+		Key          string `xml:"Key"`
+		Size         int64  `xml:"Size"`
+		LastModified string `xml:"LastModified"`
 	} `xml:"Contents"`
 }
 
@@ -158,7 +159,11 @@ func (c *Client) List(ctx context.Context, prefix string) ([]store.Object, error
 			return nil, fmt.Errorf("s3: list %q: parse: %w", prefix, err)
 		}
 		for _, o := range lr.Contents {
-			out = append(out, store.Object{Key: o.Key, Size: o.Size})
+			// S3 reports LastModified in RFC3339 (ISO8601 with a Z). A parse
+			// failure leaves Modified zero, which the sweep treats as "undatable,
+			// don't delete" — the safe direction.
+			mod, _ := time.Parse(time.RFC3339, o.LastModified)
+			out = append(out, store.Object{Key: o.Key, Size: o.Size, Modified: mod})
 		}
 		if !lr.IsTruncated || lr.NextToken == "" {
 			return out, nil

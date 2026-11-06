@@ -90,7 +90,7 @@ func (f *fakeBucket) list(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Fprintf(w, `<?xml version="1.0"?><ListBucketResult>`+
 		`<IsTruncated>%t</IsTruncated>`+
-		`<Contents><Key>%s</Key><Size>%d</Size></Contents>`+
+		`<Contents><Key>%s</Key><Size>%d</Size><LastModified>2026-01-02T03:04:05Z</LastModified></Contents>`+
 		`<NextContinuationToken>%s</NextContinuationToken>`+
 		`</ListBucketResult>`, truncated, k, len(f.objs[k]), next)
 }
@@ -174,6 +174,9 @@ func TestListPaginates(t *testing.T) {
 		}
 		if o.Size != 1 { // each fixture object is a single byte
 			t.Fatalf("key %q size = %d, want 1", o.Key, o.Size)
+		}
+		if o.Modified.IsZero() {
+			t.Fatalf("key %q has no parsed LastModified", o.Key)
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/hpke"
 )
@@ -67,15 +68,25 @@ func (d *memDir) NextSequence(_ context.Context, mailboxID []byte) (uint64, erro
 type memBlobs struct {
 	mu   sync.Mutex
 	objs map[string][]byte
+	mod  map[string]time.Time // per-key last-modified, set by the sweep tests
 }
 
-func newMemBlobs() *memBlobs { return &memBlobs{objs: map[string][]byte{}} }
+func newMemBlobs() *memBlobs {
+	return &memBlobs{objs: map[string][]byte{}, mod: map[string]time.Time{}}
+}
 
 func (b *memBlobs) Put(_ context.Context, key string, data []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.objs[key] = append([]byte(nil), data...)
 	return nil
+}
+
+// setMod stamps a stored object's modified time so a sweep test can age it.
+func (b *memBlobs) setMod(key string, t time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.mod[key] = t
 }
 
 func (b *memBlobs) Get(_ context.Context, key string) ([]byte, error) {
@@ -94,7 +105,7 @@ func (b *memBlobs) List(_ context.Context, prefix string) ([]Object, error) {
 	var out []Object
 	for k, v := range b.objs {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, Object{Key: k, Size: int64(len(v))})
+			out = append(out, Object{Key: k, Size: int64(len(v)), Modified: b.mod[k]})
 		}
 	}
 	return out, nil
@@ -389,6 +400,120 @@ func TestListReportsSizes(t *testing.T) {
 	}
 	if want := int(storedSize("x@y.com", "a@fountbox.com", len(body))); list[0].Size != want {
 		t.Fatalf("Size = %d, want %d", list[0].Size, want)
+	}
+}
+
+// The sweep expires mail past the retention window: too-old messages are
+// deleted, each leaves a signed expiry record naming its sequence number (so the
+// gap reads as an expiry, not withheld mail, §6/§8), and in-window mail is kept.
+func TestRetentionSweep(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	blobs := newMemBlobs()
+	sign, signPub := newSignKey(t)
+	bootID := make([]byte, lenBootID)
+	rand.Read(bootID)
+	s := New(dir, blobs, sign, bootID, WithRetention(30*24*time.Hour))
+	sw := s.(Sweeper)
+	ctx := context.Background()
+	mbox := dir.mailboxID("a@fountbox.com")
+	mboxHex := hexStr(mbox)
+	now := time.Now()
+
+	// Three messages (sequences 1,2,3). Age the first two past the window.
+	ids := make([]string, 3)
+	for i := range ids {
+		id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+		if err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+		ids[i] = id
+	}
+	blobs.setMod("edge/mail/"+mboxHex+"/"+ids[0], now.Add(-40*24*time.Hour))
+	blobs.setMod("edge/mail/"+mboxHex+"/"+ids[1], now.Add(-31*24*time.Hour))
+	blobs.setMod("edge/mail/"+mboxHex+"/"+ids[2], now.Add(-1*24*time.Hour)) // fresh
+
+	n, err := sw.Sweep(ctx, now)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("swept %d, want 2", n)
+	}
+
+	// The two old messages are gone, the fresh one remains.
+	if _, ok := blobs.objs["edge/mail/"+mboxHex+"/"+ids[0]]; ok {
+		t.Fatal("expired message 0 still present")
+	}
+	if _, ok := blobs.objs["edge/mail/"+mboxHex+"/"+ids[2]]; !ok {
+		t.Fatal("in-window message 2 was deleted")
+	}
+
+	// A verifiable expiry record exists for each expired sequence (1 and 2).
+	for seq := uint64(1); seq <= 2; seq++ {
+		body, ok := blobs.objs[expiryKey(mboxHex, seq)]
+		if !ok {
+			t.Fatalf("no expiry record for sequence %d", seq)
+		}
+		rec, err := ParseExpiryRecord(body, signPub)
+		if err != nil {
+			t.Fatalf("expiry record %d: %v", seq, err)
+		}
+		if rec.Sequence != seq || rec.MailboxID != mboxHex || rec.BootID != hexStr(bootID) {
+			t.Fatalf("expiry record = %+v", rec)
+		}
+		if rec.ExpiredAt != now.UTC().Unix() {
+			t.Fatalf("expiry record %d expired_at = %d, want %d", seq, rec.ExpiredAt, now.UTC().Unix())
+		}
+	}
+	// No expiry record for the message that wasn't expired.
+	if _, ok := blobs.objs[expiryKey(mboxHex, 3)]; ok {
+		t.Fatal("wrote an expiry record for an in-window message")
+	}
+
+	// A tampered expiry record must fail to verify.
+	body := blobs.objs[expiryKey(mboxHex, 1)]
+	body[0] ^= 0xff
+	if _, err := ParseExpiryRecord(body, signPub); err == nil {
+		t.Fatal("tampered expiry record verified")
+	}
+}
+
+// Sweep never deletes a message it can't date, and a zero/negative retention
+// disables it entirely.
+func TestSweepSkipsUndatableAndDisabled(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	ctx := context.Background()
+	now := time.Now()
+
+	// Undatable: object stored but no modified time -> never swept.
+	blobs := newMemBlobs()
+	s := New(dir, blobs, mustSign(t), make([]byte, lenBootID), WithRetention(time.Hour))
+	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body")); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.(Sweeper).Sweep(ctx, now); err != nil || n != 0 {
+		t.Fatalf("sweep of undatable objects: n=%d err=%v, want 0/nil", n, err)
+	}
+
+	// Disabled: even a provably-old object is left alone.
+	blobs2 := newMemBlobs()
+	s2 := New(dir, blobs2, mustSign(t), make([]byte, lenBootID), WithRetention(0))
+	id, err := s2.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs2.setMod("edge/mail/"+hexStr(dir.mailboxID("a@fountbox.com"))+"/"+id, now.Add(-365*24*time.Hour))
+	if n, err := s2.(Sweeper).Sweep(ctx, now); err != nil || n != 0 {
+		t.Fatalf("disabled sweep: n=%d err=%v, want 0/nil", n, err)
+	}
+	if len(blobs2.objs) != 1 {
+		t.Fatalf("disabled sweep deleted objects: %d remain, want 1", len(blobs2.objs))
 	}
 }
 
