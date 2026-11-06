@@ -44,7 +44,7 @@ const (
 type signer string
 
 const (
-	sigNone        signer = "none"           // GET /boots/:id
+	sigNone        signer = "none" // GET /boots/:id
 	sigEntitlement signer = "entitlement"
 	sigNewKeys     signer = "new-keys+entitlement"
 	sigMailbox     signer = "mailbox"
@@ -70,19 +70,19 @@ type route struct {
 // m2routes is the authoritative Device API surface. Keep it in sync with design
 // §8's table; adding a row here is how a call's signer requirement is locked.
 var routes = map[string]route{
-	"POST /mailbox":       {sigNewKeys, "M2", "Creates a mailbox and handle"},
-	"GET /handle/{name}":  {sigEntitlement, "M2", "Checks handle availability (rate limited)"},
-	"POST /address":       {sigMailbox, "M2", "Adds an address + public key signed by the mailbox key"},
-	"PUT /routing":        {sigOwnerChange, "M2", "Writes the versioned owner list"},
-	"GET /mail":           {sigAddress, "M2", "Lists waiting messages"},
-	"GET /mail/{id}":      {sigAddress, "M2", "Returns a message and its signature"},
-	"DELETE /mail/{id}":   {sigAddress, "M2", "Confirms receipt and deletes"},
-	"GET /boots/{id}":     {sigNone, "M2", "Returns a boot's attestation"},
-	"POST /recover":       {sigPasskey, "M2", "Accepts a new mailbox key after a lost device (§5)"},
-	"POST /entitlement":   {sigAddress, "M2", "Renews the mailbox's entitlement"},
-	"POST /pause":         {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
-	"POST /send":          {sigAddress, "M3", "Sends to owners"},
-	"POST /reset":         {sigStripe, "M3", "Starts a new mailbox on the same handle"},
+	"POST /mailbox":      {sigNewKeys, "M2", "Creates a mailbox and handle"},
+	"GET /handle/{name}": {sigEntitlement, "M2", "Checks handle availability (rate limited)"},
+	"POST /address":      {sigMailbox, "M2", "Adds an address + public key signed by the mailbox key"},
+	"PUT /routing":       {sigOwnerChange, "M2", "Writes the versioned owner list"},
+	"GET /mail":          {sigAddress, "M2", "Lists waiting messages"},
+	"GET /mail/{id}":     {sigAddress, "M2", "Returns a message and its signature"},
+	"DELETE /mail/{id}":  {sigAddress, "M2", "Confirms receipt and deletes"},
+	"GET /boots/{id}":    {sigNone, "M2", "Returns a boot's attestation"},
+	"POST /recover":      {sigPasskey, "M2", "Accepts a new mailbox key after a lost device (§5)"},
+	"POST /entitlement":  {sigAddress, "M2", "Renews the mailbox's entitlement"},
+	"POST /pause":        {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
+	"POST /send":         {sigAddress, "M3", "Sends to owners"},
+	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
 }
 
 type API struct {
@@ -99,10 +99,28 @@ func New(st store.Store, resolver KeyResolver) *API {
 		resolver: resolver,
 		nonces:   newNonceCache(),
 	}
+	mail, _ := st.(store.MailReader) // nil in dev (discard store) -> routes stay 501
 	for pattern, r := range routes {
-		a.mux.Handle(pattern, a.guard(r, a.stub(pattern, r)))
+		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail)))
 	}
 	return a
+}
+
+// handler returns the real handler for a route, or the 501 stub for routes
+// whose subsystem isn't live yet. The mail read routes (GET/DELETE /mail) are
+// live once the store is a MailReader.
+func (a *API) handler(pattern string, rt route, mail store.MailReader) http.Handler {
+	if mail != nil {
+		switch pattern {
+		case "GET /mail":
+			return a.listMail(mail)
+		case "GET /mail/{id}":
+			return a.getMail(mail)
+		case "DELETE /mail/{id}":
+			return a.deleteMail(mail)
+		}
+	}
+	return a.stub(pattern, rt)
 }
 
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }

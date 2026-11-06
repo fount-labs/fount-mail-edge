@@ -40,15 +40,24 @@ type Storer interface {
 	Put(ctx context.Context, recipient, sender string, raw []byte) (string, error)
 }
 
+// RecipientChecker reports whether a mailbox actually claims an address. When
+// an Options.Recipients is set, RCPT rejects anything it doesn't know, so there
+// is no catch-all (§6). A nil Recipients falls back to the domain suffix check
+// alone, which is only right for dev/smoke where no routing data exists.
+type RecipientChecker interface {
+	Known(ctx context.Context, recipient string) (bool, error)
+}
+
 type Options struct {
-	Addr      string
-	Hostname  string // HELO name, e.g. mx.fountbox.com
-	Domain    string // accepted recipient domain, e.g. @fountbox.com
-	Certs     CertSource
-	Store     Storer
-	MaxBytes  int64
-	MaxConns  int
-	Deadline  time.Duration
+	Addr       string
+	Hostname   string // HELO name, e.g. mx.fountbox.com
+	Domain     string // accepted recipient domain, e.g. @fountbox.com
+	Certs      CertSource
+	Store      Storer
+	Recipients RecipientChecker // optional; nil = domain suffix check only
+	MaxBytes   int64
+	MaxConns   int
+	Deadline   time.Duration
 }
 
 type Server struct {
@@ -122,13 +131,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 type session struct {
-	s        *Server
-	conn     net.Conn
-	r        *bufio.Reader
-	tls      bool
-	srcIP    string
+	s         *Server
+	conn      net.Conn
+	r         *bufio.Reader
+	tls       bool
+	srcIP     string
 	recipient string
-	sender   string
+	sender    string
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -209,6 +218,17 @@ func (se *session) command(ctx context.Context, verb, rest string) {
 		if !strings.HasSuffix(strings.ToLower(addr), strings.ToLower(se.s.opt.Domain)) {
 			se.reply("550 5.1.1 no such user")
 			return
+		}
+		if rc := se.s.opt.Recipients; rc != nil {
+			known, err := rc.Known(ctx, addr)
+			if err != nil {
+				se.reply("451 4.3.0 try again later")
+				return
+			}
+			if !known {
+				se.reply("550 5.1.1 no such user")
+				return
+			}
 		}
 		se.recipient = addr
 		se.reply("250 ok")

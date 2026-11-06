@@ -47,18 +47,18 @@ type Secrets struct {
 }
 
 type Config struct {
-	Hostname        string // public name the edge serves ACME for, e.g. mail-edge.fount.sh
-	MailDomain      string // recipient domain, e.g. @fountbox.com
-	AttestedKeyDir  string // where the Tinfoil runtime writes per-boot attested keys
-	SMTPAddr        string
-	DeviceAPIAddr   string
-	HealthAddr      string
+	Hostname          string // public name the edge serves ACME for, e.g. mail-edge.fount.sh
+	MailDomain        string // recipient domain, e.g. @fountbox.com
+	AttestedKeyDir    string // where the Tinfoil runtime writes per-boot attested keys
+	SMTPAddr          string
+	DeviceAPIAddr     string
+	HealthAddr        string
 	ACMEChallengeAddr string
 	ACMEDirectory     string // Let's Encrypt directory URL (staging by default)
 	CertCacheDir      string // where issued certs are cached; "" disables (prod uses S3)
-	MaxMessageBytes int64
-	Dev             bool
-	Secrets         Secrets
+	MaxMessageBytes   int64
+	Dev               bool
+	Secrets           Secrets
 }
 
 // Load reads the environment and returns a validated Config, or a fatal error if
