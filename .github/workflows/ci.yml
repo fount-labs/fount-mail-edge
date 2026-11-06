@@ -19,7 +19,44 @@ jobs:
           cache: false
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./...
+      # -race is the Tier-1 concurrency gate: the SMTP listener and the nonce
+      # replay cache are the live-concurrent paths, and a data race there is a
+      # containment bug, not a flake.
+      - run: go test -race ./...
+      # staticcheck as the Tier-1 static gate. Run via go run with a pinned
+      # version so the module stays dependency-free (nothing lands in go.mod).
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+  # Tier-1 fuzz gate (design: audit-TCB). Each target runs a short smoke so the
+  # committed seed corpus plus a brief exploration catch a regression in a
+  # live-reachable parser. The long soak is run out of band, not on every PR.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Fuzz runtime-TCB parsers
+        run: |
+          set -euo pipefail
+          targets="
+          internal/smtp:FuzzExtractAddr
+          internal/smtp:FuzzSplitVerb
+          internal/smtp:FuzzReadLine
+          internal/smtp:FuzzReadData
+          internal/entitlement:FuzzVerify
+          internal/store:FuzzParse
+          internal/routing:FuzzDecrypt
+          internal/webauthn:FuzzVerify
+          "
+          for spec in $targets; do
+            pkg="${spec%%:*}"; name="${spec##*:}"
+            echo "::group::$pkg $name"
+            go test "./$pkg/" -run='^$' -fuzz="^${name}\$" -fuzztime=20s
+            echo "::endgroup::"
+          done
 
   # Reproducibility gate (design §17): build the image on two independent
   # runners and fail if the resulting digests differ. This is the cheap

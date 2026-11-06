@@ -20,7 +20,6 @@
 package webauthn
 
 import (
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
@@ -28,7 +27,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 )
 
 // flagUserPresent and flagUserVerified are the authenticatorData flag bits we
@@ -120,21 +118,18 @@ func Verify(credPubSEC1 []byte, a Assertion, expectedChallenge []byte, rpID, exp
 }
 
 // parseP256 turns a 65-byte SEC1 uncompressed point into an ECDSA public key,
-// validating that it is actually on the curve. The on-curve check goes through
-// crypto/ecdh (which rejects malformed or off-curve points) so we don't rely on
-// the deprecated elliptic.Unmarshal path.
+// validating that it is actually on the curve. ParseUncompressedPublicKey does
+// both the length/format and the on-curve check and returns a key without the
+// deprecated raw X/Y field construction.
 func parseP256(sec1 []byte) (*ecdsa.PublicKey, error) {
 	if len(sec1) != p256PointLen || sec1[0] != 0x04 {
 		return nil, ErrBadKey
 	}
-	if _, err := ecdh.P256().NewPublicKey(sec1); err != nil {
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), sec1)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadKey, err)
 	}
-	return &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(sec1[1:33]),
-		Y:     new(big.Int).SetBytes(sec1[33:65]),
-	}, nil
+	return pub, nil
 }
 
 // ValidCredentialKey reports whether b is a well-formed ES256 credential public

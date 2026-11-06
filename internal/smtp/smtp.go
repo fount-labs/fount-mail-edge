@@ -115,7 +115,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 				return nil
 			}
 			var ne net.Error
-			if errors.As(err, &ne) && ne.Temporary() { //nolint:staticcheck // transient accept errors
+			//lint:ignore SA1019 Temporary() is deprecated but is still the only
+			// portable signal for a transient Accept error; a brief retry here is
+			// intentional and cannot be expressed otherwise.
+			if errors.As(err, &ne) && ne.Temporary() {
 				continue
 			}
 			return err
