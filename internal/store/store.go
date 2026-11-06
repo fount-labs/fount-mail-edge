@@ -134,6 +134,15 @@ type BootStore interface {
 	ReadBoot(ctx context.Context, bootIDHex string) (Boot, error)
 }
 
+// Boot log layout (design §4). These keys live in the separate Object Lock bucket
+// when New gets WithLogBlobs. The edge can only write there, so GET /boots keeps
+// reading the copy under edge/boots.
+func bootLogKey(bootIDHex string) string { return "boots/" + bootIDHex }
+
+func keyLogKey(mailboxIDHex string, keyHash []byte) string {
+	return "mailboxes/" + mailboxIDHex + "/" + hex.EncodeToString(keyHash)
+}
+
 // KeyLog is the write-once mailbox-key log the broker audits (design §9): every
 // mailbox key a mailbox has ever been given is appended here and never changed,
 // so a key the host swapped in while a device was off is visible on the next
@@ -159,6 +168,7 @@ type Sweeper interface {
 type realStore struct {
 	dir        Directory
 	blobs      Blobs
+	logBlobs   Blobs // boot and key logs; see WithLogBlobs
 	sign       ed25519.PrivateKey
 	bootID     []byte
 	now        func() time.Time
@@ -177,11 +187,17 @@ func WithMaxMailboxBytes(n int64) Option { return func(s *realStore) { s.maxMail
 // (§6). A value <= 0 disables the sweep. Without it New uses DefaultRetention.
 func WithRetention(d time.Duration) Option { return func(s *realStore) { s.retention = d } }
 
+// WithLogBlobs sends the boot log and mailbox-key log to their own bucket (§4).
+// Object Lock needs versioning, which the mail bucket must not have. Without it
+// the logs go to the mail bucket, where the edge's credentials refuse these keys,
+// so a production edge missing this option fails closed.
+func WithLogBlobs(b Blobs) Option { return func(s *realStore) { s.logBlobs = b } }
+
 // New builds the real store. bootID is this boot's 16-byte identifier (it ends
 // up in every object so the broker can check the signature against the right
 // boot's attestation, §9).
 func New(dir Directory, blobs Blobs, sign ed25519.PrivateKey, bootID []byte, opts ...Option) Store {
-	s := &realStore{dir: dir, blobs: blobs, sign: sign, bootID: bootID, now: time.Now, maxMailbox: DefaultMaxMailboxBytes, retention: DefaultRetention}
+	s := &realStore{dir: dir, blobs: blobs, logBlobs: blobs, sign: sign, bootID: bootID, now: time.Now, maxMailbox: DefaultMaxMailboxBytes, retention: DefaultRetention}
 	for _, o := range opts {
 		o(s)
 	}
@@ -328,7 +344,9 @@ func validBootID(bootIDHex string) bool {
 	return err == nil
 }
 
-// WriteBoot publishes this boot's attestation record (§9). It is idempotent: the
+// WriteBoot publishes this boot's attestation record to the mail bucket, which
+// GET /boots reads, and to the boot log, which detects hidden boots (§16). It tries
+// both even if one fails. It is idempotent: the
 // same boot writes the same object, and a boot id never collides across boots.
 func (s *realStore) WriteBoot(ctx context.Context) error {
 	b := Boot{
@@ -340,7 +358,10 @@ func (s *realStore) WriteBoot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.blobs.Put(ctx, bootObjectKey(b.BootID), raw)
+	return errors.Join(
+		s.blobs.Put(ctx, bootObjectKey(b.BootID), raw),
+		s.logBlobs.Put(ctx, bootLogKey(b.BootID), raw),
+	)
 }
 
 func (s *realStore) ReadBoot(ctx context.Context, bootIDHex string) (Boot, error) {
@@ -358,20 +379,19 @@ func (s *realStore) ReadBoot(ctx context.Context, bootIDHex string) (Boot, error
 	return b, nil
 }
 
-func keyLogPrefix(mailboxIDHex string) string { return "edge/keylog/" + mailboxIDHex + "/" }
-
-// AppendMailboxKeyHash records one mailbox-key hash in the write-once log. Each
-// append is a distinct object (timestamp plus random suffix in the key) so an
-// entry is never overwritten; the broker lists the prefix to read a mailbox's
-// whole key history. The caller passes a validated hex mailbox id, so the object
-// key can't widen beyond the keylog prefix.
+// AppendMailboxKeyHash records one mailbox-key hash in the write-once log. Each key
+// is its own object under the mailbox, and Object Lock keeps every version, so an
+// entry can't be replaced. The caller passes a validated hex mailbox id, so the
+// object key can't widen beyond the mailbox's prefix.
 func (s *realStore) AppendMailboxKeyHash(ctx context.Context, mailboxIDHex string, keyHash []byte, at int64) error {
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
+	raw, err := json.Marshal(struct {
+		KeyHash string `json:"key_hash"`
+		At      int64  `json:"at"`
+	}{hex.EncodeToString(keyHash), at})
+	if err != nil {
 		return err
 	}
-	key := fmt.Sprintf("%s%d-%s", keyLogPrefix(mailboxIDHex), at, hex.EncodeToString(suffix))
-	return s.blobs.Put(ctx, key, keyHash)
+	return s.logBlobs.Put(ctx, keyLogKey(mailboxIDHex, keyHash), raw)
 }
 
 // --- Retention sweep (design §6) -------------------------------------------

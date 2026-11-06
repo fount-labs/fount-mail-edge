@@ -32,6 +32,8 @@ networks:
       - acme-v02.api.letsencrypt.org        # ACME production
       - acme-staging-v02.api.letsencrypt.org
       - fount-mail-063207099341.s3.us-east-1.amazonaws.com # mail bucket
+      - fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com # Object Lock boot and key logs
+      - fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com
 
 containers:
   - name: mail-edge
@@ -46,6 +48,8 @@ containers:
       - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
       - MAIL_DOMAIN: "@fountbox.com"
       - S3_BUCKET: "fount-mail-063207099341"
+      - S3_BOOT_LOG_BUCKET: "fount-mail-bootlog-063207099341"
+      - S3_BACKUP_BUCKET: "fount-mail-routing-backup-063207099341"
       - S3_REGION: "us-east-1"
       - GATEWAY_CLIENT_PINS: "PLACEHOLDER" # one sha256 per gateway; the edge refuses to boot on this value
     # Secrets delivered by the keyserver after attestation, injected as env vars.

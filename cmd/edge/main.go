@@ -187,20 +187,29 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
 		return store.NewDiscard(), nil, nil
 	}
-	blobs, err := newBlobs(cfg)
+	blobs, err := newBlobs(cfg, cfg.S3EndpointURL())
 	if err != nil {
 		return nil, nil, err
 	}
-	rt, err := routing.New(context.Background(), blobs, cfg.Secrets.RoutingDataKey, cfg.Secrets.AddressMACKey)
+	logBlobs, err := newBlobs(cfg, cfg.BucketURL(cfg.S3BootLogBucket))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("boot log: %w", err)
+	}
+	backupBlobs, err := newBlobs(cfg, cfg.BucketURL(cfg.S3BackupBucket))
+	if err != nil {
+		return nil, nil, fmt.Errorf("routing backup: %w", err)
 	}
 	bootID := make([]byte, 16)
 	if _, err := rand.Read(bootID); err != nil {
 		return nil, nil, err
 	}
+	rt, err := routing.New(context.Background(), blobs, cfg.Secrets.RoutingDataKey, cfg.Secrets.AddressMACKey,
+		routing.WithBackup(backupBlobs, k.Sign, bootID))
+	if err != nil {
+		return nil, nil, err
+	}
 	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", cfg.S3EndpointURL(), bootID)
-	st := store.New(rt, blobs, k.Sign, bootID)
+	st := store.New(rt, blobs, k.Sign, bootID, store.WithLogBlobs(logBlobs))
 	// Publish this boot's attestation (§9) so the broker can check stored
 	// messages' signatures against it, even after this enclave is gone. A failure
 	// here is loud but not fatal: the edge can still serve mail, and the broker
@@ -213,12 +222,11 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 	return st, rt, nil
 }
 
-// newBlobs builds the S3 client both the durable store and the certificate
-// cache use. It fails if S3 isn't configured (a production edge must have it).
-func newBlobs(cfg *config.Config) (*s3.Client, error) {
-	endpoint := cfg.S3EndpointURL()
+// newBlobs builds an S3 client for one bucket. It fails if the endpoint is empty,
+// because a production edge must have all of its buckets.
+func newBlobs(cfg *config.Config, endpoint string) (*s3.Client, error) {
 	if endpoint == "" {
-		return nil, fmt.Errorf("S3 endpoint unset: set S3_ENDPOINT or S3_BUCKET+S3_REGION")
+		return nil, fmt.Errorf("S3 bucket unset: set S3_ENDPOINT or the bucket's env var + S3_REGION")
 	}
 	return s3.New(s3.Config{
 		Endpoint:        endpoint,
@@ -239,7 +247,7 @@ func certCache(cfg *config.Config, k *keys.Keys) certs.Cache {
 	if cfg.Dev {
 		return nil
 	}
-	blobs, err := newBlobs(cfg)
+	blobs, err := newBlobs(cfg, cfg.S3EndpointURL())
 	if err != nil {
 		log.Printf("edge: certificate cache disabled (%v); a crash loop may re-run ACME", err)
 		return nil

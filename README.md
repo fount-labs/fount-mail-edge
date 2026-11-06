@@ -58,8 +58,7 @@ Clearly-marked seams, not yet built:
   + mutual TLS on the tunnel + the live load test** (the infra half of step 3).
 - **HPKE-to-address + S3 storage** and the Device API handlers / key resolver
   (M2 step 4).
-- **Pinned base-image digests** in the `Dockerfile` (`PLACEHOLDER_*`), the
-  keyserver host, and the S3 egress entry — all marked and listed in `docs/DEV.md`.
+- **The keyserver host and gateway pins** — marked and listed in `docs/DEV.md`.
 
 ## Develop
 

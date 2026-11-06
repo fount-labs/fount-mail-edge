@@ -2,6 +2,8 @@ package s3
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +50,12 @@ func (f *fakeBucket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(b)
 	case http.MethodPut:
 		b, _ := io.ReadAll(r.Body)
+		// S3 rejects uploads to an Object Lock bucket without this, and verifies it.
+		sum := sha256.Sum256(b)
+		if r.Header.Get("X-Amz-Checksum-Sha256") != base64.StdEncoding.EncodeToString(sum[:]) {
+			http.Error(w, "bad checksum", http.StatusBadRequest)
+			return
+		}
 		f.objs[key] = b
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:

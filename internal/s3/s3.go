@@ -14,6 +14,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -192,6 +194,11 @@ func (c *Client) do(ctx context.Context, method, key string, query url.Values, b
 		payloadHash = hexSHA256(body)
 	}
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	if method == http.MethodPut {
+		// S3 refuses uploads to an Object Lock bucket without a checksum header.
+		sum := sha256.Sum256(body)
+		req.Header.Set("X-Amz-Checksum-Sha256", base64.StdEncoding.EncodeToString(sum[:]))
+	}
 	req.ContentLength = int64(len(body))
 	sign(req, payloadHash, c.region, service, c.creds, c.now())
 	return c.httpc.Do(req)

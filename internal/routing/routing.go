@@ -98,16 +98,20 @@ type Store struct {
 	blobs  store.Blobs
 	macKey []byte
 	aead   cipher.AEAD
+	backup *backup
 
 	mu   sync.Mutex
 	data *Data
 }
 
+// Option tunes a Store built by New.
+type Option func(*Store)
+
 // New loads (or initializes) the routing object. A missing object is not an
 // error — a fresh edge has no mailboxes yet — but a present object that won't
 // decrypt or parse is fatal, because serving mail against corrupt routing data
 // would seal to the wrong keys.
-func New(ctx context.Context, blobs store.Blobs, routingDataKey, addressMACKey []byte) (*Store, error) {
+func New(ctx context.Context, blobs store.Blobs, routingDataKey, addressMACKey []byte, opts ...Option) (*Store, error) {
 	if len(addressMACKey) == 0 {
 		return nil, errors.New("routing: empty ADDRESS_MAC_KEY")
 	}
@@ -116,6 +120,9 @@ func New(ctx context.Context, blobs store.Blobs, routingDataKey, addressMACKey [
 		return nil, err
 	}
 	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead}
+	for _, o := range opts {
+		o(s)
+	}
 	if err := s.load(ctx); err != nil {
 		return nil, err
 	}
@@ -195,7 +202,11 @@ func (s *Store) persist(ctx context.Context) error {
 	out = append(out, magic...)
 	out = append(out, nonce...)
 	out = s.aead.Seal(out, nonce, pt, nil)
-	return s.blobs.Put(ctx, objectKey, out)
+	if err := s.blobs.Put(ctx, objectKey, out); err != nil {
+		return err
+	}
+	s.backup.write(ctx, out)
+	return nil
 }
 
 // MailboxID is the keyed hash of a recipient address — the mailbox id in M2

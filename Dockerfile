@@ -10,9 +10,9 @@
 # the digests deliberately (not :latest) and commit them; CI rebuilds on two
 # runners and fails if the resulting image digests differ.
 
-# syntax=docker/dockerfile:1.19@sha256:PLACEHOLDER_PIN_THE_FRONTEND_DIGEST
+# syntax=docker/dockerfile:1.19@sha256:b6afd42430b15f2d2a4c5a02b919e98a525b785b1aaff16747d2f623364e39b6
 
-FROM golang:1.27.3-alpine@sha256:PLACEHOLDER_PIN_THE_GOLANG_BASE_DIGEST AS build
+FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 WORKDIR /src
 # Stdlib-only: go.mod alone is the full dependency set (no go.sum).
 COPY go.mod ./

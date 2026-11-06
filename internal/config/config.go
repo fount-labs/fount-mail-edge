@@ -63,6 +63,8 @@ type Config struct {
 	MaxMessageBytes   int64
 	GatewayPins       []gatewaytls.Pin // gateway client keys for the tunnelled ports; measured with the config, so not a secret
 	S3Bucket          string           // mail bucket name
+	S3BootLogBucket   string           // Object Lock bucket for the boot and key logs
+	S3BackupBucket    string           // versioned bucket for routing backups
 	S3Region          string           // bucket region, e.g. us-east-1
 	S3Endpoint        string           // bucket root URL; derived from bucket+region if unset
 	RecoveryRPID      string           // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
@@ -71,17 +73,22 @@ type Config struct {
 	Secrets           Secrets
 }
 
-// S3EndpointURL is the bucket root the S3 client talks to. An explicit
+// S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
 // S3_ENDPOINT wins (for an S3-compatible host); otherwise it is AWS
 // virtual-hosted-style, which Tinfoil's exact-hostname egress allowlist needs.
 func (c *Config) S3EndpointURL() string {
 	if c.S3Endpoint != "" {
 		return c.S3Endpoint
 	}
-	if c.S3Bucket == "" || c.S3Region == "" {
+	return c.BucketURL(c.S3Bucket)
+}
+
+// BucketURL is a bucket's virtual-hosted root, or "" if it isn't configured.
+func (c *Config) BucketURL(bucket string) string {
+	if bucket == "" || c.S3Region == "" {
 		return ""
 	}
-	return "https://" + c.S3Bucket + ".s3." + c.S3Region + ".amazonaws.com"
+	return "https://" + bucket + ".s3." + c.S3Region + ".amazonaws.com"
 }
 
 // Load reads the environment and returns a validated Config, or a fatal error if
@@ -100,6 +107,8 @@ func Load() (*Config, error) {
 		CertCacheDir:      os.Getenv("CERT_CACHE_DIR"),
 		MaxMessageBytes:   defaultMaxMessageBytes,
 		S3Bucket:          os.Getenv("S3_BUCKET"),
+		S3BootLogBucket:   os.Getenv("S3_BOOT_LOG_BUCKET"),
+		S3BackupBucket:    os.Getenv("S3_BACKUP_BUCKET"),
 		S3Region:          os.Getenv("S3_REGION"),
 		S3Endpoint:        os.Getenv("S3_ENDPOINT"),
 		RecoveryRPID:      os.Getenv("RECOVERY_RP_ID"), // PLACEHOLDER: the Fount RP domain serving the passkey AASA; confirm before deploy

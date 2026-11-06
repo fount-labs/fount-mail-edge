@@ -9,6 +9,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -555,3 +557,76 @@ func keysOf(m map[string][]byte) []string {
 	}
 	return out
 }
+
+// The boot and key logs go to their own bucket, under the keys §4 lays out. GET
+// /boots still reads the mail bucket, because the edge can't read the log.
+func TestLogsUseTheirOwnBucket(t *testing.T) {
+	macKey := []byte("mac")
+	dir := newMemDir(macKey)
+	blobs, logs := newMemBlobs(), newMemBlobs()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootID := bytes.Repeat([]byte{9}, 16)
+	st := New(dir, blobs, priv, bootID, WithLogBlobs(logs))
+	ctx := context.Background()
+
+	if err := st.(BootStore).WriteBoot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := hex.EncodeToString(bootID)
+	if logs.objs["boots/"+id] == nil {
+		t.Fatal("boot not in the log bucket")
+	}
+	if blobs.objs["edge/boots/"+id] == nil {
+		t.Fatal("boot not in the mail bucket")
+	}
+	if _, err := st.(BootStore).ReadBoot(ctx, id); err != nil {
+		t.Fatalf("ReadBoot: %v", err)
+	}
+
+	mid, hash := "ab", bytes.Repeat([]byte{1}, 32)
+	if err := st.(KeyLog).AppendMailboxKeyHash(ctx, mid, hash, 42); err != nil {
+		t.Fatal(err)
+	}
+	raw := logs.objs["mailboxes/"+mid+"/"+hex.EncodeToString(hash)]
+	var entry struct {
+		KeyHash string `json:"key_hash"`
+		At      int64  `json:"at"`
+	}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		t.Fatalf("key log entry: %v", err)
+	}
+	if entry.KeyHash != hex.EncodeToString(hash) || entry.At != 42 {
+		t.Fatalf("entry = %+v", entry)
+	}
+	for k := range blobs.objs {
+		if strings.HasPrefix(k, "mailboxes/") {
+			t.Fatalf("key log leaked into the mail bucket: %s", k)
+		}
+	}
+}
+
+// A failed log write is returned, so a creation or recovery that must log first
+// fails closed, and the boot record is still tried in both places.
+func TestLogFailuresAreReported(t *testing.T) {
+	blobs := newMemBlobs()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bootID := make([]byte, 16)
+	st := New(newMemDir([]byte("mac")), blobs, priv, bootID, WithLogBlobs(failingLog{newMemBlobs()}))
+	ctx := context.Background()
+	if err := st.(KeyLog).AppendMailboxKeyHash(ctx, "ab", []byte{1}, 1); err == nil {
+		t.Fatal("key log failure swallowed")
+	}
+	if err := st.(BootStore).WriteBoot(ctx); err == nil {
+		t.Fatal("boot log failure swallowed")
+	}
+	if blobs.objs["edge/boots/"+hex.EncodeToString(bootID)] == nil {
+		t.Fatal("mail-bucket copy skipped after a log failure")
+	}
+}
+
+type failingLog struct{ *memBlobs }
+
+func (failingLog) Put(context.Context, string, []byte) error { return errors.New("log down") }
