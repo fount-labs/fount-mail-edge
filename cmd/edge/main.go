@@ -66,11 +66,13 @@ func run() error {
 		resolver    deviceapi.KeyResolver
 		recipients  smtp.RecipientChecker
 		provisioner deviceapi.Provisioner
+		mutator     deviceapi.Mutator
 	)
 	if rt != nil { // nil in dev (discard store, no routing)
 		resolver = deviceapi.NewKeyResolver(rt)
 		recipients = rt
 		provisioner = rt
+		mutator = rt
 	}
 	certMgr := certs.NewManager()
 
@@ -87,6 +89,7 @@ func run() error {
 		Resolver:    resolver,
 		Entitlement: cfg.Secrets.EntitlementVerifyKey,
 		Provisioner: provisioner,
+		Mutator:     mutator,
 		MailDomain:  cfg.MailDomain,
 	})
 	apiSrv := &http.Server{
@@ -178,7 +181,17 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 		return nil, nil, err
 	}
 	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", endpoint, bootID)
-	return store.New(rt, blobs, k.Sign, bootID), rt, nil
+	st := store.New(rt, blobs, k.Sign, bootID)
+	// Publish this boot's attestation (§9) so the broker can check stored
+	// messages' signatures against it, even after this enclave is gone. A failure
+	// here is loud but not fatal: the edge can still serve mail, and the broker
+	// alerts on a missing attestation.
+	if bs, ok := st.(store.BootStore); ok {
+		if err := bs.WriteBoot(context.Background()); err != nil {
+			log.Printf("edge: WARNING could not publish boot attestation (boot-id=%x): %v", bootID, err)
+		}
+	}
+	return st, rt, nil
 }
 
 // startCertLoop builds the ACME issuer and drives certificate acquisition. If the

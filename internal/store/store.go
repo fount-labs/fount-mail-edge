@@ -15,6 +15,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -83,6 +84,26 @@ type MailReader interface {
 	List(ctx context.Context, mailboxID []byte) ([]Stored, error)
 	Get(ctx context.Context, mailboxID []byte, edgeIDHex string) ([]byte, error)
 	Delete(ctx context.Context, mailboxID []byte, edgeIDHex string) error
+}
+
+// Boot is a boot's published attestation record (design §4 edge/boots/<boot id>,
+// §9). It carries the ed25519 public key this boot signed its messages with, so
+// the broker can check a stored message's signature against the right boot even
+// after that enclave is gone. In M2 it is the signing key and boot metadata; the
+// full Tinfoil attestation document that vouches for the key is a later seam.
+type Boot struct {
+	BootID     string `json:"boot_id"`     // hex, 16 bytes
+	SigningKey []byte `json:"signing_key"` // ed25519 public key (the per-boot mail-sign key)
+	StartedAt  int64  `json:"started_at"`  // unix seconds
+}
+
+// BootStore writes this boot's attestation at startup and reads any boot's by id
+// (design §8 GET /boots/:id). The object outlives the enclave, so a message
+// signed by a retired boot stays verifiable. realStore implements it over S3;
+// the discard store does not, so GET /boots stays 501 in dev.
+type BootStore interface {
+	WriteBoot(ctx context.Context) error
+	ReadBoot(ctx context.Context, bootIDHex string) (Boot, error)
 }
 
 type realStore struct {
@@ -181,6 +202,48 @@ func (s *realStore) Delete(ctx context.Context, mailboxID []byte, edgeIDHex stri
 		return ErrNotFound
 	}
 	return s.blobs.Delete(ctx, mailObjectKey(mailboxID, edgeIDHex))
+}
+
+func bootObjectKey(bootIDHex string) string { return "edge/boots/" + bootIDHex }
+
+// validBootID rejects anything that isn't a 32-hex-char boot id, so a crafted id
+// can't widen the key beyond the boots prefix.
+func validBootID(bootIDHex string) bool {
+	if len(bootIDHex) != lenBootID*2 {
+		return false
+	}
+	_, err := hex.DecodeString(bootIDHex)
+	return err == nil
+}
+
+// WriteBoot publishes this boot's attestation record (§9). It is idempotent: the
+// same boot writes the same object, and a boot id never collides across boots.
+func (s *realStore) WriteBoot(ctx context.Context) error {
+	b := Boot{
+		BootID:     hex.EncodeToString(s.bootID),
+		SigningKey: s.sign.Public().(ed25519.PublicKey),
+		StartedAt:  s.now().UTC().Unix(),
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	return s.blobs.Put(ctx, bootObjectKey(b.BootID), raw)
+}
+
+func (s *realStore) ReadBoot(ctx context.Context, bootIDHex string) (Boot, error) {
+	if !validBootID(bootIDHex) {
+		return Boot{}, ErrNotFound
+	}
+	raw, err := s.blobs.Get(ctx, bootObjectKey(bootIDHex))
+	if err != nil {
+		return Boot{}, err // ErrNotFound or transient
+	}
+	var b Boot
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return Boot{}, fmt.Errorf("store: parse boot object: %w", err)
+	}
+	return b, nil
 }
 
 type discard struct{}

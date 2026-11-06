@@ -84,6 +84,9 @@ type Mailbox struct {
 	LicenseHash    []byte `json:"license_hash"`     // keyed hash of the license (§4)
 	EntitlementExp int64  `json:"entitlement_exp"`  // unix expiry of the last presented entitlement (§4)
 	Sequence       uint64 `json:"sequence"`         // last per-mailbox sequence handed out (§9)
+
+	OwnerHashes    [][]byte `json:"owner_hashes,omitempty"`    // keyed hashes of the owners (§4; encrypted owner addresses are M3)
+	RoutingVersion uint64   `json:"routing_version,omitempty"` // device-held owner-list version; monotonic, the §4 rollback defense
 }
 
 // Store is the live routing data, loaded once at construction and persisted back
@@ -195,9 +198,14 @@ func (s *Store) persist(ctx context.Context) error {
 
 // MailboxID is the keyed hash of a recipient address — the mailbox id in M2
 // (§4). Exported so the write-path handlers and tests compute the same id.
-func (s *Store) MailboxID(recipient string) []byte {
+func (s *Store) MailboxID(recipient string) []byte { return s.keyedHash(recipient) }
+
+// keyedHash is the address MAC (§4): HMAC(ADDRESS_MAC_KEY, lowercase value). It
+// backs both the mailbox id and the owner hashes, so the same address maps to
+// the same value wherever it is referenced.
+func (s *Store) keyedHash(v string) []byte {
 	m := hmac.New(sha256.New, s.macKey)
-	m.Write([]byte(strings.ToLower(strings.TrimSpace(recipient))))
+	m.Write([]byte(strings.ToLower(strings.TrimSpace(v))))
 	return m.Sum(nil)
 }
 
@@ -206,6 +214,39 @@ func (s *Store) lookup(mailboxIDHex string) (*Mailbox, bool) {
 	defer s.mu.Unlock()
 	m, ok := s.data.Mailboxes[mailboxIDHex]
 	return m, ok
+}
+
+// Snapshot returns a copy of a mailbox's record for read-only inspection (the
+// entitlement expiry the RCPT check will read, the owner hashes an owner-reply
+// check will match against). Slice fields are copied so a caller can't mutate
+// live routing data. Reports false if no mailbox has that id.
+func (s *Store) Snapshot(mailboxID []byte) (Mailbox, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	if !ok {
+		return Mailbox{}, false
+	}
+	return m.clone(), true
+}
+
+func (m *Mailbox) clone() Mailbox {
+	c := *m
+	for dst, src := range map[*[]byte][]byte{
+		&c.MailboxID: m.MailboxID, &c.DecryptionKey: m.DecryptionKey,
+		&c.SigningKey: m.SigningKey, &c.MailboxKey: m.MailboxKey,
+		&c.OwnerChangeKey: m.OwnerChangeKey, &c.PasskeyKey: m.PasskeyKey,
+		&c.LicenseHash: m.LicenseHash,
+	} {
+		*dst = append([]byte(nil), src...)
+	}
+	if m.OwnerHashes != nil {
+		c.OwnerHashes = make([][]byte, len(m.OwnerHashes))
+		for i, h := range m.OwnerHashes {
+			c.OwnerHashes[i] = append([]byte(nil), h...)
+		}
+	}
+	return c
 }
 
 // --- store.Directory -------------------------------------------------------
@@ -317,12 +358,20 @@ func (s *Store) put(ctx context.Context, m *Mailbox) error {
 	return nil
 }
 
-// ErrHandleTaken and ErrLicenseTaken are the two creation conflicts (§4: a
-// released handle is never reissued; one mailbox per license). The Device API
-// maps both to 409.
+// The write-path conflicts the Device API distinguishes. ErrHandleTaken and
+// ErrLicenseTaken are the two creation conflicts (§4: a released handle is never
+// reissued; one mailbox per license) and map to 409. ErrNoMailbox means the
+// addressed mailbox does not exist (404). ErrStaleVersion means an owner-list
+// write did not advance the version (409; a rolled-back object is corrected by
+// re-asserting the current version, never an older one). ErrLicenseMismatch
+// means a renewal's entitlement is for a different license than the one bound at
+// creation (409), so a renewal can't move a mailbox between licenses.
 var (
-	ErrHandleTaken  = errors.New("routing: handle already registered")
-	ErrLicenseTaken = errors.New("routing: license already has a mailbox")
+	ErrHandleTaken     = errors.New("routing: handle already registered")
+	ErrLicenseTaken    = errors.New("routing: license already has a mailbox")
+	ErrNoMailbox       = errors.New("routing: no such mailbox")
+	ErrStaleVersion    = errors.New("routing: routing version did not advance")
+	ErrLicenseMismatch = errors.New("routing: entitlement license does not match mailbox")
 )
 
 // NewMailbox is a mailbox to create: its handle address, the keyed license hash
@@ -375,4 +424,103 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 		return nil, err
 	}
 	return id, nil
+}
+
+// NewAddress is an additional worker address to register under an existing
+// mailbox (design §8 POST /address). In the M2 identity model each address is
+// its own routing record, but a worker added this way belongs to the same
+// licensee: it reuses the parent's mailbox key (§5 "one mailbox key per mailbox,
+// signs each address's public key"), license hash, and entitlement expiry, and
+// brings its own per-address decryption, signing, owner-change, and passkey
+// keys. Authorization is the parent mailbox key's signature over the request and
+// the key chain, checked by the handler before calling this.
+type NewAddress struct {
+	ParentMailboxID []byte
+	Address         string
+	DecryptionKey   []byte
+	SigningKey      []byte
+	OwnerChangeKey  []byte
+	PasskeyKey      []byte
+}
+
+// AddAddress registers a worker address under an existing mailbox, inheriting
+// its license (so it does not count as a second mailbox for that license) and
+// returning the new address's mailbox id. It refuses an address that is already
+// registered (§4: a released handle is never reissued).
+func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, ok := s.data.Mailboxes[hex.EncodeToString(p.ParentMailboxID)]
+	if !ok {
+		return nil, ErrNoMailbox
+	}
+	id := s.keyedHash(p.Address)
+	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
+		return nil, ErrHandleTaken
+	}
+	if err := s.put(ctx, &Mailbox{
+		MailboxID:      id,
+		DecryptionKey:  p.DecryptionKey,
+		SigningKey:     p.SigningKey,
+		MailboxKey:     parent.MailboxKey,
+		OwnerChangeKey: p.OwnerChangeKey,
+		PasskeyKey:     p.PasskeyKey,
+		LicenseHash:    parent.LicenseHash,
+		EntitlementExp: parent.EntitlementExp,
+		Sequence:       0,
+	}); err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
+// SetOwners writes the versioned owner list (design §8 PUT /routing). Owners are
+// stored only as keyed hashes (§4; the encrypted owner addresses are M3). The
+// version must not go backwards: the device re-asserts the current version on
+// each sync, which overwrites a rolled-back object, and only a strictly greater
+// version changes the list. A version below the stored one is ErrStaleVersion.
+func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	if !ok {
+		return ErrNoMailbox
+	}
+	if version < m.RoutingVersion {
+		return ErrStaleVersion
+	}
+	hashes := make([][]byte, 0, len(owners))
+	for _, o := range owners {
+		hashes = append(hashes, s.keyedHash(o))
+	}
+	prevHashes, prevVer := m.OwnerHashes, m.RoutingVersion
+	m.OwnerHashes, m.RoutingVersion = hashes, version
+	if err := s.persist(ctx); err != nil {
+		m.OwnerHashes, m.RoutingVersion = prevHashes, prevVer
+		return err
+	}
+	return nil
+}
+
+// RenewEntitlement updates the mailbox's stored entitlement expiry (design §8
+// POST /entitlement, §4 "renews it like a license check"). The renewal's license
+// hash must match the one bound at creation, so a renewal can't move a mailbox
+// to a different license; a mismatch is ErrLicenseMismatch.
+func (s *Store) RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	if !ok {
+		return ErrNoMailbox
+	}
+	if len(m.LicenseHash) > 0 && !hmac.Equal(m.LicenseHash, licenseHash) {
+		return ErrLicenseMismatch
+	}
+	prev := m.EntitlementExp
+	m.EntitlementExp = exp
+	if err := s.persist(ctx); err != nil {
+		m.EntitlementExp = prev
+		return err
+	}
+	return nil
 }

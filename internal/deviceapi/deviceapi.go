@@ -132,6 +132,15 @@ type Provisioner interface {
 	Create(ctx context.Context, p routing.NewMailbox) (mailboxID []byte, err error)
 }
 
+// Mutator applies the per-mailbox routing writes behind the signed write routes
+// (design §8 POST /address, PUT /routing, POST /entitlement). routing.Store
+// implements it; nil leaves those routes as 501 stubs.
+type Mutator interface {
+	AddAddress(ctx context.Context, p routing.NewAddress) (mailboxID []byte, err error)
+	SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error
+	RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error
+}
+
 // Options configures the API. Store is required; the rest enable the routes that
 // depend on them (nil leaves those routes 501/401).
 type Options struct {
@@ -139,6 +148,7 @@ type Options struct {
 	Resolver    KeyResolver       // per-mailbox signer keys (address/mailbox/owner-change/passkey)
 	Entitlement ed25519.PublicKey // verifies device entitlements; nil disables entitlement routes
 	Provisioner Provisioner       // mailbox creation + handle checks
+	Mutator     Mutator           // per-mailbox routing writes (address/routing/entitlement)
 	MailDomain  string            // e.g. "@fountbox.com"; a handle's address is name+domain
 }
 
@@ -148,6 +158,7 @@ type API struct {
 	resolver    KeyResolver
 	entVerify   ed25519.PublicKey
 	provisioner Provisioner
+	mutator     Mutator
 	mailDomain  string
 	nonces      *nonceCache
 }
@@ -159,20 +170,23 @@ func New(o Options) *API {
 		resolver:    o.Resolver,
 		entVerify:   o.Entitlement,
 		provisioner: o.Provisioner,
+		mutator:     o.Mutator,
 		mailDomain:  o.MailDomain,
 		nonces:      newNonceCache(),
 	}
 	mail, _ := o.Store.(store.MailReader) // nil in dev (discard store) -> routes stay 501
+	boots, _ := o.Store.(store.BootStore) // same
 	for pattern, r := range routes {
-		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail)))
+		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail, boots)))
 	}
 	return a
 }
 
 // handler returns the real handler for a route, or the 501 stub for routes whose
-// subsystem isn't live yet. Read routes need a MailReader store; the creation
-// routes need a Provisioner.
-func (a *API) handler(pattern string, rt route, mail store.MailReader) http.Handler {
+// subsystem isn't live yet. Read routes need a MailReader store; creation needs a
+// Provisioner; the per-mailbox write routes need a Mutator; GET /boots needs a
+// BootStore.
+func (a *API) handler(pattern string, rt route, mail store.MailReader, boots store.BootStore) http.Handler {
 	switch {
 	case mail != nil && pattern == "GET /mail":
 		return a.listMail(mail)
@@ -184,6 +198,14 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader) http.Hand
 		return a.createMailbox()
 	case a.provisioner != nil && pattern == "GET /handle/{name}":
 		return a.checkHandle()
+	case a.mutator != nil && pattern == "POST /address":
+		return a.createAddress()
+	case a.mutator != nil && pattern == "PUT /routing":
+		return a.putRouting()
+	case a.mutator != nil && pattern == "POST /entitlement":
+		return a.renewEntitlement()
+	case boots != nil && pattern == "GET /boots/{id}":
+		return a.getBoot(boots)
 	}
 	return a.stub(pattern, rt)
 }

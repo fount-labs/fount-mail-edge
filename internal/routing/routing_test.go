@@ -349,6 +349,136 @@ func TestCreateEnforcesUniqueness(t *testing.T) {
 	}
 }
 
+func TestAddAddressInheritsLicenseAndMailboxKey(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	s := newStore(t, blobs, routingKey, macKey)
+	ctx := context.Background()
+	parent := newKeyset(t)
+
+	parentID, err := s.Create(ctx, routing.NewMailbox{
+		Address:        "worker@fountbox.com",
+		LicenseHash:    []byte("lic-1"),
+		DecryptionKey:  parent.dec.PublicKey().Bytes(),
+		SigningKey:     parent.sign.Public().(ed25519.PublicKey),
+		MailboxKey:     parent.mailbox.Public().(ed25519.PublicKey),
+		OwnerChangeKey: parent.ownerChange.Public().(ed25519.PublicKey),
+		PasskeyKey:     parent.passkey.Public().(ed25519.PublicKey),
+		EntitlementExp: 999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	child := newKeyset(t)
+	const childAddr = "sub.worker@fountbox.com"
+	childID, err := s.AddAddress(ctx, routing.NewAddress{
+		ParentMailboxID: parentID,
+		Address:         childAddr,
+		DecryptionKey:   child.dec.PublicKey().Bytes(),
+		SigningKey:      child.sign.Public().(ed25519.PublicKey),
+		OwnerChangeKey:  child.ownerChange.Public().(ed25519.PublicKey),
+		PasskeyKey:      child.passkey.Public().(ed25519.PublicKey),
+	})
+	if err != nil {
+		t.Fatalf("AddAddress: %v", err)
+	}
+	if !bytes.Equal(childID, s.MailboxID(childAddr)) {
+		t.Fatal("AddAddress returned the wrong id")
+	}
+
+	// The child resolves and signs with its own keys...
+	if pub, ok := s.AddressKey(hex.EncodeToString(childID)); !ok || !bytes.Equal(pub, child.sign.Public().(ed25519.PublicKey)) {
+		t.Fatal("child address key not its own")
+	}
+	// ...but shares the parent's mailbox key, license, and entitlement (§5).
+	if pub, ok := s.MailboxKey(hex.EncodeToString(childID)); !ok || !bytes.Equal(pub, parent.mailbox.Public().(ed25519.PublicKey)) {
+		t.Fatal("child must share the parent mailbox key")
+	}
+	snap, ok := s.Snapshot(childID)
+	if !ok || string(snap.LicenseHash) != "lic-1" || snap.EntitlementExp != 999 {
+		t.Fatalf("child did not inherit license/entitlement: %+v", snap)
+	}
+
+	// A second address, same handle -> taken; under an unknown parent -> no mailbox.
+	if _, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: parentID, Address: childAddr, DecryptionKey: child.dec.PublicKey().Bytes(), SigningKey: child.sign.Public().(ed25519.PublicKey), OwnerChangeKey: child.ownerChange.Public().(ed25519.PublicKey), PasskeyKey: child.passkey.Public().(ed25519.PublicKey)}); !errors.Is(err, routing.ErrHandleTaken) {
+		t.Fatalf("err = %v, want ErrHandleTaken", err)
+	}
+	if _, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: make([]byte, 32), Address: "x.worker@fountbox.com"}); !errors.Is(err, routing.ErrNoMailbox) {
+		t.Fatalf("err = %v, want ErrNoMailbox", err)
+	}
+}
+
+func TestSetOwnersMonotonicVersion(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	ks := newKeyset(t)
+	id := s.MailboxID("a@fountbox.com")
+	if err := s.Upsert(ctx, ks.record(id)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com", "bob@smithcpa.com"}); err != nil {
+		t.Fatalf("version 1: %v", err)
+	}
+	snap, _ := s.Snapshot(id)
+	if snap.RoutingVersion != 1 || len(snap.OwnerHashes) != 2 {
+		t.Fatalf("after version 1: %+v", snap)
+	}
+	// Owners are stored only as keyed hashes, never the plaintext address.
+	if bytes.Contains(bytes.Join(snap.OwnerHashes, nil), []byte("jane@smithcpa.com")) {
+		t.Fatal("owner plaintext stored")
+	}
+
+	// Re-asserting the same version is accepted (corrects a rollback).
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com"}); err != nil {
+		t.Fatalf("re-assert version 1: %v", err)
+	}
+	// Advancing is accepted.
+	if err := s.SetOwners(ctx, id, 2, []string{"jane@smithcpa.com"}); err != nil {
+		t.Fatalf("version 2: %v", err)
+	}
+	// Going backwards is refused.
+	if err := s.SetOwners(ctx, id, 1, nil); !errors.Is(err, routing.ErrStaleVersion) {
+		t.Fatalf("stale err = %v, want ErrStaleVersion", err)
+	}
+	if err := s.SetOwners(ctx, make([]byte, 32), 1, nil); !errors.Is(err, routing.ErrNoMailbox) {
+		t.Fatalf("unknown mailbox err = %v, want ErrNoMailbox", err)
+	}
+}
+
+func TestRenewEntitlement(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	ks := newKeyset(t)
+	id := s.MailboxID("a@fountbox.com")
+	rec := ks.record(id)
+	rec.LicenseHash = []byte("lic-1")
+	rec.EntitlementExp = 100
+	if err := s.Upsert(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RenewEntitlement(ctx, id, []byte("lic-1"), 500); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if snap, _ := s.Snapshot(id); snap.EntitlementExp != 500 {
+		t.Fatalf("exp = %d, want 500", snap.EntitlementExp)
+	}
+	// A renewal for a different license can't move the mailbox.
+	if err := s.RenewEntitlement(ctx, id, []byte("lic-2"), 900); !errors.Is(err, routing.ErrLicenseMismatch) {
+		t.Fatalf("err = %v, want ErrLicenseMismatch", err)
+	}
+	if snap, _ := s.Snapshot(id); snap.EntitlementExp != 500 {
+		t.Fatal("expiry changed on a mismatched renewal")
+	}
+	if err := s.RenewEntitlement(ctx, make([]byte, 32), []byte("lic-1"), 900); !errors.Is(err, routing.ErrNoMailbox) {
+		t.Fatalf("err = %v, want ErrNoMailbox", err)
+	}
+}
+
 // A store survives a reload over the same blobs with its records intact.
 func TestReloadRoundTrip(t *testing.T) {
 	routingKey, macKey := keys(t)
