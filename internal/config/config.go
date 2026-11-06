@@ -22,6 +22,9 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
+
+	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 )
 
 const defaultMaxMessageBytes = 25 * 1024 * 1024 // 25 MB, matches the probe's SIZE
@@ -48,9 +51,9 @@ type Secrets struct {
 }
 
 type Config struct {
-	Hostname          string // public name the edge serves ACME for, e.g. mail-edge.fount.sh
-	MailDomain        string // recipient domain, e.g. @fountbox.com
-	AttestedKeyDir    string // where the Tinfoil runtime writes per-boot attested keys
+	MailHostnames     []string // the MX names; the SMTP certificate covers all of them, first is the HELO name
+	MailDomain        string   // recipient domain, e.g. @fountbox.com
+	AttestedKeyDir    string   // where the Tinfoil runtime writes per-boot attested keys
 	SMTPAddr          string
 	DeviceAPIAddr     string
 	HealthAddr        string
@@ -58,11 +61,12 @@ type Config struct {
 	ACMEDirectory     string // Let's Encrypt directory URL (staging by default)
 	CertCacheDir      string // where issued certs are cached; "" disables (prod uses S3)
 	MaxMessageBytes   int64
-	S3Bucket          string // mail bucket name
-	S3Region          string // bucket region, e.g. us-east-1
-	S3Endpoint        string // bucket root URL; derived from bucket+region if unset
-	RecoveryRPID      string // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
-	RecoveryOrigin    string // optional: pins the assertion's clientDataJSON origin (e.g. https://mail.fount.sh)
+	GatewayPins       []gatewaytls.Pin // gateway client keys for the tunnelled ports; measured with the config, so not a secret
+	S3Bucket          string           // mail bucket name
+	S3Region          string           // bucket region, e.g. us-east-1
+	S3Endpoint        string           // bucket root URL; derived from bucket+region if unset
+	RecoveryRPID      string           // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
+	RecoveryOrigin    string           // optional: pins the assertion's clientDataJSON origin (e.g. https://mail.fount.sh)
 	Dev               bool
 	Secrets           Secrets
 }
@@ -85,7 +89,7 @@ func (c *Config) S3EndpointURL() string {
 func Load() (*Config, error) {
 	dev := os.Getenv("EDGE_DEV") == "1"
 	c := &Config{
-		Hostname:          env("MAIL_HOSTNAME", "mail-edge.fount.sh"),
+		MailHostnames:     splitList(env("MAIL_HOSTNAMES", "mx1.fountbox.com,mx2.fountbox.com")),
 		MailDomain:        env("MAIL_DOMAIN", "@fountbox.com"),
 		AttestedKeyDir:    env("ATTESTED_KEY_DIR", "/run/tinfoil/keys"),
 		SMTPAddr:          env("SMTP_ADDR", ":2525"),
@@ -108,6 +112,19 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("MAX_MESSAGE_BYTES: %w", err)
 		}
 		c.MaxMessageBytes = n
+	}
+
+	if len(c.MailHostnames) == 0 {
+		return nil, fmt.Errorf("MAIL_HOSTNAMES is empty")
+	}
+	// A release with no pins would leave the tunnelled ports open to any tk_ key,
+	// so it's fatal. Only a dev boot may run them in the clear.
+	if v := os.Getenv("GATEWAY_CLIENT_PINS"); v != "" || !dev {
+		pins, err := gatewaytls.ParsePins(v)
+		if err != nil {
+			return nil, fmt.Errorf("GATEWAY_CLIENT_PINS: %w", err)
+		}
+		c.GatewayPins = pins
 	}
 
 	s, err := loadSecrets(dev)
@@ -169,6 +186,16 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func requireStr(key string) (string, error) {

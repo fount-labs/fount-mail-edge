@@ -57,7 +57,8 @@ func Load(dir string) (*Keys, error) {
 
 // DeviceAPITLSConfig serves the Device API with a self-signed leaf over the
 // attested TLS key. Authenticity comes from attestation + per-request
-// signatures, not from a CA. (mTLS on the tunnel is a separate M2 launch item.)
+// signatures, not from a CA. The tunnelled ports reuse this with client pins
+// added (internal/gatewaytls).
 func (k *Keys) DeviceAPITLSConfig() *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{k.deviceCert},

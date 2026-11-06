@@ -115,9 +115,10 @@ func NewIssuer(accountKeyPEM []byte, directory string, ch *Challenges) (*Issuer,
 	}, nil
 }
 
-// Issue runs a full order for hostname and returns a tls.Certificate backed by
-// certKey (the attested mail-tls key).
-func (i *Issuer) Issue(ctx context.Context, hostname string, certKey *ecdsa.PrivateKey) (*tls.Certificate, error) {
+// Issue runs one order covering every hostname and returns a tls.Certificate
+// backed by certKey (the attested mail-tls key). Each name is validated, so every
+// gateway must be up for the order to pass.
+func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.PrivateKey) (*tls.Certificate, error) {
 	if err := i.loadDirectory(ctx); err != nil {
 		return nil, err
 	}
@@ -125,8 +126,11 @@ func (i *Issuer) Issue(ctx context.Context, hostname string, certKey *ecdsa.Priv
 		return nil, fmt.Errorf("newAccount: %w", err)
 	}
 
-	orderHdr, orderBody, err := i.post(ctx, i.dirCache["newOrder"],
-		map[string]any{"identifiers": []map[string]string{{"type": "dns", "value": hostname}}})
+	identifiers := make([]map[string]string, len(hostnames))
+	for n, h := range hostnames {
+		identifiers[n] = map[string]string{"type": "dns", "value": h}
+	}
+	orderHdr, orderBody, err := i.post(ctx, i.dirCache["newOrder"], map[string]any{"identifiers": identifiers})
 	if err != nil {
 		return nil, fmt.Errorf("newOrder: %w", err)
 	}
@@ -146,7 +150,7 @@ func (i *Issuer) Issue(ctx context.Context, hostname string, certKey *ecdsa.Priv
 	}
 
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		DNSNames: []string{hostname},
+		DNSNames: hostnames,
 	}, certKey)
 	if err != nil {
 		return nil, fmt.Errorf("csr: %w", err)

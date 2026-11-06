@@ -6,8 +6,8 @@
 //  1. Load non-secret config; load keyserver secrets from env (fail fast).
 //  2. Load the per-boot attested keys (TLS ecdsa-p256, signing ed25519).
 //  3. Start the SMTP, Device API, and health listeners.
-//  4. (TODO M2 step 3) Run ACME for the attested TLS key once the gateway's
-//     first health check lands; answer 421 until the certificate loads.
+//  4. Run ACME for the attested TLS key once the gateway's first health check
+//     lands; answer 421 until the certificate loads.
 package main
 
 import (
@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
 	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/deviceapi"
+	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 	"github.com/fount-labs/fount-mail-edge/internal/keys"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/s3"
@@ -46,7 +48,7 @@ func run() error {
 	if err != nil {
 		return err // a missing attested key or keyserver secret must not boot
 	}
-	log.Printf("edge: booting hostname=%s domain=%s", cfg.Hostname, cfg.MailDomain)
+	log.Printf("edge: booting hostnames=%v domain=%s", cfg.MailHostnames, cfg.MailDomain)
 
 	k, err := keys.Load(cfg.AttestedKeyDir)
 	if err != nil {
@@ -103,7 +105,7 @@ func run() error {
 
 	smtpSrv := smtp.New(smtp.Options{
 		Addr:       cfg.SMTPAddr,
-		Hostname:   "mx." + trimAt(cfg.MailDomain),
+		Hostname:   cfg.MailHostnames[0],
 		Domain:     cfg.MailDomain,
 		Certs:      certMgr,
 		Store:      st,
@@ -117,14 +119,23 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	smtpLn, err := tunnelListener(cfg, k, cfg.SMTPAddr)
+	if err != nil {
+		return err
+	}
+	acmeLn, err := tunnelListener(cfg, k, cfg.ACMEChallengeAddr)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
 	errc := make(chan error, 4)
-	go func() { errc <- smtpSrv.ListenAndServe(ctx) }()
+	go func() { errc <- smtpSrv.Serve(ctx, smtpLn) }()
 	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
 	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
-	go func() { errc <- ignoreClosed(acmeSrv.ListenAndServe()) }()
+	go func() { errc <- ignoreClosed(acmeSrv.Serve(acmeLn)) }()
 	go startCertLoop(ctx, cfg, k, certMgr, challenges)
 	go startRetentionSweep(ctx, st)
 	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
@@ -146,6 +157,20 @@ func run() error {
 	_ = acmeSrv.Shutdown(sctx)
 	_ = smtpSrv.Shutdown(sctx)
 	return nil
+}
+
+// tunnelListener binds a tunnelled port behind gateway mutual TLS (§7). config.Load
+// refuses a production boot with no pins, so the plain branch is dev only.
+func tunnelListener(cfg *config.Config, k *keys.Keys, addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.GatewayPins) == 0 {
+		log.Printf("edge: *** %s has no gateway mutual TLS (dev only) ***", addr)
+		return ln, nil
+	}
+	return gatewaytls.Listen(ln, k.DeviceAPITLSConfig(), cfg.GatewayPins), nil
 }
 
 // storage wires the durable layer. In production it is the real store over S3:
@@ -232,10 +257,10 @@ func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *c
 		return
 	}
 	cache := certCache(cfg, k)
-	log.Printf("edge: ACME via %s for %s", cfg.ACMEDirectory, cfg.Hostname)
-	certs.RunLoop(ctx, mgr, cache, challenges.Reachable(), cfg.Hostname,
-		func(ctx context.Context, host string) (*tls.Certificate, error) {
-			return issuer.Issue(ctx, host, k.TLS)
+	log.Printf("edge: ACME via %s for %v", cfg.ACMEDirectory, cfg.MailHostnames)
+	certs.RunLoop(ctx, mgr, cache, challenges.Reachable(), cfg.MailHostnames[0],
+		func(ctx context.Context, _ string) (*tls.Certificate, error) {
+			return issuer.Issue(ctx, cfg.MailHostnames, k.TLS)
 		})
 }
 
@@ -293,11 +318,4 @@ func ignoreClosed(err error) error {
 		return nil
 	}
 	return err
-}
-
-func trimAt(domain string) string {
-	if len(domain) > 0 && domain[0] == '@' {
-		return domain[1:]
-	}
-	return domain
 }

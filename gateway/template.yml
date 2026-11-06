@@ -13,10 +13,13 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
   EnclaveHost:
     Type: String
-    Default: mail-edge.fount.sh # PLACEHOLDER — the edge's pinned deployment domain
+    Default: mail-edge.fount.containers.tinfoil.dev # the enclave's own name; mail uses the MX names
   EnclaveRepo:
     Type: String
-    Default: fount-labs/fount-mail-edge # PLACEHOLDER org — targets the enclave by repo, so no admin key on the VM
+    Default: fount-labs/fount-mail-edge # targets the enclave by repo, so no admin key on the VM
+  ClientCertSecret:
+    Type: String
+    Description: Secrets Manager name of this gateway's client certificate + key PEM. Its SPKI pin is in the edge's attested GATEWAY_CLIENT_PINS.
   TinfoilCliVersion:
     Type: String
     Default: "0.19.19"
@@ -33,6 +36,14 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # SSM only; no inbound SSH
+      Policies:
+        - PolicyName: read-client-cert
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ClientCertSecret}-*
   Profile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -65,6 +76,13 @@ Resources:
           # TODO(before deploy): pin and verify the CLI tarball sha256 (as the probe did).
           tar -xzf "tinfoil-cli_${!V}_linux_arm64.tar.gz" tinfoil
           install -m 755 tinfoil /usr/local/bin/tinfoil
+          # A missing client certificate stops the boot: without it the edge
+          # refuses every tunnelled connection anyway.
+          aws secretsmanager get-secret-value --region ${AWS::Region} \
+            --secret-id ${ClientCertSecret} --query SecretString --output text \
+            > /etc/haproxy/gateway-client.pem
+          chown haproxy:haproxy /etc/haproxy/gateway-client.pem
+          chmod 600 /etc/haproxy/gateway-client.pem
           cat > /etc/haproxy/haproxy.cfg <<'CFG'
           global
             log /dev/log local0
@@ -76,28 +94,42 @@ Resources:
             timeout connect 5s
             timeout client 5m
             timeout server 5m
-          # SMTP: open the backend only after the edge's /ready passes twice
-          # (design §6: the edge waits 15s so its certificate loads first).
+          # SMTP takes two hops because the PROXY header must travel INSIDE mutual
+          # TLS (§7). A single `server ... ssl send-proxy` line writes the header in
+          # the clear, ahead of the handshake, so the first hop adds it and the
+          # second wraps those bytes as ordinary payload.
           frontend smtp
             bind :25
+            default_backend smtp-framed
+          backend smtp-framed
+            server wrap 127.0.0.1:2527 send-proxy track edge/tunnel
+          frontend smtp-wrap
+            bind 127.0.0.1:2527
             default_backend edge
+          # Open the backend only after the edge's /ready passes twice (design §6:
+          # the edge waits 15s so its certificate loads first). /ready is on the
+          # shim's port, outside mutual TLS, so its check is plain.
           backend edge
             option httpchk GET /ready
             http-check expect status 200
-            server tunnel 127.0.0.1:2526 send-proxy check port 2508 inter 5s rise 2
-          # ACME HTTP-01: plain port 80 forwarded to the edge's challenge responder
+            server tunnel 127.0.0.1:2526 ssl crt /etc/haproxy/gateway-client.pem verify none check port 2508 no-check-ssl inter 5s rise 2
+          # ACME HTTP-01: plain port 80, then mutual TLS to the challenge responder.
+          # This check is the edge's reachable signal: the first request over mutual
+          # TLS starts issuance, so outsiders can't start it. `verify none` is safe on
+          # both servers because the attested tunnel already proves the enclave.
           frontend acme
             bind :80
             default_backend challenge
           backend challenge
-            server tunnel 127.0.0.1:2580
+            option httpchk GET /
+            http-check expect status 200
+            server tunnel 127.0.0.1:2580 ssl crt /etc/haproxy/gateway-client.pem verify none check inter 30s
           CFG
           # tinfoil forward re-verifies the enclave by itself. -L maps:
           #   2526 -> edge :2525  (SMTP)        2580 -> edge :8088 (ACME HTTP-01)
           #   2508 -> edge :8080  (shim /ready health check)
-          # TODO(§7): the SMTP and device-api tunnel ports must require mutual TLS
-          # (untested), and shim.authenticated must be on so a keyless CONNECT
-          # gets 401 before it counts. Needs a tk_ key delivered at boot.
+          # TODO(§7): shim.authenticated must be on so a keyless CONNECT gets 401
+          # before it counts. Needs a tk_ key delivered at boot.
           cat > /usr/local/bin/fount-tunnel <<'SH'
           #!/bin/sh
           exec /usr/local/bin/tinfoil forward ${EnclaveHost} --repo ${EnclaveRepo} \

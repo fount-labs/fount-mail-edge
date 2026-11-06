@@ -56,8 +56,9 @@ printf 'PROXY TCP4 203.0.113.9 10.0.0.1 1 25\r\n' | nc -w1 localhost 12525   # 4
 ## TODO markers to resolve before a real release
 
 - `Dockerfile`: `PLACEHOLDER_PIN_THE_FRONTEND_DIGEST`, `PLACEHOLDER_PIN_THE_GOLANG_BASE_DIGEST`.
-- `tinfoil-config.yml`: keyserver host (`keys.fount.sh`), the S3 egress entry, and
-  the image digest (set by the release workflow).
-- Confirm the GitHub org (`fount-labs`) and the pinned deployment domain
-  (`mail-edge.fount.sh`) — these must match the keyserver `policy.yaml` workload
-  entry in `fount-infra`.
+- `tinfoil-config.yml`: keyserver host (`keys.fount.sh`), `GATEWAY_CLIENT_PINS`
+  (the edge refuses to boot on the placeholder), and the image digest (set by the
+  release workflow).
+- The GitHub org (`fount-labs`) and the pinned deployment domain
+  (`mail-edge.fount.containers.tinfoil.dev`) — these must match the keyserver `policy.yaml` workload
+  entry in `fount-infra`. Senders never see this name; they use the MX names.

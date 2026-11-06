@@ -16,8 +16,23 @@ aws cloudformation deploy \
   --stack-name fount-mail-gateway-a \
   --capabilities CAPABILITY_IAM \
   --parameter-overrides \
-      EnclaveHost=mail-edge.fount.sh \
-      EnclaveRepo=fount-labs/fount-mail-edge
+      EnclaveHost=mail-edge.fount.containers.tinfoil.dev \
+      EnclaveRepo=fount-labs/fount-mail-edge \
+      ClientCertSecret=fount-mail/gateway-a-client
+```
+
+`EnclaveHost` is the enclave's own name, which only the gateway and keyserver
+use. Senders see the MX names (`mx1.fountbox.com`, `mx2.fountbox.com`), which
+resolve to the gateways. The edge's certificate covers both, so both gateways
+must be up when it issues.
+
+Each gateway has its own client certificate in Secrets Manager (`fullchain +
+key` PEM). Its SPKI pin goes in `GATEWAY_CLIENT_PINS` in `tinfoil-config.yml`, so
+a new gateway key means a new release:
+
+```sh
+openssl x509 -in client.pem -noout -pubkey | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256 -r | cut -d' ' -f1
 ```
 
 Start the **enclave first** — a gateway that resolves the host before it exists
@@ -38,7 +53,8 @@ can cache "no such host" for up to 30 minutes.
 - **`shim.authenticated`** (undocumented): a keyless CONNECT should get `401`
   before it counts against the tunnel cap. Test with real senders; it needs a
   `tk_` key delivered to the VM at boot.
-- **Mutual TLS** on the SMTP and device-api tunnel ports (the table's row).
+- **Mutual TLS** on the SMTP and ACME tunnel ports is built and tested against a
+  local HAProxy. It still needs a run through a real tunnel.
 - **Pin + verify** the `tinfoil-cli` tarball sha256 in user-data.
 - Confirm the gateway doesn't follow a new release during the 24h release wait
   (pin with `--tag` if it does).

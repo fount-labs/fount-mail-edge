@@ -7,12 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -37,7 +39,23 @@ func TestIssueEndToEndAgainstMockACME(t *testing.T) {
 		mu         sync.Mutex
 		nonceN     int
 		authzState = "pending"
+		ordered    int
+		csrDER     []byte
 	)
+	// decodeJWS returns a JWS POST's decoded payload.
+	decodeJWS := func(t *testing.T, r *http.Request) []byte {
+		var jws struct {
+			Payload string `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+			t.Error(err)
+		}
+		b, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			t.Error(err)
+		}
+		return b
+	}
 	var base string
 	mux := http.NewServeMux()
 	nonce := func(w http.ResponseWriter) {
@@ -60,8 +78,15 @@ func TestIssueEndToEndAgainstMockACME(t *testing.T) {
 		w.WriteHeader(201)
 		_, _ = w.Write([]byte(`{}`))
 	})
-	mux.HandleFunc("POST /neworder", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /neworder", func(w http.ResponseWriter, r *http.Request) {
 		nonce(w)
+		var order struct {
+			Identifiers []map[string]string `json:"identifiers"`
+		}
+		if err := json.Unmarshal(decodeJWS(t, r), &order); err != nil {
+			t.Error(err)
+		}
+		ordered = len(order.Identifiers)
 		w.Header().Set("Location", base+"/order/1")
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -88,8 +113,15 @@ func TestIssueEndToEndAgainstMockACME(t *testing.T) {
 		mu.Unlock()
 		_, _ = w.Write([]byte(`{}`))
 	})
-	mux.HandleFunc("POST /finalize/1", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /finalize/1", func(w http.ResponseWriter, r *http.Request) {
 		nonce(w)
+		var final struct {
+			CSR string `json:"csr"`
+		}
+		if err := json.Unmarshal(decodeJWS(t, r), &final); err != nil {
+			t.Error(err)
+		}
+		csrDER, _ = base64.RawURLEncoding.DecodeString(final.CSR)
 		_, _ = w.Write([]byte(`{"status":"processing"}`))
 	})
 	mux.HandleFunc("POST /order/1", func(w http.ResponseWriter, _ *http.Request) {
@@ -111,9 +143,22 @@ func TestIssueEndToEndAgainstMockACME(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cert, err := issuer.Issue(context.Background(), "mail-edge.test", certKey)
+	hosts := []string{"mx1.fountbox.test", "mx2.fountbox.test"}
+	cert, err := issuer.Issue(context.Background(), hosts, certKey)
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
+	}
+	// One order and one CSR must cover both MX names, or senders under strict
+	// MTA-STS refuse whichever gateway the certificate doesn't name.
+	if ordered != len(hosts) {
+		t.Fatalf("order named %d identifiers, want %d", ordered, len(hosts))
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		t.Fatalf("csr: %v", err)
+	}
+	if !slices.Equal(csr.DNSNames, hosts) {
+		t.Fatalf("csr names %v, want %v", csr.DNSNames, hosts)
 	}
 	if len(cert.Certificate) != 1 {
 		t.Fatalf("want 1 cert in chain, got %d", len(cert.Certificate))

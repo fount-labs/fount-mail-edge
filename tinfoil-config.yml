@@ -14,6 +14,8 @@ cvm-version: 0.14.17 # https://github.com/tinfoilsh/cvmimage/releases/latest, no
 cpus: 2
 memory: 8192
 
+keyserver-url: https://keys.fount.sh # PLACEHOLDER — the deployed keyserver host
+
 # Per-boot keys generated inside the enclave; their public halves are in the
 # attestation, so the keyserver never holds them (design §5 "Edge keys").
 attested-keys:
@@ -29,17 +31,23 @@ networks:
       - keys.fount.sh                       # PLACEHOLDER — the deployed keyserver host
       - acme-v02.api.letsencrypt.org        # ACME production
       - acme-staging-v02.api.letsencrypt.org
-      # - <bucket>.s3.<region>.amazonaws.com  # TODO(M2 step 4): the S3 storage host
-      # - s3.<region>.amazonaws.com
+      - fount-mail-063207099341.s3.us-east-1.amazonaws.com # mail bucket
 
 containers:
   - name: mail-edge
     image: "ghcr.io/fount-labs/fount-mail-edge@sha256:PLACEHOLDER_DIGEST" # set by release
     networks: [edge]
     keys: [mail-tls, mail-sign]
-    ports: ["2525:2525", "8443:8443", "8088:8088"]
+    ports: ["2525:2525", "8443:8443", "8088:8088", "8080:8080"] # 8080 is /ready, which the gateway checks over the tunnel
     tmpfs:
       /tmp: "size=64m" # read-only root; scratch space only
+    # Measured with the config. The pins are public keys' hashes, not secrets.
+    env:
+      - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
+      - MAIL_DOMAIN: "@fountbox.com"
+      - S3_BUCKET: "fount-mail-063207099341"
+      - S3_REGION: "us-east-1"
+      - GATEWAY_CLIENT_PINS: "PLACEHOLDER" # one sha256 per gateway; the edge refuses to boot on this value
     # Secrets delivered by the keyserver after attestation, injected as env vars.
     # Every name here MUST have a matching entry in policy.yaml's workload, or the
     # workload will not boot — there is no fallback to a Tinfoil-managed secret.
@@ -47,6 +55,7 @@ containers:
       - ACME_ACCOUNT_KEY
       - ADDRESS_MAC_KEY
       - ROUTING_DATA_KEY
+      - ENTITLEMENT_VERIFY_KEY
       - S3_ACCESS_KEY_ID
       - S3_SECRET_ACCESS_KEY
 
