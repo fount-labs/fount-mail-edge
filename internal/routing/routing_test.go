@@ -52,13 +52,13 @@ func (b *memBlobs) Get(_ context.Context, key string) ([]byte, error) {
 	return append([]byte(nil), v...), nil
 }
 
-func (b *memBlobs) List(_ context.Context, prefix string) ([]string, error) {
+func (b *memBlobs) List(_ context.Context, prefix string) ([]store.Object, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var out []string
-	for k := range b.objs {
+	var out []store.Object
+	for k, v := range b.objs {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, k)
+			out = append(out, store.Object{Key: k, Size: int64(len(v))})
 		}
 	}
 	return out, nil

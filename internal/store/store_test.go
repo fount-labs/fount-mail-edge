@@ -88,13 +88,13 @@ func (b *memBlobs) Get(_ context.Context, key string) ([]byte, error) {
 	return append([]byte(nil), v...), nil
 }
 
-func (b *memBlobs) List(_ context.Context, prefix string) ([]string, error) {
+func (b *memBlobs) List(_ context.Context, prefix string) ([]Object, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var out []string
-	for k := range b.objs {
+	var out []Object
+	for k, v := range b.objs {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, k)
+			out = append(out, Object{Key: k, Size: int64(len(v))})
 		}
 	}
 	return out, nil
@@ -291,6 +291,104 @@ func TestMailReaderRoundTrip(t *testing.T) {
 	// A malformed id can't escape the prefix.
 	if _, err := mr.Get(ctx, mbox, "../../etc/passwd"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("traversal Get err = %v, want ErrNotFound", err)
+	}
+}
+
+// storedSize must equal what MarshalSigned actually produces, or the quota
+// would be checked against a wrong figure. This pins the closed form against a
+// real sealed object so an HPKE suite change (different enc/tag length) breaks
+// the build instead of silently skewing accounting.
+func TestStoredSizeMatchesMarshal(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	k := dir.add(t, "a@fountbox.com")
+	for _, raw := range [][]byte{nil, []byte("x"), bytes.Repeat([]byte("m"), 5000)} {
+		sender, recipient := "owner@example.com", "a@fountbox.com"
+		msg := &Message{
+			EdgeID: make([]byte, lenEdgeID), MailboxID: dir.mailboxID(recipient),
+			PubKeyHash: pubKeyHash(k.PublicKey().Bytes()), Sequence: 7, BootID: make([]byte, lenBootID),
+		}
+		if err := msg.seal(k.PublicKey().Bytes(), sender, recipient, raw); err != nil {
+			t.Fatal(err)
+		}
+		got := int64(len(msg.MarshalSigned(mustSign(t))))
+		if want := storedSize(sender, recipient, len(raw)); got != want {
+			t.Fatalf("raw=%d: storedSize=%d, MarshalSigned=%d", len(raw), want, got)
+		}
+	}
+}
+
+// Put refuses a message that would push a mailbox over its cap (§6), and does so
+// without consuming a sequence number — a rejected message must leave no gap in
+// the per-mailbox counter (§8). Room freed by a delete lets the next message in.
+func TestPutEnforcesMailboxQuota(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	blobs := newMemBlobs()
+	ctx := context.Background()
+
+	// Cap at exactly two messages of this shape; the third must be refused.
+	body := []byte("a short message body\r\n")
+	one := storedSize("x@y.com", "a@fountbox.com", len(body))
+	s := New(dir, blobs, mustSign(t), make([]byte, lenBootID), WithMaxMailboxBytes(2*one))
+	mr := s.(MailReader)
+	mbox := dir.mailboxID("a@fountbox.com")
+
+	id1, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body)
+	if err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body); err != nil {
+		t.Fatalf("second Put: %v", err)
+	}
+	// Third exceeds the cap.
+	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body); !errors.Is(err, ErrMailboxFull) {
+		t.Fatalf("third Put err = %v, want ErrMailboxFull", err)
+	}
+	// The rejected Put consumed no sequence number: the next accepted message is
+	// sequence 3, not 4.
+	if err := mr.Delete(ctx, mbox, id1); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body)
+	if err != nil {
+		t.Fatalf("Put after freeing room: %v", err)
+	}
+	obj, _ := mr.Get(ctx, mbox, id)
+	p, err := Parse(obj, s.(*realStore).sign.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Sequence != 3 {
+		t.Fatalf("sequence = %d, want 3 (a rejected Put must not burn a number)", p.Sequence)
+	}
+}
+
+// List reports each object's stored size, so GET /mail can show it and the
+// quota can sum it.
+func TestListReportsSizes(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	s := New(dir, newMemBlobs(), mustSign(t), make([]byte, lenBootID))
+	ctx := context.Background()
+	body := []byte("hello world body\r\n")
+	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.(MailReader).List(ctx, dir.mailboxID("a@fountbox.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("list = %d, want 1", len(list))
+	}
+	if want := int(storedSize("x@y.com", "a@fountbox.com", len(body))); list[0].Size != want {
+		t.Fatalf("Size = %d, want %d", list[0].Size, want)
 	}
 }
 

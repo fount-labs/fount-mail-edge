@@ -31,6 +31,15 @@ var ErrNoRecipient = errors.New("store: no such recipient")
 // GET/DELETE for an unknown message). The Device API maps it to 404.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrMailboxFull means the mailbox is at its storage cap (design §6: "up to
+// about 2 GB per mailbox. When full, it answers 452"). SMTP turns a Put error
+// into a 452, so the sender retries until the owner fetches and frees space.
+var ErrMailboxFull = errors.New("store: mailbox full")
+
+// DefaultMaxMailboxBytes is the per-mailbox storage cap when New is given no
+// WithMaxMailboxBytes option: about 2 GB of unfetched mail (§6).
+const DefaultMaxMailboxBytes int64 = 2 << 30
+
 type Store interface {
 	// Put stores one raw message for one envelope recipient and returns its
 	// edge id only once the write is durable. A non-nil error means SMTP must
@@ -58,14 +67,23 @@ type Directory interface {
 	NextSequence(ctx context.Context, mailboxID []byte) (uint64, error)
 }
 
+// Object is one entry in a Blobs listing: an object's full key and its size in
+// bytes. Size lets the store report GET /mail sizes and sum a mailbox's usage
+// for the storage quota without a per-object fetch (S3's listing carries it).
+type Object struct {
+	Key  string
+	Size int64
+}
+
 // Blobs is the durable object store (S3). Put returns only once the write is
 // acknowledged, so Store.Put can honor "250 only after S3 confirms".
 type Blobs interface {
 	Put(ctx context.Context, key string, data []byte) error
 	// Get returns an object's bytes, or ErrNotFound.
 	Get(ctx context.Context, key string) ([]byte, error)
-	// List returns the full keys under prefix (one S3 prefix listing).
-	List(ctx context.Context, prefix string) ([]string, error)
+	// List returns the objects under prefix with their sizes, following S3
+	// continuation tokens so the result spans every page.
+	List(ctx context.Context, prefix string) ([]Object, error)
 	// Delete removes an object; deleting an absent object is not an error.
 	Delete(ctx context.Context, key string) error
 }
@@ -119,18 +137,30 @@ type KeyLog interface {
 }
 
 type realStore struct {
-	dir    Directory
-	blobs  Blobs
-	sign   ed25519.PrivateKey
-	bootID []byte
-	now    func() time.Time
+	dir        Directory
+	blobs      Blobs
+	sign       ed25519.PrivateKey
+	bootID     []byte
+	now        func() time.Time
+	maxMailbox int64 // per-mailbox storage cap; <=0 is unlimited
 }
+
+// Option tunes a realStore built by New.
+type Option func(*realStore)
+
+// WithMaxMailboxBytes sets the per-mailbox storage cap (§6). A value <= 0 means
+// unlimited. Without it New uses DefaultMaxMailboxBytes.
+func WithMaxMailboxBytes(n int64) Option { return func(s *realStore) { s.maxMailbox = n } }
 
 // New builds the real store. bootID is this boot's 16-byte identifier (it ends
 // up in every object so the broker can check the signature against the right
 // boot's attestation, §9).
-func New(dir Directory, blobs Blobs, sign ed25519.PrivateKey, bootID []byte) Store {
-	return &realStore{dir: dir, blobs: blobs, sign: sign, bootID: bootID, now: time.Now}
+func New(dir Directory, blobs Blobs, sign ed25519.PrivateKey, bootID []byte, opts ...Option) Store {
+	s := &realStore{dir: dir, blobs: blobs, sign: sign, bootID: bootID, now: time.Now, maxMailbox: DefaultMaxMailboxBytes}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byte) (string, error) {
@@ -138,6 +168,22 @@ func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byt
 	if err != nil {
 		return "", err // ErrNoRecipient or transient; SMTP maps each distinctly
 	}
+
+	// Enforce the per-mailbox storage cap (§6) before allocating a sequence
+	// number: a message rejected for a full mailbox must leave no gap in the
+	// per-mailbox counter (a gap is how the device spots withheld mail, §8). The
+	// stored object's size is a closed form of the envelope and body lengths, so
+	// the check needs no sealing.
+	if s.maxMailbox > 0 {
+		used, err := s.usage(ctx, addr.MailboxID)
+		if err != nil {
+			return "", fmt.Errorf("mailbox usage: %w", err)
+		}
+		if used+storedSize(sender, recipient, len(raw)) > s.maxMailbox {
+			return "", ErrMailboxFull
+		}
+	}
+
 	seq, err := s.dir.NextSequence(ctx, addr.MailboxID)
 	if err != nil {
 		return "", fmt.Errorf("sequence: %w", err)
@@ -187,19 +233,48 @@ func validEdgeID(edgeIDHex string) bool {
 
 func (s *realStore) List(ctx context.Context, mailboxID []byte) ([]Stored, error) {
 	prefix := mailboxPrefix(mailboxID)
-	keys, err := s.blobs.List(ctx, prefix)
+	objs, err := s.blobs.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Stored, 0, len(keys))
-	for _, k := range keys {
-		id := strings.TrimPrefix(k, prefix)
+	out := make([]Stored, 0, len(objs))
+	for _, o := range objs {
+		id := strings.TrimPrefix(o.Key, prefix)
 		if !validEdgeID(id) {
 			continue // ignore anything that isn't a message object
 		}
-		out = append(out, Stored{ID: id})
+		out = append(out, Stored{ID: id, Size: int(o.Size)})
 	}
 	return out, nil
+}
+
+// usage sums the bytes a mailbox currently holds, from the object sizes in a
+// prefix listing. Keys that aren't message objects (none today under this
+// prefix) still count toward the cap, which is the safe direction.
+func (s *realStore) usage(ctx context.Context, mailboxID []byte) (int64, error) {
+	objs, err := s.blobs.List(ctx, mailboxPrefix(mailboxID))
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, o := range objs {
+		total += o.Size
+	}
+	return total, nil
+}
+
+// storedSize is the exact byte length MarshalSigned produces for a message with
+// these envelope and body lengths. Every field other than enc/ct/plaintext is
+// fixed-width (§9), the HPKE encapsulated key is a 32-byte X25519 point, and the
+// AEAD adds a 16-byte tag — so the on-disk size is known before sealing. A unit
+// test pins this against a real MarshalSigned so a suite change can't drift it.
+func storedSize(sender, recipient string, rawLen int) int64 {
+	const encLen = 32 // X25519 encapsulated key
+	const aeadTag = 16
+	plaintext := 2 + len(sender) + 2 + len(recipient) + rawLen
+	ct := plaintext + aeadTag
+	// headerLen + encLen-prefix(2) + enc + ctLen-prefix(4) + ct + signature.
+	return int64(headerLen + 2 + encLen + 4 + ct + ed25519.SignatureSize)
 }
 
 func (s *realStore) Get(ctx context.Context, mailboxID []byte, edgeIDHex string) ([]byte, error) {

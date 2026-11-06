@@ -168,9 +168,12 @@ func TestListPaginates(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("List returned %d keys, want %d: %v", len(got), len(want), got)
 	}
-	for _, k := range got {
-		if !want[k] {
-			t.Fatalf("unexpected key %q", k)
+	for _, o := range got {
+		if !want[o.Key] {
+			t.Fatalf("unexpected key %q", o.Key)
+		}
+		if o.Size != 1 { // each fixture object is a single byte
+			t.Fatalf("key %q size = %d, want 1", o.Key, o.Size)
 		}
 	}
 }

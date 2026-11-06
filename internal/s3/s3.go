@@ -122,13 +122,15 @@ type listResult struct {
 	IsTruncated bool     `xml:"IsTruncated"`
 	NextToken   string   `xml:"NextContinuationToken"`
 	Contents    []struct {
-		Key string `xml:"Key"`
+		Key  string `xml:"Key"`
+		Size int64  `xml:"Size"`
 	} `xml:"Contents"`
 }
 
-// List returns the full keys under prefix, following continuation tokens.
-func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
-	var out []string
+// List returns the objects under prefix with their sizes, following
+// continuation tokens so the result spans every page.
+func (c *Client) List(ctx context.Context, prefix string) ([]store.Object, error) {
+	var out []store.Object
 	token := ""
 	for page := 0; page < c.maxPages; page++ {
 		q := url.Values{}
@@ -156,7 +158,7 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 			return nil, fmt.Errorf("s3: list %q: parse: %w", prefix, err)
 		}
 		for _, o := range lr.Contents {
-			out = append(out, o.Key)
+			out = append(out, store.Object{Key: o.Key, Size: o.Size})
 		}
 		if !lr.IsTruncated || lr.NextToken == "" {
 			return out, nil
