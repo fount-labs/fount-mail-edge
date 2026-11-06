@@ -82,6 +82,7 @@ type Mailbox struct {
 	OwnerChangeKey []byte `json:"owner_change_key"` // Ed25519; signs PUT /routing
 	PasskeyKey     []byte `json:"passkey_key"`      // passkey public key; approves recovery (§5)
 	LicenseHash    []byte `json:"license_hash"`     // keyed hash of the license (§4)
+	EntitlementExp int64  `json:"entitlement_exp"`  // unix expiry of the last presented entitlement (§4)
 	Sequence       uint64 `json:"sequence"`         // last per-mailbox sequence handed out (§9)
 }
 
@@ -286,15 +287,22 @@ func (s *Store) Known(_ context.Context, recipient string) (bool, error) {
 // --- write path (used by Device API write handlers and tests) --------------
 
 // Upsert adds or replaces a mailbox record, keyed by its mailbox id, and
-// persists. It is the seam the write-path handlers (POST /mailbox, POST
-// /address, PUT /routing) and tests use to populate routing data; it does not
-// itself enforce the signer rules those handlers apply.
+// persists. It is the seam the write-path handlers (POST /address, PUT /routing)
+// and tests use to populate routing data; it does not itself enforce the signer
+// rules those handlers apply. Mailbox creation goes through Create instead, so
+// its uniqueness checks can't be bypassed.
 func (s *Store) Upsert(ctx context.Context, m *Mailbox) error {
 	if len(m.MailboxID) != keyLen {
 		return fmt.Errorf("routing: mailbox id must be %d bytes", keyLen)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.put(ctx, m)
+}
+
+// put stores a record and persists, rolling back memory on a write failure.
+// Caller holds s.mu.
+func (s *Store) put(ctx context.Context, m *Mailbox) error {
 	key := hex.EncodeToString(m.MailboxID)
 	prev := s.data.Mailboxes[key]
 	s.data.Mailboxes[key] = m
@@ -307,4 +315,64 @@ func (s *Store) Upsert(ctx context.Context, m *Mailbox) error {
 		return err
 	}
 	return nil
+}
+
+// ErrHandleTaken and ErrLicenseTaken are the two creation conflicts (§4: a
+// released handle is never reissued; one mailbox per license). The Device API
+// maps both to 409.
+var (
+	ErrHandleTaken  = errors.New("routing: handle already registered")
+	ErrLicenseTaken = errors.New("routing: license already has a mailbox")
+)
+
+// NewMailbox is a mailbox to create: its handle address, the keyed license hash
+// from the verified entitlement, and the device-asserted public keys (whose key
+// chain the caller has already checked). Sequence starts at zero.
+type NewMailbox struct {
+	Address        string
+	LicenseHash    []byte
+	DecryptionKey  []byte
+	SigningKey     []byte
+	MailboxKey     []byte
+	OwnerChangeKey []byte
+	PasskeyKey     []byte
+	EntitlementExp int64
+}
+
+// Available reports whether a handle address is free to register.
+func (s *Store) Available(_ context.Context, address string) (bool, error) {
+	_, taken := s.lookup(hex.EncodeToString(s.MailboxID(address)))
+	return !taken, nil
+}
+
+// Create registers a new mailbox and returns its id, refusing a handle that
+// already exists or a license that already has a mailbox (§4). It is the only
+// path that adds a mailbox, so those invariants hold regardless of what a
+// handler does.
+func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
+	id := s.MailboxID(p.Address)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
+		return nil, ErrHandleTaken
+	}
+	for _, m := range s.data.Mailboxes {
+		if len(p.LicenseHash) > 0 && hmac.Equal(m.LicenseHash, p.LicenseHash) {
+			return nil, ErrLicenseTaken
+		}
+	}
+	if err := s.put(ctx, &Mailbox{
+		MailboxID:      id,
+		DecryptionKey:  p.DecryptionKey,
+		SigningKey:     p.SigningKey,
+		MailboxKey:     p.MailboxKey,
+		OwnerChangeKey: p.OwnerChangeKey,
+		PasskeyKey:     p.PasskeyKey,
+		LicenseHash:    p.LicenseHash,
+		EntitlementExp: p.EntitlementExp,
+		Sequence:       0,
+	}); err != nil {
+		return nil, err
+	}
+	return id, nil
 }

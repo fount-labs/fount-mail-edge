@@ -69,7 +69,7 @@ func mailTestAPI(t *testing.T, mail store.Store) (*API, ed25519.PrivateKey, stri
 		mailboxID[i] = byte(i)
 	}
 	keyID := hex.EncodeToString(mailboxID)
-	return New(mail, fakeResolver{pub: pub, keyID: keyID}), priv, keyID
+	return New(Options{Store: mail, Resolver: fakeResolver{pub: pub, keyID: keyID}}), priv, keyID
 }
 
 func TestListMail(t *testing.T) {
@@ -164,7 +164,7 @@ func TestMailBadKeyIDShape(t *testing.T) {
 	fm := newFakeMail()
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	keyID := "not-hex-32"
-	api := New(fm, fakeResolver{pub: pub, keyID: keyID})
+	api := New(Options{Store: fm, Resolver: fakeResolver{pub: pub, keyID: keyID}})
 	req := signedRequest(t, priv, keyID, "GET", "/mail", nil, time.Now(), "shape-1")
 	rec := httptest.NewRecorder()
 	api.ServeHTTP(rec, req)

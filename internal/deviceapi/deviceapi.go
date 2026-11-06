@@ -19,6 +19,7 @@ package deviceapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -31,6 +32,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/entitlement"
+	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
@@ -121,47 +124,76 @@ var routes = map[string]route{
 	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
 }
 
-type API struct {
-	mux      *http.ServeMux
-	store    store.Store
-	resolver KeyResolver
-	nonces   *nonceCache
+// Provisioner creates mailboxes and checks handle availability (design §8
+// POST /mailbox, GET /handle). routing.Store implements it; nil leaves those
+// routes as 501 stubs.
+type Provisioner interface {
+	Available(ctx context.Context, address string) (bool, error)
+	Create(ctx context.Context, p routing.NewMailbox) (mailboxID []byte, err error)
 }
 
-func New(st store.Store, resolver KeyResolver) *API {
+// Options configures the API. Store is required; the rest enable the routes that
+// depend on them (nil leaves those routes 501/401).
+type Options struct {
+	Store       store.Store
+	Resolver    KeyResolver       // per-mailbox signer keys (address/mailbox/owner-change/passkey)
+	Entitlement ed25519.PublicKey // verifies device entitlements; nil disables entitlement routes
+	Provisioner Provisioner       // mailbox creation + handle checks
+	MailDomain  string            // e.g. "@fountbox.com"; a handle's address is name+domain
+}
+
+type API struct {
+	mux         *http.ServeMux
+	store       store.Store
+	resolver    KeyResolver
+	entVerify   ed25519.PublicKey
+	provisioner Provisioner
+	mailDomain  string
+	nonces      *nonceCache
+}
+
+func New(o Options) *API {
 	a := &API{
-		mux:      http.NewServeMux(),
-		store:    st,
-		resolver: resolver,
-		nonces:   newNonceCache(),
+		mux:         http.NewServeMux(),
+		store:       o.Store,
+		resolver:    o.Resolver,
+		entVerify:   o.Entitlement,
+		provisioner: o.Provisioner,
+		mailDomain:  o.MailDomain,
+		nonces:      newNonceCache(),
 	}
-	mail, _ := st.(store.MailReader) // nil in dev (discard store) -> routes stay 501
+	mail, _ := o.Store.(store.MailReader) // nil in dev (discard store) -> routes stay 501
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail)))
 	}
 	return a
 }
 
-// handler returns the real handler for a route, or the 501 stub for routes
-// whose subsystem isn't live yet. The mail read routes (GET/DELETE /mail) are
-// live once the store is a MailReader.
+// handler returns the real handler for a route, or the 501 stub for routes whose
+// subsystem isn't live yet. Read routes need a MailReader store; the creation
+// routes need a Provisioner.
 func (a *API) handler(pattern string, rt route, mail store.MailReader) http.Handler {
-	if mail != nil {
-		switch pattern {
-		case "GET /mail":
-			return a.listMail(mail)
-		case "GET /mail/{id}":
-			return a.getMail(mail)
-		case "DELETE /mail/{id}":
-			return a.deleteMail(mail)
-		}
+	switch {
+	case mail != nil && pattern == "GET /mail":
+		return a.listMail(mail)
+	case mail != nil && pattern == "GET /mail/{id}":
+		return a.getMail(mail)
+	case mail != nil && pattern == "DELETE /mail/{id}":
+		return a.deleteMail(mail)
+	case a.provisioner != nil && pattern == "POST /mailbox":
+		return a.createMailbox()
+	case a.provisioner != nil && pattern == "GET /handle/{name}":
+		return a.checkHandle()
 	}
 	return a.stub(pattern, rt)
 }
 
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }
 
-// guard verifies the per-request signature for routes that require one.
+// guard authorizes a request for the route's signer class, then runs next. For
+// per-mailbox classes the signing key comes from routing data (Fount-Key-Id);
+// for the entitlement-bearing classes it comes from a signed entitlement token,
+// whose claims are attached to the request context for the handler.
 func (a *API) guard(rt route, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
@@ -175,49 +207,97 @@ func (a *API) guard(rt route, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if err := a.verify(rt.by, r, body); err != nil {
+		ctx, err := a.authorize(rt.by, r, body)
+		if err != nil {
 			writeErr(w, http.StatusUnauthorized, err.Error())
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func (a *API) verify(class signer, r *http.Request, body []byte) error {
-	keyID := r.Header.Get("Fount-Key-Id")
+type claimsCtxKey struct{}
+
+func claimsFrom(ctx context.Context) (*entitlement.Claims, bool) {
+	c, ok := ctx.Value(claimsCtxKey{}).(*entitlement.Claims)
+	return c, ok
+}
+
+// authorize checks the timestamp window, the nonce, and the request signature.
+// It returns the context to run the handler under (carrying entitlement claims
+// for the entitlement classes), or an error that becomes a 401.
+func (a *API) authorize(class signer, r *http.Request, body []byte) (context.Context, error) {
 	tsRaw := r.Header.Get("Fount-Timestamp")
 	nonce := r.Header.Get("Fount-Nonce")
 	sigB64 := r.Header.Get("Fount-Signature")
-	if keyID == "" || tsRaw == "" || nonce == "" || sigB64 == "" {
-		return fmt.Errorf("missing signature headers")
+	if tsRaw == "" || nonce == "" || sigB64 == "" {
+		return nil, fmt.Errorf("missing signature headers")
 	}
 	ts, err := strconv.ParseInt(tsRaw, 10, 64)
 	if err != nil {
-		return fmt.Errorf("bad timestamp")
+		return nil, fmt.Errorf("bad timestamp")
 	}
 	if d := time.Since(time.Unix(ts, 0)); d > timestampSkew || d < -timestampSkew {
-		return fmt.Errorf("timestamp outside window")
+		return nil, fmt.Errorf("timestamp outside window")
 	}
 	if !a.nonces.useOnce(nonce, time.Unix(ts, 0)) {
-		return fmt.Errorf("nonce replay")
+		return nil, fmt.Errorf("nonce replay")
 	}
 	sig, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
-		return fmt.Errorf("bad signature encoding")
+		return nil, fmt.Errorf("bad signature encoding")
+	}
+	canonical := []byte(canonicalString(r.Method, r.URL.Path, body, ts, nonce))
+
+	if class == sigEntitlement || class == sigNewKeys {
+		claims, err := a.verifyEntitlement(r, canonical, sig)
+		if err != nil {
+			return nil, err
+		}
+		return context.WithValue(r.Context(), claimsCtxKey{}, claims), nil
+	}
+
+	keyID := r.Header.Get("Fount-Key-Id")
+	if keyID == "" {
+		return nil, fmt.Errorf("missing key id")
 	}
 	if a.resolver == nil {
-		return fmt.Errorf("no key registered for %s (storage not yet live)", class)
+		return nil, fmt.Errorf("no key registered for %s (storage not yet live)", class)
 	}
 	pub, ok := a.resolver.Resolve(class, keyID)
 	if !ok {
-		return fmt.Errorf("unknown %s key", class)
+		return nil, fmt.Errorf("unknown %s key", class)
 	}
+	if !ed25519.Verify(pub, canonical, sig) {
+		return nil, fmt.Errorf("signature does not verify")
+	}
+	return r.Context(), nil
+}
+
+// verifyEntitlement checks the presented entitlement token and that the request
+// was signed by the device key the token names (so a leaked token can't be
+// replayed with another key).
+func (a *API) verifyEntitlement(r *http.Request, canonical, sig []byte) (*entitlement.Claims, error) {
+	if len(a.entVerify) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("entitlement verification not configured")
+	}
+	tok := r.Header.Get("Fount-Entitlement")
+	if tok == "" {
+		return nil, fmt.Errorf("missing entitlement")
+	}
+	claims, err := entitlement.Verify(tok, a.entVerify, time.Now(), timestampSkew)
+	if err != nil {
+		return nil, err
+	}
+	if !ed25519.Verify(claims.DeviceKey, canonical, sig) {
+		return nil, fmt.Errorf("request not signed by the entitled device key")
+	}
+	return claims, nil
+}
+
+func canonicalString(method, path string, body []byte, ts int64, nonce string) string {
 	sum := sha256.Sum256(body)
-	canonical := fmt.Sprintf("%s\n%s\n%s\n%d\n%s", r.Method, r.URL.Path, hex.EncodeToString(sum[:]), ts, nonce)
-	if !ed25519.Verify(pub, []byte(canonical), sig) {
-		return fmt.Errorf("signature does not verify")
-	}
-	return nil
+	return fmt.Sprintf("%s\n%s\n%s\n%d\n%s", method, path, hex.EncodeToString(sum[:]), ts, nonce)
 }
 
 func (a *API) stub(pattern string, rt route) http.Handler {

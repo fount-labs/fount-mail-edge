@@ -58,9 +58,19 @@ func run() error {
 	log.Printf("edge: attested TLS spki(sha256)=%s", k.TLSPublicSPKI())
 	log.Printf("edge: attested signing pub(ed25519)=%s", k.SignPublicB64())
 
-	st, resolver, recipients, err := storage(cfg, k)
+	st, rt, err := storage(cfg, k)
 	if err != nil {
 		return err
+	}
+	var (
+		resolver    deviceapi.KeyResolver
+		recipients  smtp.RecipientChecker
+		provisioner deviceapi.Provisioner
+	)
+	if rt != nil { // nil in dev (discard store, no routing)
+		resolver = deviceapi.NewKeyResolver(rt)
+		recipients = rt
+		provisioner = rt
 	}
 	certMgr := certs.NewManager()
 
@@ -72,7 +82,13 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	api := deviceapi.New(st, resolver)
+	api := deviceapi.New(deviceapi.Options{
+		Store:       st,
+		Resolver:    resolver,
+		Entitlement: cfg.Secrets.EntitlementVerifyKey,
+		Provisioner: provisioner,
+		MailDomain:  cfg.MailDomain,
+	})
 	apiSrv := &http.Server{
 		Addr:              cfg.DeviceAPIAddr,
 		Handler:           api,
@@ -127,21 +143,22 @@ func run() error {
 }
 
 // storage wires the durable layer. In production it is the real store over S3:
-// routing.Store (resolver + recipient checker + directory) and the HPKE message
-// store sealing each inbound message to the address key, with a fresh 16-byte
-// boot id in every object (§9). In dev there is no S3, so it falls back to the
-// discard store with no resolver (signed Device API routes answer 401) and no
-// recipient checker (SMTP uses the domain suffix) — enough to smoke-test the
-// listeners. Until the write handlers that populate routing data land, a
-// production edge has no mailboxes yet, so every RCPT is correctly refused.
-func storage(cfg *config.Config, k *keys.Keys) (store.Store, deviceapi.KeyResolver, smtp.RecipientChecker, error) {
+// routing.Store (directory + key resolver + recipient checker + provisioner) and
+// the HPKE message store sealing each inbound message to the address key, with a
+// fresh 16-byte boot id in every object (§9). In dev there is no S3, so it falls
+// back to the discard store and a nil routing store, which the caller treats as
+// no resolver (signed Device API routes answer 401), no recipient checker (SMTP
+// uses the domain suffix), and no provisioner (creation routes stay 501) —
+// enough to smoke-test the listeners. Until a mailbox is created, a production
+// edge has none, so every RCPT is correctly refused.
+func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, error) {
 	if cfg.Dev {
 		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
-		return store.NewDiscard(), nil, nil, nil
+		return store.NewDiscard(), nil, nil
 	}
 	endpoint := cfg.S3EndpointURL()
 	if endpoint == "" {
-		return nil, nil, nil, fmt.Errorf("S3 endpoint unset: set S3_ENDPOINT or S3_BUCKET+S3_REGION")
+		return nil, nil, fmt.Errorf("S3 endpoint unset: set S3_ENDPOINT or S3_BUCKET+S3_REGION")
 	}
 	blobs, err := s3.New(s3.Config{
 		Endpoint:        endpoint,
@@ -150,18 +167,18 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, deviceapi.KeyResolv
 		SecretAccessKey: cfg.Secrets.S3SecretAccessKey,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	rt, err := routing.New(context.Background(), blobs, cfg.Secrets.RoutingDataKey, cfg.Secrets.AddressMACKey)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	bootID := make([]byte, 16)
 	if _, err := rand.Read(bootID); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", endpoint, bootID)
-	return store.New(rt, blobs, k.Sign, bootID), deviceapi.NewKeyResolver(rt), rt, nil
+	return store.New(rt, blobs, k.Sign, bootID), rt, nil
 }
 
 // startCertLoop builds the ACME issuer and drives certificate acquisition. If the

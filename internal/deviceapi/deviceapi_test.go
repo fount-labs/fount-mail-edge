@@ -48,7 +48,7 @@ func newTestAPI(t *testing.T) (*API, ed25519.PrivateKey, string) {
 		t.Fatal(err)
 	}
 	keyID := "addr-1"
-	return New(store.NewDiscard(), fakeResolver{pub: pub, keyID: keyID}), priv, keyID
+	return New(Options{Store: store.NewDiscard(), Resolver: fakeResolver{pub: pub, keyID: keyID}}), priv, keyID
 }
 
 func TestValidSignaturePassesToHandler(t *testing.T) {

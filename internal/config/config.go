@@ -39,11 +39,12 @@ const (
 // here must have a matching entry in the keyserver policy.yaml workload and in
 // tinfoil-config.yml's `secrets:` list, or the enclave will not boot.
 type Secrets struct {
-	ACMEAccountKeyPEM []byte // CAA-pinned ACME account key (accounturi)
-	AddressMACKey     []byte // keyed hash of addresses, stable across boots
-	RoutingDataKey    []byte // decrypts the versioned owner/routing list
-	S3AccessKeyID     string
-	S3SecretAccessKey string
+	ACMEAccountKeyPEM    []byte // CAA-pinned ACME account key (accounturi)
+	AddressMACKey        []byte // keyed hash of addresses, stable across boots
+	RoutingDataKey       []byte // decrypts the versioned owner/routing list
+	EntitlementVerifyKey []byte // Ed25519 public key that verifies device entitlements (§4/§8)
+	S3AccessKeyID        string
+	S3SecretAccessKey    string
 }
 
 type Config struct {
@@ -117,11 +118,12 @@ func loadSecrets(dev bool) (Secrets, error) {
 	if dev {
 		log.Printf("edge: *** EDGE_DEV=1 — using placeholder secrets; NEVER set this in a release ***")
 		return Secrets{
-			ACMEAccountKeyPEM: []byte("DEV-PLACEHOLDER"),
-			AddressMACKey:     []byte("dev-address-mac-key-not-secret"),
-			RoutingDataKey:    []byte("dev-routing-data-key-not-secret"),
-			S3AccessKeyID:     "DEV",
-			S3SecretAccessKey: "DEV",
+			ACMEAccountKeyPEM:    []byte("DEV-PLACEHOLDER"),
+			AddressMACKey:        []byte("dev-address-mac-key-not-secret"),
+			RoutingDataKey:       []byte("dev-routing-data-key-not-secret"),
+			EntitlementVerifyKey: make([]byte, 32), // dev: all-zero, verifies nothing real
+			S3AccessKeyID:        "DEV",
+			S3SecretAccessKey:    "DEV",
 		}, nil
 	}
 	acme, err := requireRaw("ACME_ACCOUNT_KEY")
@@ -136,6 +138,10 @@ func loadSecrets(dev bool) (Secrets, error) {
 	if err != nil {
 		return Secrets{}, err
 	}
+	entVerify, err := requireKey("ENTITLEMENT_VERIFY_KEY")
+	if err != nil {
+		return Secrets{}, err
+	}
 	id, err := requireStr("S3_ACCESS_KEY_ID")
 	if err != nil {
 		return Secrets{}, err
@@ -145,11 +151,12 @@ func loadSecrets(dev bool) (Secrets, error) {
 		return Secrets{}, err
 	}
 	return Secrets{
-		ACMEAccountKeyPEM: []byte(acme),
-		AddressMACKey:     mac,
-		RoutingDataKey:    routing,
-		S3AccessKeyID:     id,
-		S3SecretAccessKey: secret,
+		ACMEAccountKeyPEM:    []byte(acme),
+		AddressMACKey:        mac,
+		RoutingDataKey:       routing,
+		EntitlementVerifyKey: entVerify,
+		S3AccessKeyID:        id,
+		S3SecretAccessKey:    secret,
 	}, nil
 }
 

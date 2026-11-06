@@ -294,6 +294,61 @@ func TestObjectEncryptedAtRest(t *testing.T) {
 	}
 }
 
+func TestCreateEnforcesUniqueness(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	s := newStore(t, blobs, routingKey, macKey)
+	ctx := context.Background()
+	ks := newKeyset(t)
+
+	mk := func(addr, lic string) routing.NewMailbox {
+		return routing.NewMailbox{
+			Address:        addr,
+			LicenseHash:    []byte(lic),
+			DecryptionKey:  ks.dec.PublicKey().Bytes(),
+			SigningKey:     ks.sign.Public().(ed25519.PublicKey),
+			MailboxKey:     ks.mailbox.Public().(ed25519.PublicKey),
+			OwnerChangeKey: ks.ownerChange.Public().(ed25519.PublicKey),
+			PasskeyKey:     ks.passkey.Public().(ed25519.PublicKey),
+			EntitlementExp: 123,
+		}
+	}
+
+	if avail, _ := s.Available(ctx, "a@fountbox.com"); !avail {
+		t.Fatal("handle should start available")
+	}
+	id, err := s.Create(ctx, mk("a@fountbox.com", "lic-1"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !bytes.Equal(id, s.MailboxID("a@fountbox.com")) {
+		t.Fatal("Create returned the wrong mailbox id")
+	}
+	if avail, _ := s.Available(ctx, "a@fountbox.com"); avail {
+		t.Fatal("handle should be taken after Create")
+	}
+
+	// Same handle again -> ErrHandleTaken.
+	if _, err := s.Create(ctx, mk("a@fountbox.com", "lic-2")); !errors.Is(err, routing.ErrHandleTaken) {
+		t.Fatalf("err = %v, want ErrHandleTaken", err)
+	}
+	// Different handle, same license -> ErrLicenseTaken.
+	if _, err := s.Create(ctx, mk("b@fountbox.com", "lic-1")); !errors.Is(err, routing.ErrLicenseTaken) {
+		t.Fatalf("err = %v, want ErrLicenseTaken", err)
+	}
+	// Different handle and license -> ok, and it resolves + its sequence starts at 1.
+	if _, err := s.Create(ctx, mk("b@fountbox.com", "lic-2")); err != nil {
+		t.Fatalf("second mailbox: %v", err)
+	}
+	if _, err := s.Resolve(ctx, "b@fountbox.com"); err != nil {
+		t.Fatalf("Resolve new mailbox: %v", err)
+	}
+	seq, err := s.NextSequence(ctx, s.MailboxID("b@fountbox.com"))
+	if err != nil || seq != 1 {
+		t.Fatalf("first sequence = %d, %v, want 1", seq, err)
+	}
+}
+
 // A store survives a reload over the same blobs with its records intact.
 func TestReloadRoundTrip(t *testing.T) {
 	routingKey, macKey := keys(t)
