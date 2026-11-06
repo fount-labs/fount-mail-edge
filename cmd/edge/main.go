@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/acme"
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
 	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/deviceapi"
@@ -55,6 +57,14 @@ func run() error {
 	st := store.NewDiscard()
 	certMgr := certs.NewManager()
 
+	// ACME: get a CA cert for the attested TLS key via the gateway HTTP-01 path.
+	challenges := acme.NewChallenges()
+	acmeSrv := &http.Server{
+		Addr:              cfg.ACMEChallengeAddr,
+		Handler:           challenges.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	api := deviceapi.New(st, nil) // key resolver lands with storage (M2 step 4)
 	apiSrv := &http.Server{
 		Addr:              cfg.DeviceAPIAddr,
@@ -81,11 +91,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	go func() { errc <- smtpSrv.ListenAndServe(ctx) }()
 	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
 	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
-	log.Printf("edge: listening smtp=%s device-api=%s health=%s", cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr)
+	go func() { errc <- ignoreClosed(acmeSrv.ListenAndServe()) }()
+	go startCertLoop(ctx, cfg, k, certMgr, challenges)
+	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
+		cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
 
 	select {
 	case <-ctx.Done():
@@ -100,8 +113,29 @@ func run() error {
 	defer cancel()
 	_ = apiSrv.Shutdown(sctx)
 	_ = healthSrv.Shutdown(sctx)
+	_ = acmeSrv.Shutdown(sctx)
 	_ = smtpSrv.Shutdown(sctx)
 	return nil
+}
+
+// startCertLoop builds the ACME issuer and drives certificate acquisition. If the
+// account key can't be parsed (EDGE_DEV placeholder), it logs and skips — the
+// edge then serves 421 forever, which is correct for a dev boot with no CA.
+func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *certs.Manager, challenges *acme.Challenges) {
+	issuer, err := acme.NewIssuer(cfg.Secrets.ACMEAccountKeyPEM, cfg.ACMEDirectory, challenges)
+	if err != nil {
+		log.Printf("edge: ACME disabled (%v); SMTP will answer 421 until a cert loads", err)
+		return
+	}
+	var cache certs.Cache
+	if cfg.CertCacheDir != "" {
+		cache = certs.NewDiskCache(cfg.CertCacheDir)
+	}
+	log.Printf("edge: ACME via %s for %s", cfg.ACMEDirectory, cfg.Hostname)
+	certs.RunLoop(ctx, mgr, cache, challenges.Reachable(), cfg.Hostname,
+		func(ctx context.Context, host string) (*tls.Certificate, error) {
+			return issuer.Issue(ctx, host, k.TLS)
+		})
 }
 
 // health serves the shim's /health and /ready probes. /ready is not-ready until

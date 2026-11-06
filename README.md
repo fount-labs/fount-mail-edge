@@ -33,7 +33,7 @@ Device API, §17 build/release). This repo realises M2 build steps 2–3.
   `method · path · sha256(body) · timestamp · nonce`, so a captured request can't
   be replayed.
 
-## Status — initial scaffold (M2 steps 2–3)
+## Status — M2 steps 2–3
 
 Real and exercised now:
 
@@ -41,13 +41,21 @@ Real and exercised now:
 - the SMTP state machine (PROXY → mandatory STARTTLS → recipient/size checks);
 - the full Device API route table with real signature verification (timestamp
   window + nonce replay cache + Ed25519), handlers stubbed at `501`;
+- **ACME (RFC 8555, HTTP-01)** for the attested TLS key: the keyserver's
+  CAA-pinned account key signs the order, the attested `mail-tls` key is the
+  cert key, the challenge is served on the ACME port the gateway forwards from
+  port 80. Issuance waits for gateway reachability, then 15s, then retries with
+  backoff; the issued cert is cached (disk in dev, S3 in prod). Exercised
+  end-to-end against a mock ACME server (`internal/acme`);
+- the **gateway** CloudFormation stack (`gateway/`) adapted from the proven
+  port-25 probe;
 - reproducible `FROM scratch` build + the two Tinfoil release workflows + a
   two-runner digest-comparison CI, present from the first commit.
 
 Clearly-marked seams, not yet built:
 
-- **ACME** issuance for the attested key via the gateway HTTP-01 path, + S3 cert
-  cache (M2 step 3). Until a cert loads, SMTP answers `421` and `/ready` is 503.
+- **S3 cert cache** (`certs.DiskCache` is the dev stand-in) and **`shim.authenticated`
+  + mutual TLS on the tunnel + the live load test** (the infra half of step 3).
 - **HPKE-to-address + S3 storage** and the Device API handlers / key resolver
   (M2 step 4).
 - **Pinned base-image digests** in the `Dockerfile` (`PLACEHOLDER_*`), the

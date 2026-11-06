@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Fount Fleet mail gateway. Accepts public port 25 and ACME HTTP-01 on port 80,
+  and pipes both through an attested Tinfoil tunnel to the edge enclave. It
+  filters connections only (§7) and never sees mail content or addresses: TLS 1.3
+  terminates inside the enclave, and HAProxy adds the real sender IP with a PROXY
+  header. No SSH, no connection logs. Deploy TWO of these in separate AZs, each
+  with its own MX record, so one VM failing doesn't stop mail.
+
+Parameters:
+  Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  EnclaveHost:
+    Type: String
+    Default: mail-edge.fount.sh # PLACEHOLDER — the edge's pinned deployment domain
+  EnclaveRepo:
+    Type: String
+    Default: fount-labs/fount-mail-edge # PLACEHOLDER org — targets the enclave by repo, so no admin key on the VM
+  TinfoilCliVersion:
+    Type: String
+    Default: "0.19.19"
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # SSM only; no inbound SSH
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+  Group:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SMTP and ACME HTTP-01 only
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 25, ToPort: 25, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t4g.micro
+      ImageId: !Ref Ami
+      IamInstanceProfile: !Ref Profile
+      SecurityGroupIds: [!GetAtt Group.GroupId]
+      MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+      Tags:
+        - { Key: Name, Value: fount-mail-gateway }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y haproxy
+          cd /tmp
+          V=${TinfoilCliVersion}
+          curl -fsSLO "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v$V/tinfoil-cli_${!V}_linux_arm64.tar.gz"
+          # TODO(before deploy): pin and verify the CLI tarball sha256 (as the probe did).
+          tar -xzf "tinfoil-cli_${!V}_linux_arm64.tar.gz" tinfoil
+          install -m 755 tinfoil /usr/local/bin/tinfoil
+          cat > /etc/haproxy/haproxy.cfg <<'CFG'
+          global
+            log /dev/log local0
+            maxconn 200
+          defaults
+            mode tcp
+            log global
+            option tcplog
+            timeout connect 5s
+            timeout client 5m
+            timeout server 5m
+          # SMTP: open the backend only after the edge's /ready passes twice
+          # (design §6: the edge waits 15s so its certificate loads first).
+          frontend smtp
+            bind :25
+            default_backend edge
+          backend edge
+            option httpchk GET /ready
+            http-check expect status 200
+            server tunnel 127.0.0.1:2526 send-proxy check port 2508 inter 5s rise 2
+          # ACME HTTP-01: plain port 80 forwarded to the edge's challenge responder
+          frontend acme
+            bind :80
+            default_backend challenge
+          backend challenge
+            server tunnel 127.0.0.1:2580
+          CFG
+          # tinfoil forward re-verifies the enclave by itself. -L maps:
+          #   2526 -> edge :2525  (SMTP)        2580 -> edge :8088 (ACME HTTP-01)
+          #   2508 -> edge :8080  (shim /ready health check)
+          # TODO(§7): the SMTP and device-api tunnel ports must require mutual TLS
+          # (untested), and shim.authenticated must be on so a keyless CONNECT
+          # gets 401 before it counts. Needs a tk_ key delivered at boot.
+          cat > /usr/local/bin/fount-tunnel <<'SH'
+          #!/bin/sh
+          exec /usr/local/bin/tinfoil forward ${EnclaveHost} --repo ${EnclaveRepo} \
+            -L 127.0.0.1:2526:2525 \
+            -L 127.0.0.1:2580:8088 \
+            -L 127.0.0.1:2508:8080
+          SH
+          chmod 755 /usr/local/bin/fount-tunnel
+          cat > /etc/systemd/system/fount-tunnel.service <<'UNIT'
+          [Unit]
+          After=network-online.target
+          Wants=network-online.target
+          StartLimitIntervalSec=0
+          [Service]
+          ExecStart=/usr/local/bin/fount-tunnel
+          Restart=always
+          RestartSec=5
+          DynamicUser=yes
+          StateDirectory=fount-tunnel
+          Environment=HOME=/var/lib/fount-tunnel
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          # Start the enclave FIRST (design §7: a gateway that looks up the host
+          # early can cache "no such host" for up to 30 minutes).
+          systemctl enable --now fount-tunnel haproxy
+  Ip:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref Instance
+
+Outputs:
+  PublicIp:
+    Value: !Ref Ip
+  InstanceId:
+    Value: !Ref Instance

@@ -35,11 +35,15 @@ func main() {
 ```sh
 go build -o edge ./cmd/edge
 EDGE_DEV=1 ATTESTED_KEY_DIR=/tmp/devkeys \
-  SMTP_ADDR=:12525 DEVICE_API_ADDR=:18443 HEALTH_ADDR=:18080 ./edge
+  SMTP_ADDR=:12525 DEVICE_API_ADDR=:18443 HEALTH_ADDR=:18080 ACME_CHALLENGE_ADDR=:18088 ./edge
 ```
 
 `EDGE_DEV=1` fills placeholder secrets so the binary boots without a keyserver.
-**Never set it in a release.** Probes:
+**Never set it in a release.** In dev, ACME is disabled (the placeholder account
+key isn't a real PEM key), so `/ready` stays 503 and SMTP answers `421` — that's
+correct for a boot with no CA. Other ACME knobs: `ACME_DIRECTORY` (defaults to
+Let's Encrypt **staging**; set the production URL at deploy) and `CERT_CACHE_DIR`
+(disk cert cache; production uses S3 instead). Probes:
 
 ```sh
 curl -s localhost:18080/health                         # ok

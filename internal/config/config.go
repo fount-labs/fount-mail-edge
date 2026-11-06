@@ -26,6 +26,15 @@ import (
 
 const defaultMaxMessageBytes = 25 * 1024 * 1024 // 25 MB, matches the probe's SIZE
 
+// Let's Encrypt directories. Default to STAGING so development and the first
+// tunnel tests don't burn the production rate limit (5 certs/week per exact name
+// set). Set ACME_DIRECTORY to the production URL at deploy — real senders reject
+// staging certs.
+const (
+	acmeStaging    = "https://acme-staging-v02.api.letsencrypt.org/directory"
+	acmeProduction = "https://acme-v02.api.letsencrypt.org/directory"
+)
+
 // Secrets are delivered by the keyserver and injected as env vars. Every field
 // here must have a matching entry in the keyserver policy.yaml workload and in
 // tinfoil-config.yml's `secrets:` list, or the enclave will not boot.
@@ -45,6 +54,8 @@ type Config struct {
 	DeviceAPIAddr   string
 	HealthAddr      string
 	ACMEChallengeAddr string
+	ACMEDirectory     string // Let's Encrypt directory URL (staging by default)
+	CertCacheDir      string // where issued certs are cached; "" disables (prod uses S3)
 	MaxMessageBytes int64
 	Dev             bool
 	Secrets         Secrets
@@ -62,6 +73,8 @@ func Load() (*Config, error) {
 		DeviceAPIAddr:     env("DEVICE_API_ADDR", ":8443"),
 		HealthAddr:        env("HEALTH_ADDR", ":8080"),
 		ACMEChallengeAddr: env("ACME_CHALLENGE_ADDR", ":8088"),
+		ACMEDirectory:     env("ACME_DIRECTORY", acmeStaging),
+		CertCacheDir:      os.Getenv("CERT_CACHE_DIR"),
 		MaxMessageBytes:   defaultMaxMessageBytes,
 		Dev:               dev,
 	}
