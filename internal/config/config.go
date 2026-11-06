@@ -57,8 +57,24 @@ type Config struct {
 	ACMEDirectory     string // Let's Encrypt directory URL (staging by default)
 	CertCacheDir      string // where issued certs are cached; "" disables (prod uses S3)
 	MaxMessageBytes   int64
+	S3Bucket          string // mail bucket name
+	S3Region          string // bucket region, e.g. us-east-1
+	S3Endpoint        string // bucket root URL; derived from bucket+region if unset
 	Dev               bool
 	Secrets           Secrets
+}
+
+// S3EndpointURL is the bucket root the S3 client talks to. An explicit
+// S3_ENDPOINT wins (for an S3-compatible host); otherwise it is AWS
+// virtual-hosted-style, which Tinfoil's exact-hostname egress allowlist needs.
+func (c *Config) S3EndpointURL() string {
+	if c.S3Endpoint != "" {
+		return c.S3Endpoint
+	}
+	if c.S3Bucket == "" || c.S3Region == "" {
+		return ""
+	}
+	return "https://" + c.S3Bucket + ".s3." + c.S3Region + ".amazonaws.com"
 }
 
 // Load reads the environment and returns a validated Config, or a fatal error if
@@ -76,6 +92,9 @@ func Load() (*Config, error) {
 		ACMEDirectory:     env("ACME_DIRECTORY", acmeStaging),
 		CertCacheDir:      os.Getenv("CERT_CACHE_DIR"),
 		MaxMessageBytes:   defaultMaxMessageBytes,
+		S3Bucket:          os.Getenv("S3_BUCKET"),
+		S3Region:          os.Getenv("S3_REGION"),
+		S3Endpoint:        os.Getenv("S3_ENDPOINT"),
 		Dev:               dev,
 	}
 	if v := os.Getenv("MAX_MESSAGE_BYTES"); v != "" {

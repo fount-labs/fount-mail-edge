@@ -12,8 +12,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
@@ -25,6 +27,8 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/deviceapi"
 	"github.com/fount-labs/fount-mail-edge/internal/keys"
+	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/s3"
 	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
@@ -54,7 +58,10 @@ func run() error {
 	log.Printf("edge: attested TLS spki(sha256)=%s", k.TLSPublicSPKI())
 	log.Printf("edge: attested signing pub(ed25519)=%s", k.SignPublicB64())
 
-	st := store.NewDiscard()
+	st, resolver, recipients, err := storage(cfg, k)
+	if err != nil {
+		return err
+	}
 	certMgr := certs.NewManager()
 
 	// ACME: get a CA cert for the attested TLS key via the gateway HTTP-01 path.
@@ -65,13 +72,7 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// The key resolver and recipient checker are routing.Store over S3 (built in
-	// internal/routing, implements store.Directory + deviceapi.KeyProvider +
-	// smtp.RecipientChecker). Wiring waits for the S3 Blobs transport and the
-	// write handlers that populate routing data; until then dev runs with no
-	// resolver (Device API signed routes answer 401) and no recipient checker
-	// (SMTP falls back to the domain suffix). See internal/routing.
-	api := deviceapi.New(st, nil)
+	api := deviceapi.New(st, resolver)
 	apiSrv := &http.Server{
 		Addr:              cfg.DeviceAPIAddr,
 		Handler:           api,
@@ -80,12 +81,13 @@ func run() error {
 	}
 
 	smtpSrv := smtp.New(smtp.Options{
-		Addr:     cfg.SMTPAddr,
-		Hostname: "mx." + trimAt(cfg.MailDomain),
-		Domain:   cfg.MailDomain,
-		Certs:    certMgr,
-		Store:    st,
-		MaxBytes: cfg.MaxMessageBytes,
+		Addr:       cfg.SMTPAddr,
+		Hostname:   "mx." + trimAt(cfg.MailDomain),
+		Domain:     cfg.MailDomain,
+		Certs:      certMgr,
+		Store:      st,
+		Recipients: recipients,
+		MaxBytes:   cfg.MaxMessageBytes,
 	})
 
 	healthSrv := &http.Server{
@@ -122,6 +124,44 @@ func run() error {
 	_ = acmeSrv.Shutdown(sctx)
 	_ = smtpSrv.Shutdown(sctx)
 	return nil
+}
+
+// storage wires the durable layer. In production it is the real store over S3:
+// routing.Store (resolver + recipient checker + directory) and the HPKE message
+// store sealing each inbound message to the address key, with a fresh 16-byte
+// boot id in every object (§9). In dev there is no S3, so it falls back to the
+// discard store with no resolver (signed Device API routes answer 401) and no
+// recipient checker (SMTP uses the domain suffix) — enough to smoke-test the
+// listeners. Until the write handlers that populate routing data land, a
+// production edge has no mailboxes yet, so every RCPT is correctly refused.
+func storage(cfg *config.Config, k *keys.Keys) (store.Store, deviceapi.KeyResolver, smtp.RecipientChecker, error) {
+	if cfg.Dev {
+		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
+		return store.NewDiscard(), nil, nil, nil
+	}
+	endpoint := cfg.S3EndpointURL()
+	if endpoint == "" {
+		return nil, nil, nil, fmt.Errorf("S3 endpoint unset: set S3_ENDPOINT or S3_BUCKET+S3_REGION")
+	}
+	blobs, err := s3.New(s3.Config{
+		Endpoint:        endpoint,
+		Region:          cfg.S3Region,
+		AccessKeyID:     cfg.Secrets.S3AccessKeyID,
+		SecretAccessKey: cfg.Secrets.S3SecretAccessKey,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	rt, err := routing.New(context.Background(), blobs, cfg.Secrets.RoutingDataKey, cfg.Secrets.AddressMACKey)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	bootID := make([]byte, 16)
+	if _, err := rand.Read(bootID); err != nil {
+		return nil, nil, nil, err
+	}
+	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", endpoint, bootID)
+	return store.New(rt, blobs, k.Sign, bootID), deviceapi.NewKeyResolver(rt), rt, nil
 }
 
 // startCertLoop builds the ACME issuer and drives certificate acquisition. If the
