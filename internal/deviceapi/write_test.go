@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
@@ -115,7 +116,7 @@ func createMbox(t *testing.T, rt *routing.Store, address, license string) mbox {
 		MailboxKey:     mp.Public().(ed25519.PublicKey),
 		OwnerChangeKey: op.Public().(ed25519.PublicKey),
 		PasskeyKey:     pk,
-		EntitlementExp: 100,
+		EntitlementExp: time.Now().Add(time.Hour).Unix(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +159,7 @@ func TestPostAddress(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if known, _ := rt.Known(context.Background(), "sub.worker@fountbox.com"); !known {
+	if st, _ := rt.Status(context.Background(), "sub.worker@fountbox.com"); st != smtp.RecipientAccepting {
 		t.Fatal("new address does not resolve after POST /address")
 	}
 }

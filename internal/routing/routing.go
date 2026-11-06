@@ -9,8 +9,8 @@
 //     allocate the next sequence number (used at RCPT and store time);
 //   - deviceapi.KeyProvider — map a mailbox id to the registered public key for
 //     a signer class, so the Device API can verify a call's signature;
-//   - smtp.RecipientChecker — report whether any mailbox claims an address, so
-//     RCPT has no catch-all.
+//   - smtp.RecipientChecker — decide whether to accept mail for an address, so
+//     RCPT has no catch-all and bounces a lapsed entitlement.
 //
 // # Identity model (M2)
 //
@@ -51,7 +51,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
@@ -318,11 +320,24 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 
 // --- smtp.RecipientChecker -------------------------------------------------
 
-// Known reports whether a mailbox claims the recipient. RCPT uses it so there is
-// no catch-all; a slow miss is the caller's concern, not this layer's.
-func (s *Store) Known(_ context.Context, recipient string) (bool, error) {
-	_, ok := s.lookup(hex.EncodeToString(s.MailboxID(recipient)))
-	return ok, nil
+// Status reports whether the edge should accept mail for a recipient right now
+// (smtp.RecipientChecker). It is RecipientUnknown when no mailbox claims the
+// address (no catch-all, §6), RecipientExpired when a mailbox claims it but its
+// entitlement has lapsed past the past_due grace (§4 "after past_due grace, the
+// mailbox answers 550"), and RecipientAccepting otherwise. A zero EntitlementExp
+// means no entitlement has been recorded — dev/smoke, or a record that predates
+// enforcement — and is treated as accepting, never as expired; the app keeps
+// EntitlementExp ahead of now while a license is current or in grace, so a
+// lapsed value is the signal that even the grace is over.
+func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatus, error) {
+	m, ok := s.lookup(hex.EncodeToString(s.MailboxID(recipient)))
+	if !ok {
+		return smtp.RecipientUnknown, nil
+	}
+	if m.EntitlementExp > 0 && time.Now().Unix() >= m.EntitlementExp {
+		return smtp.RecipientExpired, nil
+	}
+	return smtp.RecipientAccepting, nil
 }
 
 // --- write path (used by Device API write handlers and tests) --------------

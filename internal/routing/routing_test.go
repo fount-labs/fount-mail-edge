@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/deviceapi"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
@@ -125,7 +126,7 @@ func newStore(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routi
 	return s
 }
 
-func TestResolveAndKnown(t *testing.T) {
+func TestResolveAndStatus(t *testing.T) {
 	routingKey, macKey := keys(t)
 	blobs := newMemBlobs()
 	s := newStore(t, blobs, routingKey, macKey)
@@ -149,16 +150,52 @@ func TestResolveAndKnown(t *testing.T) {
 		t.Fatal("resolved decryption key mismatch")
 	}
 
-	known, _ := s.Known(ctx, addr)
-	if !known {
-		t.Fatal("Known should be true for a registered address")
+	st, _ := s.Status(ctx, addr)
+	if st != smtp.RecipientAccepting {
+		t.Fatalf("Status for a registered address = %v, want Accepting", st)
 	}
 
 	if _, err := s.Resolve(ctx, "nobody@fountbox.com"); !errors.Is(err, store.ErrNoRecipient) {
 		t.Fatalf("unknown Resolve err = %v, want ErrNoRecipient", err)
 	}
-	if known, _ := s.Known(ctx, "nobody@fountbox.com"); known {
-		t.Fatal("Known should be false for an unregistered address")
+	if st, _ := s.Status(ctx, "nobody@fountbox.com"); st != smtp.RecipientUnknown {
+		t.Fatalf("Status for an unregistered address = %v, want Unknown", st)
+	}
+}
+
+func TestStatusEntitlementExpiry(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+
+	// A record with no recorded entitlement (exp 0) accepts: dev/smoke and
+	// pre-enforcement records must not bounce.
+	noExp := s.MailboxID("none@fountbox.com")
+	if err := s.Upsert(ctx, newKeyset(t).record(noExp)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Status(ctx, "none@fountbox.com"); st != smtp.RecipientAccepting {
+		t.Fatalf("zero EntitlementExp Status = %v, want Accepting", st)
+	}
+
+	// A current entitlement accepts.
+	live := newKeyset(t).record(s.MailboxID("live@fountbox.com"))
+	live.EntitlementExp = time.Now().Add(time.Hour).Unix()
+	if err := s.Upsert(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Status(ctx, "live@fountbox.com"); st != smtp.RecipientAccepting {
+		t.Fatalf("future EntitlementExp Status = %v, want Accepting", st)
+	}
+
+	// A lapsed entitlement bounces (550): grace is over.
+	dead := newKeyset(t).record(s.MailboxID("dead@fountbox.com"))
+	dead.EntitlementExp = time.Now().Add(-time.Hour).Unix()
+	if err := s.Upsert(ctx, dead); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Status(ctx, "dead@fountbox.com"); st != smtp.RecipientExpired {
+		t.Fatalf("past EntitlementExp Status = %v, want Expired", st)
 	}
 }
 

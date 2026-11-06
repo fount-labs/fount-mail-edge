@@ -40,12 +40,30 @@ type Storer interface {
 	Put(ctx context.Context, recipient, sender string, raw []byte) (string, error)
 }
 
-// RecipientChecker reports whether a mailbox actually claims an address. When
-// an Options.Recipients is set, RCPT rejects anything it doesn't know, so there
-// is no catch-all (§6). A nil Recipients falls back to the domain suffix check
-// alone, which is only right for dev/smoke where no routing data exists.
+// RecipientStatus is RCPT's verdict for one envelope recipient (§6, §4).
+type RecipientStatus int
+
+const (
+	// RecipientUnknown: no mailbox claims the address. There is no catch-all
+	// (§6), so RCPT answers 550 "no such user".
+	RecipientUnknown RecipientStatus = iota
+	// RecipientAccepting: a mailbox claims the address and its entitlement is
+	// current. Deliver.
+	RecipientAccepting
+	// RecipientExpired: a mailbox claims the address but its entitlement has
+	// lapsed past the past_due grace (§4 "after past_due grace, the mailbox
+	// answers 550"). RCPT answers 550 so mail bounces rather than being
+	// silently accepted and dropped.
+	RecipientExpired
+)
+
+// RecipientChecker decides whether the edge accepts mail for an address right
+// now. When an Options.Recipients is set, RCPT rejects anything it doesn't know
+// (no catch-all, §6) and anything whose entitlement has lapsed (§4). A nil
+// Recipients falls back to the domain suffix check alone, which is only right
+// for dev/smoke where no routing data exists.
 type RecipientChecker interface {
-	Known(ctx context.Context, recipient string) (bool, error)
+	Status(ctx context.Context, recipient string) (RecipientStatus, error)
 }
 
 type Options struct {
@@ -220,13 +238,15 @@ func (se *session) command(ctx context.Context, verb, rest string) {
 			return
 		}
 		if rc := se.s.opt.Recipients; rc != nil {
-			known, err := rc.Known(ctx, addr)
-			if err != nil {
+			switch st, err := rc.Status(ctx, addr); {
+			case err != nil:
 				se.reply("451 4.3.0 try again later")
 				return
-			}
-			if !known {
+			case st == RecipientUnknown:
 				se.reply("550 5.1.1 no such user")
+				return
+			case st == RecipientExpired:
+				se.reply("550 5.7.1 mailbox not accepting mail")
 				return
 			}
 		}
