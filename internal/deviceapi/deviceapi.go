@@ -61,6 +61,42 @@ type KeyResolver interface {
 	Resolve(class signer, keyID string) (ed25519.PublicKey, bool)
 }
 
+// KeyProvider supplies a mailbox's registered public keys, looked up by the hex
+// mailbox id the broker sends as Fount-Key-Id (the M2 identity model, §4/§8).
+// The routing layer implements it; deviceapi owns the mapping from signer class
+// to key, so an implementer never names the unexported signer type. A false
+// result makes guard answer 401 for that call.
+type KeyProvider interface {
+	AddressKey(keyID string) (ed25519.PublicKey, bool)     // request signing key (address-class routes)
+	MailboxKey(keyID string) (ed25519.PublicKey, bool)     // POST /address
+	OwnerChangeKey(keyID string) (ed25519.PublicKey, bool) // PUT /routing
+	PasskeyKey(keyID string) (ed25519.PublicKey, bool)     // POST /recover
+}
+
+// NewKeyResolver adapts a KeyProvider to the signer classes guard verifies
+// against. The bootstrap classes (entitlement, new-keys, stripe) gate mailbox
+// creation rather than an existing mailbox, so they are not resolvable from
+// routing data in M2 and their routes stay 501; returning false here means such
+// a call is refused at 401 before reaching the stub.
+func NewKeyResolver(p KeyProvider) KeyResolver { return providerResolver{p} }
+
+type providerResolver struct{ p KeyProvider }
+
+func (r providerResolver) Resolve(class signer, keyID string) (ed25519.PublicKey, bool) {
+	switch class {
+	case sigAddress:
+		return r.p.AddressKey(keyID)
+	case sigMailbox:
+		return r.p.MailboxKey(keyID)
+	case sigOwnerChange:
+		return r.p.OwnerChangeKey(keyID)
+	case sigPasskey:
+		return r.p.PasskeyKey(keyID)
+	default:
+		return nil, false
+	}
+}
+
 type route struct {
 	by    signer
 	phase string

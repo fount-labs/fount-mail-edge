@@ -65,7 +65,13 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	api := deviceapi.New(st, nil) // key resolver lands with storage (M2 step 4)
+	// The key resolver and recipient checker are routing.Store over S3 (built in
+	// internal/routing, implements store.Directory + deviceapi.KeyProvider +
+	// smtp.RecipientChecker). Wiring waits for the S3 Blobs transport and the
+	// write handlers that populate routing data; until then dev runs with no
+	// resolver (Device API signed routes answer 401) and no recipient checker
+	// (SMTP falls back to the domain suffix). See internal/routing.
+	api := deviceapi.New(st, nil)
 	apiSrv := &http.Server{
 		Addr:              cfg.DeviceAPIAddr,
 		Handler:           api,
