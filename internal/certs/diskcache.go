@@ -6,12 +6,11 @@ import (
 	"path/filepath"
 )
 
-// DiskCache is a development stand-in for the production S3 certificate cache
-// (design §6). It writes the issued chain + key as PEM under dir. NOT for
-// production: the enclave's root is read-only and tmpfs doesn't survive a boot,
-// so production must back Cache with S3.
-//
-// TODO(M2 step 4): S3Cache implementing Cache, using the keyserver S3 creds.
+// DiskCache is a development stand-in for the production cache (S3Cache, design
+// §6). It writes the issued chain + key as PEM under dir. NOT for production:
+// the enclave's root is read-only and tmpfs doesn't survive a boot, so
+// production backs Cache with S3Cache instead (chain only, paired with the
+// attested key on load).
 type DiskCache struct{ dir string }
 
 func NewDiskCache(dir string) *DiskCache { return &DiskCache{dir: dir} }

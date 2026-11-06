@@ -162,16 +162,7 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
 		return store.NewDiscard(), nil, nil
 	}
-	endpoint := cfg.S3EndpointURL()
-	if endpoint == "" {
-		return nil, nil, fmt.Errorf("S3 endpoint unset: set S3_ENDPOINT or S3_BUCKET+S3_REGION")
-	}
-	blobs, err := s3.New(s3.Config{
-		Endpoint:        endpoint,
-		Region:          cfg.S3Region,
-		AccessKeyID:     cfg.Secrets.S3AccessKeyID,
-		SecretAccessKey: cfg.Secrets.S3SecretAccessKey,
-	})
+	blobs, err := newBlobs(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -183,7 +174,7 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 	if _, err := rand.Read(bootID); err != nil {
 		return nil, nil, err
 	}
-	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", endpoint, bootID)
+	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", cfg.S3EndpointURL(), bootID)
 	st := store.New(rt, blobs, k.Sign, bootID)
 	// Publish this boot's attestation (§9) so the broker can check stored
 	// messages' signatures against it, even after this enclave is gone. A failure
@@ -197,6 +188,40 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 	return st, rt, nil
 }
 
+// newBlobs builds the S3 client both the durable store and the certificate
+// cache use. It fails if S3 isn't configured (a production edge must have it).
+func newBlobs(cfg *config.Config) (*s3.Client, error) {
+	endpoint := cfg.S3EndpointURL()
+	if endpoint == "" {
+		return nil, fmt.Errorf("S3 endpoint unset: set S3_ENDPOINT or S3_BUCKET+S3_REGION")
+	}
+	return s3.New(s3.Config{
+		Endpoint:        endpoint,
+		Region:          cfg.S3Region,
+		AccessKeyID:     cfg.Secrets.S3AccessKeyID,
+		SecretAccessKey: cfg.Secrets.S3SecretAccessKey,
+	})
+}
+
+// certCache picks the certificate cache: S3 in production (so a crash loop
+// reloads the cert instead of re-running ACME, §6), a local disk cache when
+// CertCacheDir is set for development, or none. The cache is only consulted once
+// ACME is live, so a dev boot with a placeholder account key never reaches it.
+func certCache(cfg *config.Config, k *keys.Keys) certs.Cache {
+	if cfg.CertCacheDir != "" {
+		return certs.NewDiskCache(cfg.CertCacheDir)
+	}
+	if cfg.Dev {
+		return nil
+	}
+	blobs, err := newBlobs(cfg)
+	if err != nil {
+		log.Printf("edge: certificate cache disabled (%v); a crash loop may re-run ACME", err)
+		return nil
+	}
+	return certs.NewS3Cache(blobs, k.TLS)
+}
+
 // startCertLoop builds the ACME issuer and drives certificate acquisition. If the
 // account key can't be parsed (EDGE_DEV placeholder), it logs and skips — the
 // edge then serves 421 forever, which is correct for a dev boot with no CA.
@@ -206,10 +231,7 @@ func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *c
 		log.Printf("edge: ACME disabled (%v); SMTP will answer 421 until a cert loads", err)
 		return
 	}
-	var cache certs.Cache
-	if cfg.CertCacheDir != "" {
-		cache = certs.NewDiskCache(cfg.CertCacheDir)
-	}
+	cache := certCache(cfg, k)
 	log.Printf("edge: ACME via %s for %s", cfg.ACMEDirectory, cfg.Hostname)
 	certs.RunLoop(ctx, mgr, cache, challenges.Reachable(), cfg.Hostname,
 		func(ctx context.Context, host string) (*tls.Certificate, error) {
