@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+  # Reproducibility gate (design §17): build the image on two independent
+  # runners and fail if the resulting digests differ. This is the cheap
+  # pre-check; the release itself is measured by tinfoil-release-publish.yml.
+  reproducible-build:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deterministic build
+        run: ./scripts/build-image.sh /tmp/edge.oci
+      - name: Record image digest
+        run: |
+          DIGEST=$(cat /tmp/edge.oci/index.json | jq -r '.manifests[0].digest')
+          echo "digest=$DIGEST" | tee "digest-${{ matrix.runner }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.runner }}
+          path: digest-${{ matrix.runner }}.txt
+
+  compare-digests:
+    needs: reproducible-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+      - name: Fail if digests differ
+        run: |
+          echo "Digests across runners:"
+          cat digest-*.txt
+          sort -u -t= -k2 digest-*.txt > /tmp/unique || true
+          if [ "$(cat digest-*.txt | cut -d= -f2 | sort -u | wc -l)" != "1" ]; then
+            echo "::error::Image digests differ across runners — build is not reproducible"
+            exit 1
+          fi
+          echo "Reproducible: all runners produced the same digest."

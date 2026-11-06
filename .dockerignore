@@ -1,0 +1,14 @@
+# Keep the build context minimal and deterministic.
+.git
+.github
+docs
+scripts
+*.md
+/edge
+*.oci
+/devkeys
+.env
+.env.*
+*.pem
+*.key
+.DS_Store

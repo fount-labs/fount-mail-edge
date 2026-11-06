@@ -1,0 +1,22 @@
+# Build output
+/edge
+*.oci
+/dist
+
+# Never commit secrets or keys
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# Local dev keys
+/devkeys
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

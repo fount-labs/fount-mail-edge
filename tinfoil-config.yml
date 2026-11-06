@@ -1,0 +1,59 @@
+# Fount Fleet mail edge — Tinfoil enclave config (measured as part of attestation).
+#
+# Approving a release pins everything in this file: the image digest, the
+# attested keys, the keyserver URL, and the egress allowlist. Tinfoil cannot
+# redirect a running instance to another keyserver, and publishing a release
+# with a different keyserver-url is refused until a matching workload entry is
+# added to the keyserver policy.yaml (see fount-infra/keyserver/policy.yaml).
+#
+# This repo is PUBLIC by design (reproducible builds need a public source). No
+# secret value lives here. The secrets below are NAMES the enclave requests from
+# the keyserver after attestation; their values live in a separate AWS account.
+
+cvm-version: 0.14.17 # https://github.com/tinfoilsh/cvmimage/releases/latest, no `v`
+cpus: 2
+memory: 8192
+
+# Per-boot keys generated inside the enclave; their public halves are in the
+# attestation, so the keyserver never holds them (design §5 "Edge keys").
+attested-keys:
+  - id: mail-tls   # ecdsa-p256: STARTTLS (ACME cert) + Device API TLS leaf
+    key: ecdsa-p256
+  - id: mail-sign  # ed25519: signs each stored message (design §9)
+    key: ed25519
+
+networks:
+  edge:
+    egress: allowlist # Tinfoil has no wildcards; list every host by exact name
+    allow:
+      - keys.fount.sh                       # PLACEHOLDER — the deployed keyserver host
+      - acme-v02.api.letsencrypt.org        # ACME production
+      - acme-staging-v02.api.letsencrypt.org
+      # - <bucket>.s3.<region>.amazonaws.com  # TODO(M2 step 4): the S3 storage host
+      # - s3.<region>.amazonaws.com
+
+containers:
+  - name: mail-edge
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:PLACEHOLDER_DIGEST" # set by release
+    networks: [edge]
+    keys: [mail-tls, mail-sign]
+    ports: ["2525:2525", "8443:8443", "8088:8088"]
+    tmpfs:
+      /tmp: "size=64m" # read-only root; scratch space only
+    # Secrets delivered by the keyserver after attestation, injected as env vars.
+    # Every name here MUST have a matching entry in policy.yaml's workload, or the
+    # workload will not boot — there is no fallback to a Tinfoil-managed secret.
+    secrets:
+      - ACME_ACCOUNT_KEY
+      - ADDRESS_MAC_KEY
+      - ROUTING_DATA_KEY
+      - S3_ACCESS_KEY_ID
+      - S3_SECRET_ACCESS_KEY
+
+# The gateway's HAProxy opens the backend only after /ready passes twice, which
+# is not-ready until the edge's certificate loads (design §6).
+shim:
+  upstream-port: 8080
+  paths:
+    - /health
+    - /ready
