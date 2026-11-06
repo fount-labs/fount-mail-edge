@@ -103,6 +103,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve runs the state machine on an already-open listener; ListenAndServe calls
+// it after binding s.opt.Addr. Tests serve on 127.0.0.1:0 and read the chosen
+// address back off the listener, so the conversation harness needs no fixed port.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.ln = ln
 	go func() {
 		<-ctx.Done()

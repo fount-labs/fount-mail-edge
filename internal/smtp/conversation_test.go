@@ -1,0 +1,345 @@
+package smtp
+
+// An end-to-end conversation harness: a real TLS client speaks the whole SMTP
+// exchange — PROXY header, greeting, EHLO, STARTTLS, handshake with the attested
+// cert, MAIL/RCPT/DATA — against a live listener. The fuzz and property tests
+// cover the parsers and invariants in isolation; this exercises the STARTTLS
+// state machine and the "answer 250 only after the store confirms" contract that
+// only a full conversation reaches (design §6, §7).
+
+import (
+	"bufio"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
+	"fmt"
+	"math/big"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+const (
+	testHostname = "mx.fountbox.com"
+	testDomain   = "fountbox.com"
+)
+
+// --- test doubles ----------------------------------------------------------
+
+type staticCert struct{ c tls.Certificate }
+
+func (s staticCert) Current() (*tls.Certificate, bool) { return &s.c, true }
+
+func testCertSource(t *testing.T) CertSource {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: testHostname},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{testHostname},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return staticCert{tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}}
+}
+
+type putRecord struct {
+	recipient, sender string
+	raw               []byte
+}
+
+type captureStore struct {
+	mu   sync.Mutex
+	puts []putRecord
+	err  error // when set, Put fails (the store-not-confirmed path)
+}
+
+func (c *captureStore) Put(_ context.Context, recipient, sender string, raw []byte) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return "", c.err
+	}
+	c.puts = append(c.puts, putRecord{recipient, sender, append([]byte(nil), raw...)})
+	return "msg-" + strconv.Itoa(len(c.puts)), nil
+}
+
+func (c *captureStore) last() (putRecord, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.puts) == 0 {
+		return putRecord{}, false
+	}
+	return c.puts[len(c.puts)-1], true
+}
+
+// mapRecipients is a RecipientChecker backed by a fixed table; an address not in
+// the table is Unknown (no catch-all).
+type mapRecipients map[string]RecipientStatus
+
+func (m mapRecipients) Status(_ context.Context, recipient string) (RecipientStatus, error) {
+	if st, ok := m[strings.ToLower(recipient)]; ok {
+		return st, nil
+	}
+	return RecipientUnknown, nil
+}
+
+func newTestServer(t *testing.T, store Storer, rc RecipientChecker, maxBytes int64) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Options{
+		Hostname:   testHostname,
+		Domain:     testDomain,
+		Certs:      testCertSource(t),
+		Store:      store,
+		Recipients: rc,
+		MaxBytes:   maxBytes,
+		Deadline:   5 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(ctx, ln) }()
+	t.Cleanup(cancel)
+	return ln.Addr().String()
+}
+
+// --- conversation helper ---------------------------------------------------
+
+type convo struct {
+	t    *testing.T
+	conn net.Conn
+	r    *bufio.Reader
+}
+
+// dial opens a connection, sends the single PROXY header the gateway prepends,
+// and consumes the 220 greeting.
+func dial(t *testing.T, addr string) *convo {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &convo{t: t, conn: conn, r: bufio.NewReader(conn)}
+	t.Cleanup(func() { _ = conn.Close() })
+	c.send("PROXY TCP4 198.51.100.7 203.0.113.1 40000 25")
+	c.expect("220")
+	return c
+}
+
+func (c *convo) send(format string, a ...any) {
+	c.t.Helper()
+	if _, err := fmt.Fprintf(c.conn, format+"\r\n", a...); err != nil {
+		c.t.Fatalf("send %q: %v", fmt.Sprintf(format, a...), err)
+	}
+}
+
+// expect reads a (possibly multiline) reply and asserts the final line starts
+// with code. It returns the whole reply joined by newlines so a caller can check
+// advertised extensions.
+func (c *convo) expect(code string) string {
+	c.t.Helper()
+	var lines []string
+	for {
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			c.t.Fatalf("read reply (want %s): %v (so far: %q)", code, err, strings.Join(lines, "\n"))
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		lines = append(lines, trimmed)
+		if len(trimmed) < 4 || trimmed[3] == ' ' { // SMTP: '-' continues, ' ' ends
+			break
+		}
+	}
+	full := strings.Join(lines, "\n")
+	if !strings.HasPrefix(lines[len(lines)-1], code) {
+		c.t.Fatalf("want reply %s, got %q", code, full)
+	}
+	return full
+}
+
+// startTLS runs EHLO + STARTTLS and upgrades the connection, leaving the convo
+// speaking TLS. It returns the plaintext EHLO reply so a caller can assert what
+// was advertised before the upgrade.
+func (c *convo) startTLS() string {
+	c.t.Helper()
+	c.send("EHLO client.example")
+	reply := c.expect("250")
+	c.send("STARTTLS")
+	c.expect("220")
+	tc := tls.Client(c.conn, &tls.Config{InsecureSkipVerify: true, ServerName: testHostname})
+	if err := tc.Handshake(); err != nil {
+		c.t.Fatalf("tls handshake: %v", err)
+	}
+	c.conn = tc
+	c.r = bufio.NewReader(tc)
+	return reply
+}
+
+// --- tests -----------------------------------------------------------------
+
+func TestConversationStoresMessage(t *testing.T) {
+	store := &captureStore{}
+	addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("250")
+	c.send("DATA")
+	c.expect("354")
+	// A line beginning ".." is dot-stuffed on the wire; the stored body must undo it.
+	fmt.Fprint(c.conn, "Subject: hi\r\n\r\nBody line\r\n..dotted\r\n.\r\n")
+	c.expect("250")
+	c.send("QUIT")
+	c.expect("221")
+
+	rec, ok := store.last()
+	if !ok {
+		t.Fatal("no message stored after a 250")
+	}
+	if rec.recipient != "worker@fountbox.com" {
+		t.Fatalf("recipient = %q", rec.recipient)
+	}
+	if rec.sender != "sender@elsewhere.com" {
+		t.Fatalf("sender = %q", rec.sender)
+	}
+	want := "Subject: hi\r\n\r\nBody line\r\n.dotted\r\n"
+	if string(rec.raw) != want {
+		t.Fatalf("stored body = %q, want %q", rec.raw, want)
+	}
+}
+
+// Before TLS the server offers STARTTLS; after the upgrade it must not re-offer
+// it, and it advertises SIZE instead.
+func TestEHLOAdvertisesSTARTTLSOnlyBeforeTLS(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{}, 4096)
+	c := dial(t, addr)
+
+	plain := c.startTLS()
+	if !strings.Contains(plain, "STARTTLS") {
+		t.Fatalf("plaintext EHLO must advertise STARTTLS, got %q", plain)
+	}
+	c.send("EHLO client.example")
+	secure := c.expect("250")
+	if strings.Contains(secure, "STARTTLS") {
+		t.Fatalf("post-TLS EHLO must not re-advertise STARTTLS, got %q", secure)
+	}
+	if !strings.Contains(secure, "SIZE") {
+		t.Fatalf("post-TLS EHLO must advertise SIZE, got %q", secure)
+	}
+}
+
+// MAIL/RCPT/DATA before STARTTLS are refused with 530 (TLS is mandatory, §6).
+func TestMailBeforeSTARTTLSRejected(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{}, 4096)
+	c := dial(t, addr)
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<a@elsewhere.com>")
+	c.expect("530")
+}
+
+// RCPT applies the no-catch-all and entitlement rules (§4, §6): unknown and
+// expired both bounce 550, only an accepting address gets 250.
+func TestRecipientStatusEnforced(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{
+		"live@fountbox.com": RecipientAccepting,
+		"dead@fountbox.com": RecipientExpired,
+	}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+
+	c.send("RCPT TO:<nobody@fountbox.com>") // not in the table
+	c.expect("550")
+	c.send("RCPT TO:<dead@fountbox.com>") // entitlement lapsed
+	c.expect("550")
+	c.send("RCPT TO:<elsewhere@notours.com>") // wrong domain
+	c.expect("550")
+	c.send("RCPT TO:<live@fountbox.com>") // accepting
+	c.expect("250")
+}
+
+// A body past MaxBytes is refused 552 and nothing is stored.
+func TestMessageTooLargeRejected(t *testing.T) {
+	store := &captureStore{}
+	addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 64)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("250")
+	c.send("DATA")
+	c.expect("354")
+	fmt.Fprint(c.conn, strings.Repeat("A", 200)+"\r\n.\r\n")
+	c.expect("552")
+	if _, ok := store.last(); ok {
+		t.Fatal("an over-size message must not be stored")
+	}
+}
+
+// When the store does not confirm the write, the edge must answer 452 (retry),
+// never 250 — a 250 the sender trusts means the mail is durably stored (§7).
+func TestStoreFailureDoesNotAck(t *testing.T) {
+	store := &captureStore{err: errors.New("s3 unavailable")}
+	addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("250")
+	c.send("DATA")
+	c.expect("354")
+	fmt.Fprint(c.conn, "body\r\n.\r\n")
+	c.expect("452")
+}
+
+// A connection with no PROXY header (the gateway always prepends one) is dropped
+// without a greeting (§6).
+func TestMissingProxyHeaderDropped(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{}, 4096)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Send a command that is not a valid PROXY header; the server closes.
+	if _, err := fmt.Fprint(conn, "EHLO client.example\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("server must not greet a connection without a PROXY header")
+	}
+}
