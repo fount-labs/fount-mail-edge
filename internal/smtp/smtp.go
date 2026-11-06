@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fount-labs/fount-mail-edge/internal/limit"
 )
 
 type CertSource interface {
@@ -76,13 +78,23 @@ type Options struct {
 	MaxBytes   int64
 	MaxConns   int
 	Deadline   time.Duration
+
+	// PerIP and PerSender are rolling byte budgets that slow a flood (§6): a
+	// source IP or sender domain that pushes more than its budget in the window
+	// is answered 452 so it retries later. nil builds per-enclave defaults sized
+	// comfortably above a single max message; inject a small one in tests.
+	PerIP       *limit.Limiter
+	PerSender   *limit.Limiter
+	QuotaWindow time.Duration // window the default budgets refill over; 0 = 1h
 }
 
 type Server struct {
-	opt Options
-	ln  net.Listener
-	wg  sync.WaitGroup
-	sem chan struct{}
+	opt       Options
+	ln        net.Listener
+	wg        sync.WaitGroup
+	sem       chan struct{}
+	perIP     *limit.Limiter
+	perSender *limit.Limiter
 }
 
 func New(o Options) *Server {
@@ -95,7 +107,19 @@ func New(o Options) *Server {
 	if !strings.HasPrefix(o.Domain, "@") {
 		o.Domain = "@" + o.Domain
 	}
-	return &Server{opt: o, sem: make(chan struct{}, o.MaxConns)}
+	window := o.QuotaWindow
+	if window <= 0 {
+		window = time.Hour
+	}
+	perIP := o.PerIP
+	if perIP == nil {
+		perIP = limit.PerWindow(512<<20, window) // 512 MiB/IP/hour
+	}
+	perSender := o.PerSender
+	if perSender == nil {
+		perSender = limit.PerWindow(256<<20, window) // 256 MiB/sender-domain/hour
+	}
+	return &Server{opt: o, sem: make(chan struct{}, o.MaxConns), perIP: perIP, perSender: perSender}
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -273,6 +297,18 @@ func (se *session) command(ctx context.Context, verb, rest string) {
 			se.reply("552 5.3.4 message rejected: %v", err)
 			return
 		}
+		// Rolling byte budgets slow a flood (§6). A sender can't be verified, so
+		// cap what one source IP or sender domain can push per window; 452 asks it
+		// to retry later rather than bouncing legitimate mail outright.
+		n := float64(len(raw))
+		if !se.s.perIP.AllowN(se.srcIP, n) {
+			se.reply("452 4.3.1 source over rate limit, retry later")
+			return
+		}
+		if dom := senderDomain(se.sender); dom != "" && !se.s.perSender.AllowN(dom, n) {
+			se.reply("452 4.3.1 sender domain over rate limit, retry later")
+			return
+		}
 		id, err := se.s.opt.Store.Put(ctx, se.recipient, se.sender, raw)
 		if err != nil {
 			// S3 not confirmed: do NOT 250. 452 asks the sender to retry.
@@ -354,6 +390,16 @@ func splitVerb(line string) (verb, rest string) {
 		return strings.ToUpper(line[:i]), line[i+1:]
 	}
 	return strings.ToUpper(line), ""
+}
+
+// senderDomain is the lowercased domain of an envelope sender, used to key the
+// per-sender byte budget. An empty return (no '@', e.g. the null sender <>)
+// skips the per-sender check, which only ever adds a brake.
+func senderDomain(sender string) string {
+	if i := strings.LastIndexByte(sender, '@'); i >= 0 && i < len(sender)-1 {
+		return strings.ToLower(sender[i+1:])
+	}
+	return ""
 }
 
 // extractAddr pulls the address out of "FROM:<a@b>" / "TO:<a@b>" style args.

@@ -43,6 +43,16 @@ func validHandle(name string) bool {
 // availability of a specific name leaks nothing about who owns a taken one.
 func (a *API) checkHandle() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Throttle availability probes per entitlement license (§8) so one
+		// subscription can't sweep the handle namespace. The guard has already
+		// verified the entitlement, so the claims are present.
+		if claims, ok := claimsFrom(r.Context()); ok {
+			if !a.handleLimiter.Allow(hex.EncodeToString(claims.LicenseHash)) {
+				w.Header().Set("Retry-After", "1")
+				writeErr(w, http.StatusTooManyRequests, "too many handle checks, slow down")
+				return
+			}
+		}
 		name := r.PathValue("name")
 		if !validHandle(name) {
 			writeJSON(w, http.StatusOK, map[string]any{"available": false, "valid": false})

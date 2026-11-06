@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/entitlement"
+	"github.com/fount-labs/fount-mail-edge/internal/limit"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
@@ -167,6 +168,11 @@ type Options struct {
 	// when set, additionally pins the assertion's clientDataJSON origin.
 	RecoveryRPID   string
 	RecoveryOrigin string
+
+	// HandleLimiter throttles GET /handle availability probes (§8), keyed by the
+	// caller's entitlement license so one subscription can't enumerate the
+	// namespace. nil builds a per-enclave default.
+	HandleLimiter *limit.Limiter
 }
 
 type API struct {
@@ -182,6 +188,7 @@ type API struct {
 	recoverKey    []byte // per-boot HMAC key for stateless recovery challenges
 	keylog        store.KeyLog
 	nonces        *nonceCache
+	handleLimiter *limit.Limiter
 }
 
 func New(o Options) *API {
@@ -197,6 +204,10 @@ func New(o Options) *API {
 		recoverOrigin: o.RecoveryOrigin,
 		recoverKey:    make([]byte, 32),
 		nonces:        newNonceCache(),
+		handleLimiter: o.HandleLimiter,
+	}
+	if a.handleLimiter == nil {
+		a.handleLimiter = limit.New(5, 30) // 5 checks/sec, burst 30, per license
 	}
 	if _, err := rand.Read(a.recoverKey); err != nil {
 		panic("deviceapi: cannot read random for recovery challenge key: " + err.Error())

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/entitlement"
+	"github.com/fount-labs/fount-mail-edge/internal/limit"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
@@ -315,6 +316,40 @@ func TestCheckHandle(t *testing.T) {
 	}
 	if m := check("admin", "h3"); m["valid"] != false {
 		t.Fatalf("reserved handle should be invalid: %v", m)
+	}
+}
+
+// GET /handle probes are throttled per entitlement license (§8): once a caller
+// burns its burst, further checks get 429 rather than letting one subscription
+// sweep the namespace.
+func TestCheckHandleRateLimited(t *testing.T) {
+	verifyPub, backend, _ := ed25519.GenerateKey(rand.Reader)
+	api := New(Options{
+		Store:         store.NewDiscard(),
+		Entitlement:   verifyPub,
+		Provisioner:   &fakeProv{},
+		MailDomain:    "@fountbox.com",
+		HandleLimiter: limit.New(0, 2), // 2 probes, no refill during the test
+	})
+	_, devPriv, _ := ed25519.GenerateKey(rand.Reader)
+	devPub := devPriv.Public().(ed25519.PublicKey)
+	tok := entToken(t, backend, devPub, time.Now().Add(time.Hour))
+
+	code := func(nonce string) int {
+		req := signedRequest(t, devPriv, "", "GET", "/handle/somename", nil, time.Now(), nonce)
+		req.Header.Set("Fount-Entitlement", tok)
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := code("rl1"); c != http.StatusOK {
+		t.Fatalf("probe 1: want 200, got %d", c)
+	}
+	if c := code("rl2"); c != http.StatusOK {
+		t.Fatalf("probe 2: want 200, got %d", c)
+	}
+	if c := code("rl3"); c != http.StatusTooManyRequests {
+		t.Fatalf("probe 3: want 429 (burst exhausted), got %d", c)
 	}
 }
 

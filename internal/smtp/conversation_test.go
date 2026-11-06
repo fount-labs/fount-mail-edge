@@ -25,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fount-labs/fount-mail-edge/internal/limit"
 )
 
 const (
@@ -88,6 +90,12 @@ func (c *captureStore) last() (putRecord, bool) {
 	return c.puts[len(c.puts)-1], true
 }
 
+func (c *captureStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.puts)
+}
+
 // mapRecipients is a RecipientChecker backed by a fixed table; an address not in
 // the table is Unknown (no catch-all).
 type mapRecipients map[string]RecipientStatus
@@ -101,11 +109,7 @@ func (m mapRecipients) Status(_ context.Context, recipient string) (RecipientSta
 
 func newTestServer(t *testing.T, store Storer, rc RecipientChecker, maxBytes int64) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := New(Options{
+	return serve(t, Options{
 		Hostname:   testHostname,
 		Domain:     testDomain,
 		Certs:      testCertSource(t),
@@ -114,6 +118,18 @@ func newTestServer(t *testing.T, store Storer, rc RecipientChecker, maxBytes int
 		MaxBytes:   maxBytes,
 		Deadline:   5 * time.Second,
 	})
+}
+
+// serve binds 127.0.0.1:0, runs the server on it, and returns the address. It
+// lets a test supply full Options (e.g. tiny byte budgets) beyond newTestServer's
+// common shape.
+func serve(t *testing.T, o Options) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(o)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx, ln) }()
 	t.Cleanup(cancel)
@@ -341,5 +357,88 @@ func TestMissingProxyHeaderDropped(t *testing.T) {
 	buf := make([]byte, 1)
 	if _, err := conn.Read(buf); err == nil {
 		t.Fatal("server must not greet a connection without a PROXY header")
+	}
+}
+
+// deliver runs MAIL/RCPT/DATA for a one-line body from the given sender and
+// returns the DATA reply code's first line, so a test can assert 250 vs 452.
+func (c *convo) deliver(from, to, body string) string {
+	c.t.Helper()
+	c.send("MAIL FROM:<%s>", from)
+	c.expect("250")
+	c.send("RCPT TO:<%s>", to)
+	c.expect("250")
+	c.send("DATA")
+	c.expect("354")
+	fmt.Fprintf(c.conn, "%s\r\n.\r\n", body)
+	line, err := c.r.ReadString('\n')
+	if err != nil {
+		c.t.Fatalf("read DATA reply: %v", err)
+	}
+	return strings.TrimRight(line, "\r\n")
+}
+
+// A source IP that pushes more than its byte budget in the window is answered
+// 452 (retry later), not 250, and the over-budget message is never stored (§6).
+func TestPerIPByteBudgetThrottles(t *testing.T) {
+	store := &captureStore{}
+	addr := serve(t, Options{
+		Hostname:   testHostname,
+		Domain:     testDomain,
+		Certs:      testCertSource(t),
+		Store:      store,
+		Recipients: mapRecipients{"worker@fountbox.com": RecipientAccepting},
+		MaxBytes:   4096,
+		Deadline:   5 * time.Second,
+		PerIP:      limit.New(0, 10), // 10-byte budget, no refill in-test
+	})
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+
+	// "body" + CRLF is 6 bytes: the first fits the 10-byte budget, the second
+	// (another 6) exceeds the remaining 4 and is refused.
+	if got := c.deliver("s@a.example", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("first message reply = %q, want 250", got)
+	}
+	if got := c.deliver("s@a.example", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "452") {
+		t.Fatalf("over-budget message reply = %q, want 452", got)
+	}
+	if n := store.count(); n != 1 {
+		t.Fatalf("stored %d messages, want 1 (the over-budget one must not be stored)", n)
+	}
+}
+
+// The per-sender-domain budget is keyed on the envelope sender's domain, so two
+// senders in the same domain share it while a different domain is unaffected.
+func TestPerSenderDomainByteBudgetThrottles(t *testing.T) {
+	store := &captureStore{}
+	addr := serve(t, Options{
+		Hostname:   testHostname,
+		Domain:     testDomain,
+		Certs:      testCertSource(t),
+		Store:      store,
+		Recipients: mapRecipients{"worker@fountbox.com": RecipientAccepting},
+		MaxBytes:   4096,
+		Deadline:   5 * time.Second,
+		PerSender:  limit.New(0, 10),  // shared 10-byte budget per sender domain
+		PerIP:      limit.New(0, 1e9), // keep the IP budget out of the way
+	})
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+
+	if got := c.deliver("alice@flood.example", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("first message reply = %q, want 250", got)
+	}
+	// A different local part, same domain: the domain budget is already spent.
+	if got := c.deliver("bob@flood.example", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "452") {
+		t.Fatalf("same-domain over-budget reply = %q, want 452", got)
+	}
+	// A different domain has its own budget and still delivers.
+	if got := c.deliver("carol@other.example", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("different-domain reply = %q, want 250", got)
 	}
 }
