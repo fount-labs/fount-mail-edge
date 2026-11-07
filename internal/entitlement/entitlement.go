@@ -2,8 +2,8 @@
 // mailbox creation and handle checks (design §4 "short-lived signed entitlement,
 // presented by the device", §8 the entitlement / new-keys signer classes).
 //
-// An entitlement is a short-lived token the Fount backend (api.fount.sh, as part
-// of a license check) signs with its entitlement key; the edge verifies it with
+// An entitlement is a token the Fount backend (api.fount.sh, POST
+// /license/entitlement) signs with its entitlement key; the edge verifies it with
 // the public half, delivered by the keyserver as ENTITLEMENT_VERIFY_KEY. The
 // token binds the device's request-signing public key, so a leaked entitlement
 // can't be replayed with a different key: the edge checks both the token's
@@ -15,8 +15,12 @@
 //
 // Compact, JWS-like: base64url(claims JSON) "." base64url(Ed25519 signature over
 // the claims JSON bytes). Both ends are Fount, but pinning the shape keeps the
-// backend and the edge from drifting. This is a contract defined by the edge
-// (the broker/backend side does not exist yet); it is revisable.
+// backend and the edge from drifting: fount-infra's lambda/mail-entitlement
+// signs it with a KMS Ed25519 key, and TestBackendVector holds a token that
+// code produces.
+//
+// ExpiresAt also becomes the mailbox's stored expiry, so it runs to the end of
+// the paid period plus a margin rather than being minutes long.
 package entitlement
 
 import (
@@ -86,9 +90,8 @@ func Verify(token string, verifyKey ed25519.PublicKey, now time.Time, skew time.
 	return &c, nil
 }
 
-// Sign produces a token for the given claims. It is the reference the Fount
-// backend's signing side must match; the edge never signs entitlements (it has
-// only the public verify key), so this is used for tests and as the contract.
+// Sign produces a token for the given claims. The edge never signs entitlements
+// (it has only the public verify key), so this is used for tests.
 func Sign(c Claims, signKey ed25519.PrivateKey) (string, error) {
 	if c.Version == 0 {
 		c.Version = Version

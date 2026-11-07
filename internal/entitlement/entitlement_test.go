@@ -1,6 +1,7 @@
 package entitlement
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
@@ -107,5 +108,28 @@ func TestVerifyRejectsBadVersion(t *testing.T) {
 	tok, _ := Sign(claims, signPriv)
 	if _, err := Verify(tok, verifyPub, time.Now(), time.Minute); err != ErrVersion {
 		t.Fatalf("err = %v, want ErrVersion", err)
+	}
+}
+
+// backendVector is a token from fount-infra's lambda/mail-entitlement, whose
+// test asserts the same string. If either side changes, this fails.
+const backendVector = "eyJ2IjoxLCJsaCI6IkF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd009IiwiZGsiOiJBZ0lDQWdJQ0FnSUNBZ0lDQWdJQ0FnSUNBZ0lDQWdJQ0FnSUNBZ0lDQWdJPSIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwNjA0ODAwfQ.C9XoG_uKpqWx3BEKrUcVCoDoIyB8oskl2WfI9j6lFam2tlXY6RyxaIT56PuwdN1FstsdMQVz_scZ1CDJzu8-Dw"
+
+func TestBackendVector(t *testing.T) {
+	seed := bytes.Repeat([]byte{1}, ed25519.SeedSize)
+	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+
+	c, err := Verify(backendVector, pub, time.Unix(1_800_000_000, 0), 0)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !bytes.Equal(c.LicenseHash, bytes.Repeat([]byte{3}, 32)) {
+		t.Errorf("LicenseHash = %x", c.LicenseHash)
+	}
+	if !bytes.Equal(c.DeviceKey, bytes.Repeat([]byte{2}, ed25519.PublicKeySize)) {
+		t.Errorf("DeviceKey = %x", c.DeviceKey)
+	}
+	if c.IssuedAt != 1_800_000_000 || c.ExpiresAt != 1_800_604_800 {
+		t.Errorf("times = %d, %d", c.IssuedAt, c.ExpiresAt)
 	}
 }

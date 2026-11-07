@@ -17,6 +17,7 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -171,6 +172,11 @@ func loadSecrets(dev bool) (Secrets, error) {
 	entVerify, err := requireKey("ENTITLEMENT_VERIFY_KEY")
 	if err != nil {
 		return Secrets{}, err
+	}
+	// A wrong-length key would boot and then reject every entitlement. KMS hands
+	// out a 44-byte DER key, so this is the likely mistake when filling it.
+	if len(entVerify) != ed25519.PublicKeySize {
+		return Secrets{}, fmt.Errorf("ENTITLEMENT_VERIFY_KEY is %d bytes, want %d raw Ed25519 bytes", len(entVerify), ed25519.PublicKeySize)
 	}
 	id, err := requireStr("S3_ACCESS_KEY_ID")
 	if err != nil {

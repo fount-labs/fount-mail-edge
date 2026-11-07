@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -9,6 +11,18 @@ func setSecrets(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"ACME_ACCOUNT_KEY", "ADDRESS_MAC_KEY", "ROUTING_DATA_KEY", "ENTITLEMENT_VERIFY_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"} {
 		t.Setenv(k, "x")
+	}
+	t.Setenv("ENTITLEMENT_VERIFY_KEY", base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)))
+}
+
+// KMS returns a DER key; loading it raw would reject every entitlement at runtime.
+func TestReleaseRefusesWrongLengthVerifyKey(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	t.Setenv("ENTITLEMENT_VERIFY_KEY", base64.StdEncoding.EncodeToString(make([]byte, 44)))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ENTITLEMENT_VERIFY_KEY") {
+		t.Fatalf("Load() err = %v", err)
 	}
 }
 
