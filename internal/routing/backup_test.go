@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 const backedUpAddr = "a@fountbox.com"
@@ -140,3 +141,93 @@ func TestBackupFailureDoesNotFailTheChange(t *testing.T) {
 type failingBlobs struct{ *memBlobs }
 
 func (failingBlobs) Put(context.Context, string, []byte) error { return errors.New("backup down") }
+
+func TestRestoreReplacesARolledForwardObject(t *testing.T) {
+	ctx := context.Background()
+	b := newBackedUp(t)
+	id := b.MailboxID(backedUpAddr)
+	if _, err := b.NextSequence(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := append([]byte(nil), b.backups.objs["routing/current"]...)
+	if _, err := b.NextSequence(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.NextSequence(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	object, err := routing.OpenBackup(snapshot, b.pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := routing.Restore{Object: object, RoutingDataKey: b.routingKey, SkipSequences: 1000}
+
+	sum, err := r.Inspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Mailboxes != 1 || sum.Sequences != 1 {
+		t.Fatalf("inspect = %+v", sum)
+	}
+	if _, err := r.Apply(ctx, b.primary); !errors.Is(err, routing.ErrObjectExists) {
+		t.Fatalf("err = %v, want ErrObjectExists", err)
+	}
+	r.Replace = true
+	if sum, err = r.Apply(ctx, b.primary); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Sequences != 1001 {
+		t.Fatalf("applied = %+v", sum)
+	}
+
+	// The edge left running refuses what it finds, and a fresh one continues past
+	// every number the old counter issued.
+	if _, err := b.NextSequence(ctx, id); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := b.NextSequence(ctx, id); !errors.Is(err, routing.ErrRolledBack) {
+		t.Fatalf("err = %v, want ErrRolledBack", err)
+	}
+	n, err := reload(t, b.primary, b.routingKey, b.macKey).NextSequence(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1002 {
+		t.Fatalf("sequence = %d, want 1002", n)
+	}
+}
+
+func TestRestoreIntoAnEmptyBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newBackedUp(t)
+	object, err := routing.OpenBackup(b.backups.objs["routing/current"], b.pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := newMemBlobs()
+	if _, err := (routing.Restore{Object: object, RoutingDataKey: b.routingKey}).Apply(ctx, empty); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := reload(t, empty, b.routingKey, b.macKey).Available(ctx, backedUpAddr); ok {
+		t.Fatal("the mailbox wasn't restored")
+	}
+}
+
+func TestRestoreRefusesTheWrongKey(t *testing.T) {
+	b := newBackedUp(t)
+	object, err := routing.OpenBackup(b.backups.objs["routing/current"], b.pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, _ := keys(t)
+	if _, err := (routing.Restore{Object: object, RoutingDataKey: wrong}).Inspect(); err == nil {
+		t.Fatal("restored with the wrong key")
+	}
+	empty := newMemBlobs()
+	if _, err := (routing.Restore{Object: object, RoutingDataKey: wrong}).Apply(context.Background(), empty); err == nil {
+		t.Fatal("restored with the wrong key")
+	}
+	if len(empty.objs) != 0 {
+		t.Fatal("a refused restore wrote something")
+	}
+}

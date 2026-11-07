@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/fount-labs/fount-mail-edge/internal/store"
@@ -68,7 +69,7 @@ func BackupBootID(framed []byte) ([]byte, error) {
 }
 
 // OpenBackup verifies a backup against the signing boot's public key and returns
-// the routing object to restore. It's for the restore drill, not the running edge.
+// the routing object to restore. It's for cmd/routing-restore, not the running edge.
 func OpenBackup(framed []byte, signPub ed25519.PublicKey) ([]byte, error) {
 	bootID, err := BackupBootID(framed)
 	if err != nil {
@@ -80,4 +81,89 @@ func OpenBackup(framed []byte, signPub ed25519.PublicKey) ([]byte, error) {
 		return nil, errors.New("routing: backup signature invalid")
 	}
 	return object, nil
+}
+
+// Summary describes a routing object, for an operator to check before restoring it.
+type Summary struct {
+	Generation int
+	Mailboxes  int
+	Sequences  uint64 // the sum of every mailbox's counter, to compare two objects
+}
+
+// Restore holds what cmd/routing-restore needs to install a backup.
+type Restore struct {
+	Object         []byte // from OpenBackup
+	RoutingDataKey []byte
+	// SkipSequences moves every counter forward. An older backup can hold counters
+	// below numbers already issued, and reusing one is worse than a gap, so a restore
+	// from anything but the newest copy must skip past them.
+	SkipSequences uint64
+	// Replace allows overwriting an existing object.
+	Replace bool
+}
+
+// Inspect decrypts the object and reports what it holds, writing nothing.
+func (r Restore) Inspect() (Summary, error) {
+	s, err := r.open()
+	if err != nil {
+		return Summary{}, err
+	}
+	return s.summary(), nil
+}
+
+func (r Restore) open() (*Store, error) {
+	aead, err := newAEAD(r.RoutingDataKey)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{aead: aead}
+	if s.data, err = s.decrypt(r.Object); err != nil {
+		return nil, err
+	}
+	if s.data.Mailboxes == nil {
+		s.data.Mailboxes = map[string]*Mailbox{}
+	}
+	return s, nil
+}
+
+func (s *Store) summary() Summary {
+	sum := Summary{Generation: s.data.Version, Mailboxes: len(s.data.Mailboxes)}
+	for _, m := range s.data.Mailboxes {
+		sum.Sequences += m.Sequence
+	}
+	return sum
+}
+
+// Apply writes the backup as the live object, conditional on what's there now, and
+// reads it back. The edges must be stopped first (docs/RESTORE.md). The generation
+// stays near the backup's, so an edge left running refuses the object, rather than
+// carrying on with what it holds in memory.
+func (r Restore) Apply(ctx context.Context, blobs Blobs) (Summary, error) {
+	s, err := r.open()
+	if err != nil {
+		return Summary{}, err
+	}
+	s.blobs = blobs
+	switch _, etag, err := blobs.GetVersioned(ctx, ObjectKey); {
+	case err == nil && !r.Replace:
+		return Summary{}, ErrObjectExists
+	case err == nil:
+		s.etag = etag
+	case !errors.Is(err, store.ErrNotFound):
+		return Summary{}, fmt.Errorf("routing: check for an existing object: %w", err)
+	}
+	for _, m := range s.data.Mailboxes {
+		m.Sequence += r.SkipSequences
+	}
+	if err := s.persist(ctx); err != nil {
+		return Summary{}, fmt.Errorf("routing: write: %w", err)
+	}
+	raw, err := blobs.Get(ctx, ObjectKey)
+	if err != nil {
+		return Summary{}, fmt.Errorf("routing: read back: %w", err)
+	}
+	if _, err := s.decrypt(raw); err != nil {
+		return Summary{}, fmt.Errorf("routing: read back: %w", err)
+	}
+	return s.summary(), nil
 }
