@@ -34,3 +34,13 @@ func TestHealthcheckFailsWhenNothingListens(t *testing.T) {
 		t.Fatal("a dead listener must fail the check")
 	}
 }
+
+func TestDeviceAPIServerBoundsRequests(t *testing.T) {
+	s := deviceAPIServer(":0", http.NotFoundHandler(), nil)
+	if s.ReadHeaderTimeout == 0 || s.ReadTimeout == 0 || s.WriteTimeout == 0 || s.IdleTimeout == 0 {
+		t.Fatalf("a request could stall forever: %+v", s)
+	}
+	if s.MaxHeaderBytes == 0 || s.MaxHeaderBytes > 64<<10 {
+		t.Fatalf("MaxHeaderBytes = %d", s.MaxHeaderBytes)
+	}
+}

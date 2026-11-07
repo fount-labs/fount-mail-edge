@@ -10,7 +10,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
@@ -18,7 +20,7 @@ import (
 )
 
 // challengeTTL bounds how long a recovery challenge is valid. It must cover a
-// user tapping their passkey, no longer; the whole POST is also nonce-guarded.
+// user tapping their passkey, no longer; a verified POST also spends its nonce.
 const challengeTTL = 2 * time.Minute
 
 // challengeLen is the stateless challenge token: an 8-byte big-endian expiry
@@ -82,6 +84,15 @@ func (a *API) issueRecoveryChallenge() http.Handler {
 	})
 }
 
+// spendNonce records the nonce on a request guard has already timestamp-checked.
+func (a *API) spendNonce(r *http.Request) error {
+	ts, err := strconv.ParseInt(r.Header.Get("Fount-Timestamp"), 10, 64)
+	if err != nil {
+		return fmt.Errorf("bad timestamp")
+	}
+	return a.nonces.useOnce(r.Header.Get("Fount-Nonce"), time.Unix(ts, 0))
+}
+
 type recoverRequest struct {
 	Challenge      []byte             `json:"challenge"`        // the edge challenge token from GET /recover/{id}
 	DecryptionKey  []byte             `json:"decryption_key"`   // new X25519 public key
@@ -95,8 +106,8 @@ type recoverRequest struct {
 
 // recover handles POST /recover: after a lost device, the mailbox's registered
 // passkey approves rotating to a new key set on the same handle (§5). guard has
-// already checked the timestamp and nonce (there is no device signature — the
-// device is gone); this handler is the whole authorization:
+// already checked the timestamp (there is no device signature — the device is
+// gone); this handler is the whole authorization:
 //
 //  1. the challenge is a valid, unexpired edge token bound to this mailbox and
 //     the exact new keys (so a swapped key chain is rejected);
@@ -104,7 +115,8 @@ type recoverRequest struct {
 //  3. the registered passkey signed a WebAuthn assertion over that challenge
 //     (the real owner, not the host, approved this).
 //
-// Only then does it record the new mailbox key in the write-once log and rotate.
+// Only then does it spend the nonce, so unauthenticated requests can't fill the
+// cache, and record the new mailbox key in the write-once log and rotate.
 // The log write happens first and must succeed, so a key is never made live
 // without being auditable (§9).
 func (a *API) recover() http.Handler {
@@ -148,6 +160,10 @@ func (a *API) recover() http.Handler {
 		}
 		if err := webauthn.Verify(passkey, req.Assertion, req.Challenge, a.recoverRPID, a.recoverOrigin); err != nil {
 			writeErr(w, http.StatusUnauthorized, "passkey assertion did not verify")
+			return
+		}
+		if err := a.spendNonce(r); err != nil {
+			writeErr(w, nonceStatus(err), err.Error())
 			return
 		}
 

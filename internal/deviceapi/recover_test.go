@@ -157,6 +157,10 @@ func TestRecoverRotatesKeys(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	if n := len(api.nonces.seen); n != 1 {
+		t.Fatalf("%d nonces spent by a verified recovery, want 1", n)
+	}
+
 	// The record now holds the new keys.
 	snap, ok := rt.Snapshot(mb.id)
 	if !ok {
@@ -299,6 +303,21 @@ func TestRecoverStubWhenNotConfigured(t *testing.T) {
 	rec := recoverPost(t, api, mb.idHex, recoverRequest{})
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("want 501 when recovery not configured, got %d", rec.Code)
+	}
+}
+
+// POST /recover has no signature, so anyone can send one. Only a verified passkey
+// may spend a nonce.
+func TestRecoverNonceSpentOnlyAfterAssertion(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, _ := recoverAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+
+	if rec := recoverPost(t, api, mb.idHex, recoverRequest{}); rec.Code == http.StatusOK {
+		t.Fatal("an empty recovery must not pass")
+	}
+	if n := len(api.nonces.seen); n != 0 {
+		t.Fatalf("%d nonces cached before any assertion", n)
 	}
 }
 

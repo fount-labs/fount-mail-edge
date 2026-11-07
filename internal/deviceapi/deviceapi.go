@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +44,14 @@ const (
 	maxBodyBytes   = 1 << 20 // 1 MiB; the Device API carries control messages, not mail
 	timestampSkew  = 5 * time.Minute
 	nonceRetention = 10 * time.Minute
+	maxNonceBytes  = 128
+	maxNonces      = 1 << 18 // about 437 requests/sec sustained over the retention
+	noncePruneGap  = time.Second
+)
+
+var (
+	errNonceReplay = errors.New("nonce replay")
+	errNonceFull   = errors.New("too many recent requests, retry later")
 )
 
 // signer names the key class a route's signature must come from (design §8).
@@ -282,7 +291,7 @@ func (a *API) guard(rt route, next http.Handler) http.Handler {
 		}
 		ctx, err := a.authorize(rt.by, r, body)
 		if err != nil {
-			writeErr(w, http.StatusUnauthorized, err.Error())
+			writeErr(w, nonceStatus(err), err.Error())
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -296,14 +305,31 @@ func claimsFrom(ctx context.Context) (*entitlement.Claims, bool) {
 	return c, ok
 }
 
-// authorize checks the timestamp window, the nonce, and the request signature.
-// It returns the context to run the handler under (carrying entitlement claims
-// for the entitlement classes), or an error that becomes a 401.
+// nonceStatus is the HTTP status for an authorization or nonce error. A full cache
+// isn't the caller's fault, so it asks for a retry instead of reporting a bad
+// signature.
+func nonceStatus(err error) int {
+	if errors.Is(err, errNonceFull) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusUnauthorized
+}
+
+// authorize checks the timestamp window, the request signature, and the nonce. It
+// returns the context to run the handler under (carrying entitlement claims for
+// the entitlement classes), or an error for nonceStatus.
+//
+// The nonce is recorded last, so only a request that proved its signature can add
+// to the cache. POST /recover has no signature here, so its handler records the
+// nonce after the passkey assertion verifies.
 func (a *API) authorize(class signer, r *http.Request, body []byte) (context.Context, error) {
 	tsRaw := r.Header.Get("Fount-Timestamp")
 	nonce := r.Header.Get("Fount-Nonce")
 	if tsRaw == "" || nonce == "" {
 		return nil, fmt.Errorf("missing signature headers")
+	}
+	if len(nonce) > maxNonceBytes {
+		return nil, fmt.Errorf("nonce too long")
 	}
 	ts, err := strconv.ParseInt(tsRaw, 10, 64)
 	if err != nil {
@@ -312,17 +338,26 @@ func (a *API) authorize(class signer, r *http.Request, body []byte) (context.Con
 	if d := time.Since(time.Unix(ts, 0)); d > timestampSkew || d < -timestampSkew {
 		return nil, fmt.Errorf("timestamp outside window")
 	}
-	if !a.nonces.useOnce(nonce, time.Unix(ts, 0)) {
-		return nil, fmt.Errorf("nonce replay")
-	}
 
 	// A lost device has no request-signing key, so POST /recover carries no
 	// Fount-Signature; the handler authenticates it by the passkey assertion in
-	// the body (§5). The timestamp and nonce above still bound envelope replay.
+	// the body (§5).
 	if class == sigPasskey {
 		return r.Context(), nil
 	}
 
+	ctx, err := a.verifySignature(class, r, body, ts, nonce)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.nonces.useOnce(nonce, time.Unix(ts, 0)); err != nil {
+		return nil, err
+	}
+	return ctx, nil
+}
+
+// verifySignature checks the request's signature against the key its class names.
+func (a *API) verifySignature(class signer, r *http.Request, body []byte, ts int64, nonce string) (context.Context, error) {
 	sigB64 := r.Header.Get("Fount-Signature")
 	if sigB64 == "" {
 		return nil, fmt.Errorf("missing signature headers")
@@ -407,29 +442,38 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 // --- nonce replay cache ----------------------------------------------------
 
 type nonceCache struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu     sync.Mutex
+	seen   map[string]time.Time
+	max    int
+	pruned time.Time
 }
 
 func newNonceCache() *nonceCache {
-	c := &nonceCache{seen: make(map[string]time.Time)}
-	return c
+	return &nonceCache{seen: make(map[string]time.Time), max: maxNonces}
 }
 
-// useOnce records a nonce and returns false if it was already used within the
-// retention window. Tied to the request timestamp so the window is bounded.
-func (c *nonceCache) useOnce(nonce string, ts time.Time) bool {
+// useOnce records a nonce. It returns errNonceReplay if the nonce was used within
+// the retention window, and errNonceFull if the cache is at its cap, because
+// dropping an entry to make room would let that nonce replay. Tied to the request
+// timestamp so the window is bounded.
+func (c *nonceCache) useOnce(nonce string, ts time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	for k, t := range c.seen {
-		if now.Sub(t) > nonceRetention {
-			delete(c.seen, k)
+	if now.Sub(c.pruned) >= noncePruneGap {
+		c.pruned = now
+		for k, t := range c.seen {
+			if now.Sub(t) > nonceRetention {
+				delete(c.seen, k)
+			}
 		}
 	}
 	if _, ok := c.seen[nonce]; ok {
-		return false
+		return errNonceReplay
+	}
+	if len(c.seen) >= c.max {
+		return errNonceFull
 	}
 	c.seen[nonce] = ts
-	return true
+	return nil
 }

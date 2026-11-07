@@ -103,12 +103,7 @@ func run() error {
 		RecoveryRPID:   cfg.RecoveryRPID,
 		RecoveryOrigin: cfg.RecoveryOrigin,
 	})
-	apiSrv := &http.Server{
-		Addr:              cfg.DeviceAPIAddr,
-		Handler:           api,
-		TLSConfig:         k.DeviceAPITLSConfig(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	apiSrv := deviceAPIServer(cfg.DeviceAPIAddr, api, k.DeviceAPITLSConfig())
 
 	smtpSrv := smtp.New(smtp.Options{
 		Addr:       cfg.SMTPAddr,
@@ -164,6 +159,22 @@ func run() error {
 	_ = acmeSrv.Shutdown(sctx)
 	_ = smtpSrv.Shutdown(sctx)
 	return nil
+}
+
+// deviceAPIServer bounds what one request can hold: a stalled client can't keep a
+// tunnel forever, and headers can't use the default 1 MiB when they carry only a
+// signature and a short token. WriteTimeout has to cover a full 25 MB message.
+func deviceAPIServer(addr string, h http.Handler, tlsCfg *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    16 << 10,
+	}
 }
 
 // tunnelListener binds a tunnelled port behind gateway mutual TLS (§7). config.Load

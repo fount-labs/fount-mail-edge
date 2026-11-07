@@ -121,3 +121,87 @@ func TestBootsNeedsNoSignature(t *testing.T) {
 		t.Fatalf("want 501 (open route reaches handler), got %d", rec.Code)
 	}
 }
+
+// A request that hasn't proved its signature must cost the edge nothing. Before,
+// its nonce was cached first, so unsigned requests with large nonces filled memory.
+func TestUnauthenticatedRequestsDoNotUseTheCache(t *testing.T) {
+	api, priv, keyID := newTestAPI(t)
+	_, wrong, _ := ed25519.GenerateKey(nil)
+	for i, send := range []func() *http.Request{
+		func() *http.Request {
+			return signedRequest(t, wrong, keyID, "POST", "/entitlement", []byte(`{}`), time.Now(), "bad-sig")
+		},
+		func() *http.Request {
+			r := signedRequest(t, priv, keyID, "POST", "/entitlement", []byte(`{}`), time.Now(), "no-sig")
+			r.Header.Del("Fount-Signature")
+			return r
+		},
+		func() *http.Request {
+			return signedRequest(t, priv, "unknown", "POST", "/entitlement", []byte(`{}`), time.Now(), "bad-id")
+		},
+	} {
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, send())
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("case %d: code = %d", i, rec.Code)
+		}
+	}
+	if n := len(api.nonces.seen); n != 0 {
+		t.Fatalf("%d nonces cached from unauthenticated requests", n)
+	}
+}
+
+func TestOverlongNonceRejected(t *testing.T) {
+	api, priv, keyID := newTestAPI(t)
+	long := strings.Repeat("n", maxNonceBytes+1)
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/entitlement", []byte(`{}`), time.Now(), long))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if n := len(api.nonces.seen); n != 0 {
+		t.Fatalf("%d nonces cached", n)
+	}
+
+	rec = httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/entitlement", []byte(`{}`), time.Now(), long[1:]))
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("a nonce at the cap should pass, code = %d", rec.Code)
+	}
+}
+
+// A full cache refuses new requests rather than forgetting a nonce, which would
+// let that nonce replay.
+func TestFullNonceCacheFailsClosed(t *testing.T) {
+	api, priv, keyID := newTestAPI(t)
+	api.nonces.max = 2
+	send := func(nonce string) int {
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/entitlement", []byte(`{}`), time.Now(), nonce))
+		return rec.Code
+	}
+	for _, n := range []string{"a", "b"} {
+		if code := send(n); code != http.StatusNotImplemented {
+			t.Fatalf("nonce %s: code = %d", n, code)
+		}
+	}
+	if code := send("c"); code != http.StatusServiceUnavailable {
+		t.Fatalf("over the cap: code = %d", code)
+	}
+	if code := send("a"); code != http.StatusUnauthorized {
+		t.Fatalf("a replay at the cap: code = %d", code)
+	}
+}
+
+// Old entries leave the cache, so a full cache recovers by itself.
+func TestNonceCacheRecoversAfterRetention(t *testing.T) {
+	c := newNonceCache()
+	c.max = 1
+	if err := c.useOnce("old", time.Now().Add(-nonceRetention-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	c.pruned = time.Time{}
+	if err := c.useOnce("new", time.Now()); err != nil {
+		t.Fatalf("expired entry still held the slot: %v", err)
+	}
+}
