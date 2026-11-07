@@ -49,6 +49,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"sync"
@@ -102,17 +103,33 @@ func (m *Mailbox) root() []byte {
 	return m.MailboxID
 }
 
-// Store is the live routing data, loaded once at construction and persisted back
-// on every mutation. All access is serialized: the object is small (M2 scale)
-// and the sequence counter must never hand the same number out twice.
+// Blobs is the object store routing needs: conditional writes, so two edges can't
+// overwrite each other's changes. During a deploy two instances run at once.
+type Blobs interface {
+	store.Blobs
+	// GetVersioned returns an object and the etag PutIfMatch needs to replace it.
+	GetVersioned(ctx context.Context, key string) (data []byte, etag string, err error)
+	// PutIfMatch writes only if the object still has etag, or, with an empty etag,
+	// only if it doesn't exist. It returns the new etag or store.ErrConflict.
+	PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error)
+}
+
+// Store is the live routing data, loaded at construction and persisted back on
+// every mutation. All access is serialized: the object is small (M2 scale) and the
+// sequence counter must never hand the same number out twice. Each write is
+// conditional on the object this store last saw. If another writer got there first,
+// the write fails with store.ErrConflict, nothing changes, and the next write starts
+// from a fresh load. The caller answers with a temporary failure.
 type Store struct {
-	blobs  store.Blobs
+	blobs  Blobs
 	macKey []byte
 	aead   cipher.AEAD
 	backup *backup
 
-	mu   sync.Mutex
-	data *Data
+	mu    sync.Mutex
+	data  *Data
+	etag  string
+	stale bool // the object changed under us; reload before the next write
 }
 
 // Option tunes a Store built by New.
@@ -127,11 +144,16 @@ var ErrNoObject = errors.New("routing: no routing object; run cmd/routing-init o
 // ErrObjectExists means Initialize found a routing object and left it alone.
 var ErrObjectExists = errors.New("routing: routing object already exists")
 
+// ErrRolledBack means the object in S3 is older than one this edge has already
+// seen. A restore drains the edges first (docs/RESTORE.md), so a running edge can't
+// trust it. Writes keep failing until a restart loads the object deliberately.
+var ErrRolledBack = errors.New("routing: routing object went backwards")
+
 // Initialize writes the empty routing object for a new deployment. It runs once,
 // before the first release, and refuses to replace an object. Any read failure
 // other than a clean miss also stops it, because that can't show the object is
 // absent.
-func Initialize(ctx context.Context, blobs store.Blobs, routingDataKey []byte) error {
+func Initialize(ctx context.Context, blobs Blobs, routingDataKey []byte) error {
 	aead, err := newAEAD(routingDataKey)
 	if err != nil {
 		return err
@@ -143,7 +165,9 @@ func Initialize(ctx context.Context, blobs store.Blobs, routingDataKey []byte) e
 	case !errors.Is(err, store.ErrNotFound):
 		return fmt.Errorf("routing: check for an existing object: %w", err)
 	}
-	if err := s.persist(ctx); err != nil {
+	if err := s.persist(ctx); errors.Is(err, store.ErrConflict) {
+		return ErrObjectExists
+	} else if err != nil {
 		return fmt.Errorf("routing: write: %w", err)
 	}
 	raw, err := blobs.Get(ctx, ObjectKey)
@@ -157,7 +181,7 @@ func Initialize(ctx context.Context, blobs store.Blobs, routingDataKey []byte) e
 // New loads the routing object. A missing object is ErrNoObject, and a present
 // object that won't decrypt or parse is also fatal, because serving mail against
 // corrupt routing data would seal to the wrong keys.
-func New(ctx context.Context, blobs store.Blobs, routingDataKey, addressMACKey []byte, opts ...Option) (*Store, error) {
+func New(ctx context.Context, blobs Blobs, routingDataKey, addressMACKey []byte, opts ...Option) (*Store, error) {
 	if len(addressMACKey) == 0 {
 		return nil, errors.New("routing: empty ADDRESS_MAC_KEY")
 	}
@@ -195,7 +219,7 @@ func newAEAD(routingDataKey []byte) (cipher.AEAD, error) {
 }
 
 func (s *Store) load(ctx context.Context) error {
-	raw, err := s.blobs.Get(ctx, ObjectKey)
+	raw, etag, err := s.blobs.GetVersioned(ctx, ObjectKey)
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrNoObject
 	}
@@ -206,10 +230,28 @@ func (s *Store) load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if s.data != nil && data.Version < s.data.Version {
+		return fmt.Errorf("%w: generation %d after %d", ErrRolledBack, data.Version, s.data.Version)
+	}
 	if data.Mailboxes == nil {
 		data.Mailboxes = map[string]*Mailbox{}
 	}
-	s.data = data
+	s.data, s.etag = data, etag
+	return nil
+}
+
+// refresh reloads the object if the last write lost a race. Every write path calls
+// it first, under s.mu. A failed write can't reload for itself, because its caller
+// still has to restore the records it changed.
+func (s *Store) refresh(ctx context.Context) error {
+	if !s.stale {
+		return nil
+	}
+	if err := s.load(ctx); err != nil {
+		log.Printf("routing: reload failed: %v", err)
+		return err
+	}
+	s.stale = false
 	return nil
 }
 
@@ -233,8 +275,16 @@ func (s *Store) decrypt(raw []byte) (*Data, error) {
 	return &data, nil
 }
 
-// persist seals and writes the current data. Caller holds s.mu.
-func (s *Store) persist(ctx context.Context) error {
+// persist seals and writes the current data, one generation on. Caller holds s.mu
+// and restores its records on an error. A write that failed without an answer may
+// still have landed. The next write then sees a conflict and reloads.
+func (s *Store) persist(ctx context.Context) (err error) {
+	s.data.Version++
+	defer func() {
+		if err != nil {
+			s.data.Version--
+		}
+	}()
 	pt, err := json.Marshal(s.data)
 	if err != nil {
 		return err
@@ -247,9 +297,14 @@ func (s *Store) persist(ctx context.Context) error {
 	out = append(out, magic...)
 	out = append(out, nonce...)
 	out = s.aead.Seal(out, nonce, pt, nil)
-	if err := s.blobs.Put(ctx, ObjectKey, out); err != nil {
+	etag, err := s.blobs.PutIfMatch(ctx, ObjectKey, out, s.etag)
+	if errors.Is(err, store.ErrConflict) {
+		s.stale = true
+	}
+	if err != nil {
 		return err
 	}
+	s.etag = etag
 	s.backup.write(ctx, out)
 	return nil
 }
@@ -354,6 +409,9 @@ func (s *Store) Resolve(_ context.Context, recipient string) (store.Address, err
 func (s *Store) NextSequence(ctx context.Context, mailboxID []byte) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return 0, err
+	}
 	key := hex.EncodeToString(mailboxID)
 	m, ok := s.data.Mailboxes[key]
 	if !ok {
@@ -430,6 +488,9 @@ func (s *Store) Upsert(ctx context.Context, m *Mailbox) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return err
+	}
 	return s.put(ctx, m)
 }
 
@@ -569,6 +630,9 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 	id := s.MailboxID(p.Address)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return nil, err
+	}
 	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
 		return nil, ErrHandleTaken
 	}
@@ -623,6 +687,9 @@ type NewAddress struct {
 func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return nil, err
+	}
 	parent, ok := s.data.Mailboxes[hex.EncodeToString(p.ParentMailboxID)]
 	if !ok {
 		return nil, ErrNoMailbox
@@ -668,6 +735,9 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return err
+	}
 	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
 	if !ok {
 		return ErrNoMailbox
@@ -714,6 +784,9 @@ type RotatedKeys struct {
 func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return nil, err
+	}
 	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
 	if !ok {
 		return nil, ErrNoMailbox
@@ -750,6 +823,9 @@ func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys)
 func (s *Store) RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return err
+	}
 	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
 	if !ok {
 		return ErrNoMailbox

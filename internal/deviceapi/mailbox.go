@@ -144,7 +144,7 @@ func (a *API) createMailbox() http.Handler {
 			writeErr(w, http.StatusInternalServerError, "could not record key")
 			return
 		case err != nil:
-			writeErr(w, http.StatusInternalServerError, "create failed")
+			writeFailure(w, err, "create failed")
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"mailbox_id": hex.EncodeToString(id)})

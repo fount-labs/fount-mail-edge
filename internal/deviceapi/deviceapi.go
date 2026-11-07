@@ -453,6 +453,17 @@ func (a *API) logKey() routing.LogKey {
 	}
 }
 
+// writeFailure answers a failed routing write: 503 if another edge got there first,
+// because the same request will work on a retry, and otherwise 500 with msg.
+func writeFailure(w http.ResponseWriter, err error, msg string) {
+	if errors.Is(err, store.ErrConflict) {
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusServiceUnavailable, "write conflict, retry")
+		return
+	}
+	writeErr(w, http.StatusInternalServerError, msg)
+}
+
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

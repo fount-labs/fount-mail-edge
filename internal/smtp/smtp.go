@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/limit"
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 const (
@@ -344,6 +345,11 @@ func (se *session) command(ctx context.Context, verb, rest string) bool {
 			return true
 		}
 		id, err := se.s.opt.Store.Put(ctx, recipient, se.sender, raw)
+		if errors.Is(err, store.ErrConflict) {
+			// Another edge wrote routing data first, as happens during a deploy.
+			se.reply("451 4.3.0 try again shortly")
+			return true
+		}
 		if err != nil {
 			// S3 not confirmed: do NOT 250. 452 asks the sender to retry.
 			se.reply("452 4.3.0 temporary storage failure")

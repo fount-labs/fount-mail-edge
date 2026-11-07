@@ -29,11 +29,11 @@ type flakyBlobs struct {
 
 func newFlakyBlobs() *flakyBlobs { return &flakyBlobs{memBlobs: newMemBlobs()} }
 
-func (f *flakyBlobs) Put(ctx context.Context, key string, data []byte) error {
+func (f *flakyBlobs) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
 	if f.fail.Load() {
-		return errors.New("injected put failure")
+		return "", errors.New("injected put failure")
 	}
-	return f.memBlobs.Put(ctx, key, data)
+	return f.memBlobs.PutIfMatch(ctx, key, data, etag)
 }
 
 // Property: a per-mailbox sequence number is never handed out twice — not across a

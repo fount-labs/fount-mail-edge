@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/limit"
+
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 const (
@@ -546,6 +548,19 @@ func TestStoreFailureDoesNotAck(t *testing.T) {
 	c.expect("354")
 	fmt.Fprint(c.conn, "body\r\n.\r\n")
 	c.expect("452")
+}
+
+// A routing write that lost a race with another edge asks for a retry, with 451.
+func TestStoreConflictAsksForARetry(t *testing.T) {
+	st := &captureStore{err: fmt.Errorf("sequence: %w", store.ErrConflict)}
+	addr := newTestServer(t, st, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	if got := c.deliver("sender@elsewhere.com", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "451") {
+		t.Fatalf("reply = %q, want 451", got)
+	}
 }
 
 // A connection with no PROXY header (the gateway always prepends one) is dropped

@@ -9,6 +9,7 @@
 //
 // The client implements store.Blobs; Get returns store.ErrNotFound on a 404 so
 // the routing and mail layers can distinguish a miss from a transient failure.
+// GetVersioned and PutIfMatch add the conditional write routing needs.
 package s3
 
 import (
@@ -79,7 +80,7 @@ func New(cfg Config) (*Client, error) {
 }
 
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
-	resp, err := c.do(ctx, http.MethodPut, key, nil, data)
+	resp, err := c.do(ctx, http.MethodPut, key, nil, data, nil)
 	if err != nil {
 		return err
 	}
@@ -91,24 +92,64 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 }
 
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
-	resp, err := c.do(ctx, http.MethodGet, key, nil, nil)
+	data, _, err := c.GetVersioned(ctx, key)
+	return data, err
+}
+
+// GetVersioned returns an object and the ETag PutIfMatch needs to replace it.
+func (c *Client) GetVersioned(ctx context.Context, key string) ([]byte, string, error) {
+	resp, err := c.do(ctx, http.MethodGet, key, nil, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer drain(resp)
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, store.ErrNotFound
+		return nil, "", store.ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, c.httpErr("get", key, resp)
+		return nil, "", c.httpErr("get", key, resp)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, resp.Header.Get("ETag"), nil
+}
+
+// PutIfMatch writes an object only if it still has this ETag, or, with an empty
+// etag, only if it doesn't exist. It returns the new ETag, or store.ErrConflict if
+// the object changed. 412 is the normal answer, 409 means another conditional write
+// raced this one, and 404 means the object has gone.
+func (c *Client) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
+	h := http.Header{}
+	if etag == "" {
+		h.Set("If-None-Match", "*")
+	} else {
+		h.Set("If-Match", etag)
+	}
+	resp, err := c.do(ctx, http.MethodPut, key, nil, data, h)
+	if err != nil {
+		return "", err
+	}
+	defer drain(resp)
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusPreconditionFailed, http.StatusConflict, http.StatusNotFound:
+		return "", store.ErrConflict
+	default:
+		return "", c.httpErr("put", key, resp)
+	}
+	next := resp.Header.Get("ETag")
+	if next == "" {
+		return "", fmt.Errorf("s3: put %q: no ETag in the response", key)
+	}
+	return next, nil
 }
 
 // Delete is idempotent: S3 answers 204 whether or not the object existed, which
 // matches Blobs' "deleting an absent object is not an error".
 func (c *Client) Delete(ctx context.Context, key string) error {
-	resp, err := c.do(ctx, http.MethodDelete, key, nil, nil)
+	resp, err := c.do(ctx, http.MethodDelete, key, nil, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -144,7 +185,7 @@ func (c *Client) List(ctx context.Context, prefix string) ([]store.Object, error
 		if token != "" {
 			q.Set("continuation-token", token)
 		}
-		resp, err := c.do(ctx, http.MethodGet, "", q, nil)
+		resp, err := c.do(ctx, http.MethodGet, "", q, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -177,8 +218,8 @@ func (c *Client) List(ctx context.Context, prefix string) ([]store.Object, error
 
 // do builds, signs, and sends one request. key is a bucket-relative object key
 // ("" for a bucket-level request such as List). query is the (unsigned) query
-// values; do canonicalizes and signs them.
-func (c *Client) do(ctx context.Context, method, key string, query url.Values, body []byte) (*http.Response, error) {
+// values; do canonicalizes and signs them. header is added to the signed headers.
+func (c *Client) do(ctx context.Context, method, key string, query url.Values, body []byte, header http.Header) (*http.Response, error) {
 	u := *c.base
 	u.Path = "/" + strings.TrimPrefix(key, "/")
 	if query != nil {
@@ -189,6 +230,9 @@ func (c *Client) do(ctx context.Context, method, key string, query url.Values, b
 		return nil, err
 	}
 	req.Host = c.base.Host
+	for k, v := range header {
+		req.Header[k] = v
+	}
 	payloadHash := emptyPayloadHash
 	if len(body) > 0 {
 		payloadHash = hexSHA256(body)

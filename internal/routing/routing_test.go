@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +73,30 @@ func (b *memBlobs) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func (b *memBlobs) GetVersioned(ctx context.Context, k string) ([]byte, string, error) {
+	v, err := b.Get(ctx, k)
+	if err != nil {
+		return nil, "", err
+	}
+	return v, etagOf(v), nil
+}
+
+func (b *memBlobs) PutIfMatch(ctx context.Context, k string, d []byte, etag string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cur, ok := b.objs[k]
+	if ok && etag != etagOf(cur) || !ok && etag != "" {
+		return "", store.ErrConflict
+	}
+	b.objs[k] = append([]byte(nil), d...)
+	return etagOf(d), nil
+}
+
+func etagOf(d []byte) string {
+	h := sha256.Sum256(d)
+	return hex.EncodeToString(h[:])
+}
+
 type keyset struct {
 	dec         *ecdh.PrivateKey
 	sign        ed25519.PrivateKey
@@ -119,7 +144,7 @@ func keys(t *testing.T) (routingKey, macKey []byte) {
 	return
 }
 
-func newStore(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routing.Store {
+func newStore(t *testing.T, blobs routing.Blobs, routingKey, macKey []byte) *routing.Store {
 	t.Helper()
 	initialize(t, blobs, routingKey)
 	s, err := routing.New(context.Background(), blobs, routingKey, macKey)
@@ -130,7 +155,7 @@ func newStore(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routi
 }
 
 // initialize creates the routing object unless the test already has one.
-func initialize(t *testing.T, blobs store.Blobs, routingKey []byte) {
+func initialize(t *testing.T, blobs routing.Blobs, routingKey []byte) {
 	t.Helper()
 	if err := routing.Initialize(context.Background(), blobs, routingKey); err != nil && !errors.Is(err, routing.ErrObjectExists) {
 		t.Fatalf("routing.Initialize: %v", err)
@@ -178,7 +203,7 @@ func TestInitializeNeverReplacesAnObject(t *testing.T) {
 }
 
 // failingGet stands in for an S3 permission error, where the object may well exist.
-type failingGet struct{ store.Blobs }
+type failingGet struct{ routing.Blobs }
 
 func (failingGet) Get(context.Context, string) ([]byte, error) {
 	return nil, errors.New("s3: 403 Forbidden")
@@ -679,7 +704,7 @@ func TestRenewingAnyAddressRenewsThemAll(t *testing.T) {
 	}
 }
 
-func reload(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routing.Store {
+func reload(t *testing.T, blobs routing.Blobs, routingKey, macKey []byte) *routing.Store {
 	t.Helper()
 	s, err := routing.New(context.Background(), blobs, routingKey, macKey)
 	if err != nil {
@@ -689,15 +714,15 @@ func reload(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routing
 }
 
 type refusingPut struct {
-	store.Blobs
+	routing.Blobs
 	refuse *bool
 }
 
-func (b refusingPut) Put(ctx context.Context, k string, d []byte) error {
+func (b refusingPut) PutIfMatch(ctx context.Context, k string, d []byte, etag string) (string, error) {
 	if *b.refuse {
-		return errors.New("s3 down")
+		return "", errors.New("s3 down")
 	}
-	return b.Blobs.Put(ctx, k, d)
+	return b.Blobs.PutIfMatch(ctx, k, d, etag)
 }
 
 func TestFailedWriteLeavesEveryAddressUnchanged(t *testing.T) {
@@ -824,6 +849,207 @@ func TestReadersDontRaceWrites(t *testing.T) {
 			s.Resolve(ctx, "a@fountbox.com")
 			s.Status(ctx, "a@fountbox.com")
 		}
+	}
+}
+
+// During a deploy two edges run at once. Neither may lose the other's change.
+func TestTwoEdgesCantOverwriteEachOther(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	ctx := context.Background()
+	oldEdge := newStore(t, blobs, routingKey, macKey)
+	newEdge := reload(t, blobs, routingKey, macKey)
+
+	if _, err := oldEdge.Create(ctx, routing.NewMailbox{Address: "a@fountbox.com", LicenseHash: []byte("a")}); err != nil {
+		t.Fatal(err)
+	}
+	b := routing.NewMailbox{Address: "b@fountbox.com", LicenseHash: []byte("b")}
+	if _, err := newEdge.Create(ctx, b); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("second writer: err = %v, want ErrConflict", err)
+	}
+	if ok, _ := newEdge.Available(ctx, "b@fountbox.com"); !ok {
+		t.Fatal("a refused write stayed in memory")
+	}
+	if _, err := newEdge.Create(ctx, b); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	final := reload(t, blobs, routingKey, macKey)
+	for _, addr := range []string{"a@fountbox.com", "b@fountbox.com"} {
+		if ok, _ := final.Available(ctx, addr); ok {
+			t.Fatalf("%s was lost", addr)
+		}
+	}
+}
+
+func TestEdgesNeverIssueTheSameSequence(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	ctx := context.Background()
+	a := newStore(t, blobs, routingKey, macKey)
+	id := a.MailboxID("a@fountbox.com")
+	if err := a.Upsert(ctx, newKeyset(t).record(id)); err != nil {
+		t.Fatal(err)
+	}
+	b := reload(t, blobs, routingKey, macKey)
+	seen := map[uint64]bool{}
+	for i := range 40 {
+		s := a
+		if i%3 != 0 {
+			s = b
+		}
+		n, err := s.NextSequence(ctx, id)
+		if errors.Is(err, store.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[n] {
+			t.Fatalf("sequence %d issued twice", n)
+		}
+		seen[n] = true
+	}
+	if len(seen) < 10 {
+		t.Fatalf("only %d issued, so this proved little", len(seen))
+	}
+}
+
+// lostAnswer stores the object and then reports a failure, like a timeout after S3
+// took the write.
+type lostAnswer struct {
+	routing.Blobs
+	lose *bool
+}
+
+func (b lostAnswer) PutIfMatch(ctx context.Context, k string, d []byte, etag string) (string, error) {
+	next, err := b.Blobs.PutIfMatch(ctx, k, d, etag)
+	if *b.lose {
+		return "", errors.New("timed out")
+	}
+	return next, err
+}
+
+func TestAWriteThatLandedWithoutAnAnswerDoesntReuseASequence(t *testing.T) {
+	routingKey, macKey := keys(t)
+	lose := false
+	s := newStore(t, lostAnswer{newMemBlobs(), &lose}, routingKey, macKey)
+	ctx := context.Background()
+	id := s.MailboxID("a@fountbox.com")
+	if err := s.Upsert(ctx, newKeyset(t).record(id)); err != nil {
+		t.Fatal(err)
+	}
+	lose = true
+	if _, err := s.NextSequence(ctx, id); err == nil {
+		t.Fatal("want a failure")
+	}
+	lose = false
+	if _, err := s.NextSequence(ctx, id); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	n, err := s.NextSequence(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("sequence = %d, want 2", n)
+	}
+}
+
+// A running edge must not adopt an older object. It would reuse sequences and revive
+// old keys. A restore stops the edges first.
+func TestRunningEdgeRefusesAnOlderObject(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	ctx := context.Background()
+	s := newStore(t, blobs, routingKey, macKey)
+	id := s.MailboxID("a@fountbox.com")
+	if err := s.Upsert(ctx, newKeyset(t).record(id)); err != nil {
+		t.Fatal(err)
+	}
+	old, err := blobs.Get(ctx, routing.ObjectKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NextSequence(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := blobs.Put(ctx, routing.ObjectKey, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NextSequence(ctx, id); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("first write: %v", err)
+	}
+	for range 2 {
+		if _, err := s.NextSequence(ctx, id); !errors.Is(err, routing.ErrRolledBack) {
+			t.Fatalf("err = %v, want ErrRolledBack", err)
+		}
+	}
+	if err := s.Upsert(ctx, newKeyset(t).record(id)); !errors.Is(err, routing.ErrRolledBack) {
+		t.Fatalf("Upsert err = %v", err)
+	}
+	// Restarting is the deliberate step.
+	if _, err := reload(t, blobs, routingKey, macKey).NextSequence(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countingGets reports reads, and can miss an object once, like a second operator
+// racing Initialize.
+type countingGets struct {
+	routing.Blobs
+	gets atomic.Int32
+	miss atomic.Bool
+}
+
+func (b *countingGets) Get(ctx context.Context, k string) ([]byte, error) {
+	if b.miss.Swap(false) {
+		return nil, store.ErrNotFound
+	}
+	return b.Blobs.Get(ctx, k)
+}
+
+func (b *countingGets) GetVersioned(ctx context.Context, k string) ([]byte, string, error) {
+	b.gets.Add(1)
+	return b.Blobs.GetVersioned(ctx, k)
+}
+
+func TestInitializeCantReplaceAnObjectThatAppeared(t *testing.T) {
+	routingKey, _ := keys(t)
+	b := &countingGets{Blobs: newMemBlobs()}
+	if err := routing.Initialize(context.Background(), b, routingKey); err != nil {
+		t.Fatal(err)
+	}
+	b.miss.Store(true)
+	if err := routing.Initialize(context.Background(), b, routingKey); !errors.Is(err, routing.ErrObjectExists) {
+		t.Fatalf("err = %v, want ErrObjectExists", err)
+	}
+}
+
+// One reload per lost race, so a store that has caught up stops paying for it.
+func TestReloadsOnlyAfterALostRace(t *testing.T) {
+	routingKey, macKey := keys(t)
+	ctx := context.Background()
+	b := &countingGets{Blobs: newMemBlobs()}
+	s := newStore(t, b, routingKey, macKey)
+	id := s.MailboxID("a@fountbox.com")
+	if err := s.Upsert(ctx, newKeyset(t).record(id)); err != nil {
+		t.Fatal(err)
+	}
+	other := reload(t, b, routingKey, macKey)
+	if _, err := other.NextSequence(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NextSequence(ctx, id); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("err = %v", err)
+	}
+	before := b.gets.Load()
+	for range 3 {
+		if _, err := s.NextSequence(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := b.gets.Load() - before; n != 1 {
+		t.Fatalf("%d reloads, want 1", n)
 	}
 }
 

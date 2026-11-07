@@ -66,6 +66,30 @@ func (b *memBlobs) Delete(_ context.Context, k string) error {
 	return nil
 }
 
+func (b *memBlobs) GetVersioned(ctx context.Context, k string) ([]byte, string, error) {
+	v, err := b.Get(ctx, k)
+	if err != nil {
+		return nil, "", err
+	}
+	return v, etagOf(v), nil
+}
+
+func (b *memBlobs) PutIfMatch(ctx context.Context, k string, d []byte, etag string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cur, ok := b.m[k]
+	if ok && etag != etagOf(cur) || !ok && etag != "" {
+		return "", store.ErrConflict
+	}
+	b.m[k] = append([]byte(nil), d...)
+	return etagOf(d), nil
+}
+
+func etagOf(d []byte) string {
+	h := sha256.Sum256(d)
+	return hex.EncodeToString(h[:])
+}
+
 func newRoutingStore(t *testing.T) (*routing.Store, *memBlobs) {
 	t.Helper()
 	blobs := newMemBlobs()
@@ -318,6 +342,28 @@ func TestPostAddressIsThrottled(t *testing.T) {
 		api.ServeHTTP(rec, signedRequest(t, parent.mailbox, parent.idHex, "POST", "/address", raw, time.Now(), fmt.Sprintf("t%d", i)))
 		if rec.Code != want {
 			t.Fatalf("attempt %d: want %d, got %d", i, want, rec.Code)
+		}
+	}
+}
+
+// A lost race with another edge is worth retrying, so it can't look like a failure.
+func TestConflictingWriteAsksForARetry(t *testing.T) {
+	rt, blobs := newRoutingStore(t)
+	api, _ := mutatorAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	other, err := routing.New(context.Background(), blobs, []byte("test-routing-data-key"), []byte("test-mac-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Create(context.Background(), routing.NewMailbox{Address: "other@fountbox.com", LicenseHash: []byte("lic-2")}); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int{http.StatusServiceUnavailable, http.StatusOK} {
+		raw, _ := json.Marshal(routingRequest{Version: 1, Owners: nil})
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, mb.owner, mb.idHex, "PUT", "/routing", raw, time.Now(), fmt.Sprintf("c%d", i)))
+		if rec.Code != want {
+			t.Fatalf("attempt %d: want %d, got %d: %s", i, want, rec.Code, rec.Body.String())
 		}
 	}
 }

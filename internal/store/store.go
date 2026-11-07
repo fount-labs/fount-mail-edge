@@ -32,6 +32,10 @@ var ErrNoRecipient = errors.New("store: no such recipient")
 // GET/DELETE for an unknown message). The Device API maps it to 404.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrConflict means an object changed since it was read, so a conditional write
+// didn't happen. The caller retries against fresh data; SMTP answers 451.
+var ErrConflict = errors.New("store: object changed")
+
 // ErrMailboxFull means the mailbox is at its storage cap (design §6: "up to
 // about 2 GB per mailbox. When full, it answers 452"). SMTP turns a Put error
 // into a 452, so the sender retries until the owner fetches and frees space.

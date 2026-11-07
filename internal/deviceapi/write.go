@@ -107,7 +107,7 @@ func (a *API) createAddress() http.Handler {
 			writeErr(w, http.StatusNotFound, "no such mailbox")
 			return
 		case err != nil:
-			writeErr(w, http.StatusInternalServerError, "add address failed")
+			writeFailure(w, err, "add address failed")
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"mailbox_id": hex.EncodeToString(id)})
@@ -158,7 +158,7 @@ func (a *API) putRouting() http.Handler {
 			writeErr(w, http.StatusNotFound, "no such mailbox")
 			return
 		case err != nil:
-			writeErr(w, http.StatusInternalServerError, "write routing failed")
+			writeFailure(w, err, "write routing failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"version": req.Version, "owners": len(req.Owners)})
@@ -210,7 +210,7 @@ func (a *API) renewEntitlement() http.Handler {
 			writeErr(w, http.StatusNotFound, "no such mailbox")
 			return
 		case err != nil:
-			writeErr(w, http.StatusInternalServerError, "renew failed")
+			writeFailure(w, err, "renew failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"entitlement_exp": claims.ExpiresAt})

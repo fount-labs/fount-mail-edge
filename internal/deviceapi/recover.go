@@ -198,7 +198,7 @@ func (a *API) recover() http.Handler {
 			writeErr(w, http.StatusInternalServerError, "could not record key")
 			return
 		case err != nil:
-			writeErr(w, http.StatusInternalServerError, "rotate failed")
+			writeFailure(w, err, "rotate failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"mailbox_id": hex.EncodeToString(mid), "rotated": true})

@@ -23,7 +23,11 @@ import (
 type fakeBucket struct {
 	t    *testing.T
 	objs map[string][]byte
+
+	raced bool // answer writes with S3's 409 for a concurrent conditional write
 }
+
+func etag(b []byte) string { return fmt.Sprintf(`"%x"`, sha256.Sum256(b)) }
 
 func (f *fakeBucket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
@@ -47,6 +51,7 @@ func (f *fakeBucket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "nope", http.StatusNotFound)
 			return
 		}
+		w.Header().Set("ETag", etag(b))
 		_, _ = w.Write(b)
 	case http.MethodPut:
 		b, _ := io.ReadAll(r.Body)
@@ -56,7 +61,27 @@ func (f *fakeBucket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad checksum", http.StatusBadRequest)
 			return
 		}
+		cur, exists := f.objs[key]
+		if m := r.Header.Get("If-Match"); m != "" {
+			if !exists {
+				http.Error(w, "gone", http.StatusNotFound)
+				return
+			}
+			if m != etag(cur) {
+				http.Error(w, "changed", http.StatusPreconditionFailed)
+				return
+			}
+		}
+		if r.Header.Get("If-None-Match") == "*" && exists {
+			http.Error(w, "exists", http.StatusPreconditionFailed)
+			return
+		}
+		if f.raced {
+			http.Error(w, "raced", http.StatusConflict)
+			return
+		}
 		f.objs[key] = b
+		w.Header().Set("ETag", etag(b))
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		delete(f.objs, key)
@@ -190,6 +215,64 @@ func TestListPaginates(t *testing.T) {
 }
 
 // New rejects an incomplete config rather than signing against a bad endpoint.
+func TestPutIfMatch(t *testing.T) {
+	c, fb := newTestClient(t)
+	ctx := context.Background()
+	const key = "edge/routing/current"
+
+	first, err := c.PutIfMatch(ctx, key, []byte("one"), "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := c.PutIfMatch(ctx, key, []byte("x"), ""); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("create over an object: %v", err)
+	}
+	data, seen, err := c.GetVersioned(ctx, key)
+	if err != nil || string(data) != "one" || seen != first {
+		t.Fatalf("got %q etag %q, %v", data, seen, err)
+	}
+	second, err := c.PutIfMatch(ctx, key, []byte("two"), first)
+	if err != nil || second == first {
+		t.Fatalf("replace: %q, %v", second, err)
+	}
+	if _, err := c.PutIfMatch(ctx, key, []byte("x"), first); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale etag: %v", err)
+	}
+	if string(fb.objs[key]) != "two" {
+		t.Fatalf("stored %q", fb.objs[key])
+	}
+
+	fb.raced = true
+	if _, err := c.PutIfMatch(ctx, key, []byte("x"), second); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("409: %v", err)
+	}
+	fb.raced = false
+	delete(fb.objs, key)
+	if _, err := c.PutIfMatch(ctx, key, []byte("x"), second); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("object gone: %v", err)
+	}
+}
+
+// S3 signs the condition, so a proxy can't drop it.
+func TestConditionHeaderIsSigned(t *testing.T) {
+	var signed string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		signed = r.Header.Get("Authorization")
+		w.Header().Set("ETag", `"x"`)
+	}))
+	defer srv.Close()
+	c, err := New(Config{Endpoint: srv.URL, Region: "us-east-1", AccessKeyID: "AKID", SecretAccessKey: "s", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PutIfMatch(context.Background(), "k", []byte("d"), `"e"`); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(signed, "if-match") {
+		t.Fatalf("If-Match not in the signed headers: %s", signed)
+	}
+}
+
 func TestNewValidates(t *testing.T) {
 	for _, cfg := range []Config{
 		{Region: "us-east-1", AccessKeyID: "a", SecretAccessKey: "b"},   // no endpoint
