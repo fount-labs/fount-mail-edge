@@ -6,13 +6,19 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/fount-labs/fount-mail-vault/wire"
 )
 
+// setSecrets sets a release's measured config. The name is historical: a release
+// no longer has secrets in its environment.
 func setSecrets(t *testing.T) {
 	t.Helper()
 	for _, k := range SecretNames {
-		t.Setenv(k, "x")
+		os.Unsetenv(k)
 	}
+	t.Setenv("VAULT_HOSTS", "vault-a.example,vault-b.example")
+	t.Setenv("KEYSET_COMMITMENT", strings.Repeat("ab", 32))
 	t.Setenv("ENTITLEMENT_VERIFY_KEY", base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)))
 	t.Setenv("ACME_DIRECTORY", acmeProduction)
 	t.Setenv("EGRESS_FORWARDER", "forwarder")
@@ -120,10 +126,26 @@ func TestReleaseConfigEgress(t *testing.T) {
 			t.Errorf("no route to %s", host)
 		}
 	}
-	_, secrets, _ := strings.Cut(edge, "secrets:")
-	for _, name := range SecretNames {
-		if !strings.Contains(secrets, "- "+name) {
-			t.Errorf("%s isn't declared", name)
+	// Keys come from the vault, so nothing may come from a keyserver or Tinfoil.
+	for _, k := range []string{"keyserver-url", "secrets:"} {
+		if strings.Contains(text, k) {
+			t.Errorf("the config still has %s", k)
+		}
+	}
+	if !strings.Contains(edge, "attestation: true") {
+		t.Error("mail-edge has no attestation socket, so it can't pull its keys")
+	}
+	if got := field(edge, "keys: "); !strings.Contains(got, "transfer") {
+		t.Errorf("mail-edge keys = %s, missing transfer", got)
+	}
+	if _, after, ok := strings.Cut(text, "- id: transfer"); !ok || !strings.HasPrefix(strings.SplitN(after, "\n", 3)[1], "    key: x25519") {
+		t.Error("no x25519 transfer key")
+	}
+	_, edgeNet, _ := strings.Cut(nets, "\n  edge:")
+	edgeNet, _, _ = strings.Cut(edgeNet, "\n  internal:")
+	for _, host := range strings.Split(field(edge, "VAULT_HOSTS: "), ",") {
+		if !strings.Contains(edgeNet, "- "+host) {
+			t.Errorf("vault %s isn't on the edge allowlist", host)
 		}
 	}
 }
@@ -235,5 +257,53 @@ func TestMailHostnames(t *testing.T) {
 	t.Setenv("MAIL_HOSTNAMES", " , ")
 	if _, err := Load(); err == nil {
 		t.Fatal("empty hostnames accepted")
+	}
+}
+
+func TestReleaseNeedsAVaultAndCommitment(t *testing.T) {
+	cases := map[string]struct{ key, value, want string }{
+		"no vaults":         {"VAULT_HOSTS", "", "VAULT_HOSTS"},
+		"vault url":         {"VAULT_HOSTS", "https://vault-a.example", "bare hostname"},
+		"no commitment":     {"KEYSET_COMMITMENT", "", "KEYSET_COMMITMENT"},
+		"bad commitment":    {"KEYSET_COMMITMENT", strings.Repeat("AB", 32), "KEYSET_COMMITMENT"},
+		"no entitlement":    {"ENTITLEMENT_VERIFY_KEY", "", "ENTITLEMENT_VERIFY_KEY"},
+		"placeholder vault": {"VAULT_HOSTS", "PLACEHOLDER vault", "bare hostname"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			setSecrets(t)
+			t.Setenv("EDGE_DEV", "")
+			t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+			t.Setenv(c.key, c.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Load() err = %v", err)
+			}
+		})
+	}
+}
+
+func TestReleaseHoldsNoSecretsUntilTheVault(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Secrets.AddressMACKey != nil || c.Secrets.S3SecretAccessKey != "" {
+		t.Fatal("a release loaded secrets before the vault")
+	}
+	k, err := wire.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.InstallVaultKeys(&wire.PullResult{Keyset: k}); err == nil || !strings.Contains(err.Error(), "S3 credentials") {
+		t.Fatalf("installed keys with no S3 credentials: %v", err)
+	}
+	if err := c.InstallVaultKeys(&wire.PullResult{Keyset: k, S3: &wire.S3Credentials{AccessKeyID: "A", SecretAccessKey: "B"}}); err != nil {
+		t.Fatal(err)
+	}
+	if string(c.Secrets.AddressMACKey) != string(k.AddressMACKey[:]) || !strings.Contains(string(c.Secrets.ACMEAccountKeyPEM), "PRIVATE KEY") {
+		t.Fatal("installed the wrong keys")
 	}
 }

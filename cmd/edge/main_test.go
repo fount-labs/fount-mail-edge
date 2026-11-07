@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -135,8 +136,13 @@ func testKeys(t *testing.T) *keys.Keys {
 	if err != nil {
 		t.Fatal(err)
 	}
+	transfer, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	write("mail-tls", tlsKey)
 	write("mail-sign", sign)
+	write("transfer", transfer)
 	k, err := keys.Load(dir)
 	if err != nil {
 		t.Fatal(err)

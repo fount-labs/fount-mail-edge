@@ -4,6 +4,12 @@ module github.com/fount-labs/fount-mail-edge
 // The toolchain line pins the exact Go version CI and the Docker build use.
 go 1.27.3
 
-// Intentionally dependency-free: the edge uses only the Go standard library, so
-// there is no go.sum and no third-party supply-chain surface to reproduce. HPKE
-// storage (M2 step 4) and ACME (M2 step 3) will add vetted, digest-pinned deps.
+// Intentionally free of third-party code: the edge uses only the Go standard
+// library and Fount's own vault/wire module, which is standard-library only too.
+// That module is vendored, so the build reads it from vendor/ and needs no
+// network and no go.sum.
+require github.com/fount-labs/fount-mail-vault/wire v0.0.0
+
+// Until fount-mail-vault is published, this points at the sibling checkout.
+// Replace it with a tagged version (wire/vX.Y.Z) when it is.
+replace github.com/fount-labs/fount-mail-vault/wire => ../fount-mail-vault/wire

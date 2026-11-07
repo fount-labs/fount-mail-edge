@@ -11,8 +11,10 @@
 
 FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 WORKDIR /src
-# Stdlib-only: go.mod alone is the full dependency set (no go.sum).
+# No third-party code: go.mod plus the vendored vault/wire module is the full
+# dependency set, so the build needs no network and no go.sum.
 COPY go.mod ./
+COPY vendor ./vendor
 COPY cmd ./cmd
 COPY internal ./internal
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local

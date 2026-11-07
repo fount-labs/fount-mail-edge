@@ -26,8 +26,12 @@ before the first release, and keep the Go version equal to `go.mod`.
 
 The edge refuses to boot without its routing object, so a lost object can't be
 mistaken for a new deployment. Before the first release, run `cmd/routing-init`
-once with the keyserver's `ROUTING_DATA_KEY` and S3 credentials. It never replaces
-an object that exists. To put a lost object back, follow `docs/RESTORE.md`.
+once with `ROUTING_DATA_KEY` and S3 credentials. It never replaces an object that
+exists. To put a lost object back, follow `docs/RESTORE.md`.
+
+**Open (2026-11-07):** `routing-init`, `routing-provision`, and `routing-restore`
+read the routing and MAC keys on an operator's machine. With the keys held only in
+the vault and the edge, no operator has them, so these need to move into the edge.
 
 `abuse@` and `postmaster@` must exist before real mail, and the Device API refuses
 those names. Run `cmd/routing-provision` once for each, with the public keys of the
@@ -44,11 +48,10 @@ device that reads them.
 3. **Pin the digest** into both containers in `tinfoil-config.yml` (the forwarder
    runs the same image as the edge) and run Tinfoil's measured-release
    workflows.
-4. **Wait 24 hours in public.** Only an exploitable security bug or mail being
-   down skips this, and the release says why.
-5. **Approve the tag in the keyserver** once an outside rebuild passes: add a
-   `workloads:` entry (repo + tag + domain) to `fount-infra/keyserver/policy.yaml`
-   under the hardware-key credential, then restart the keyserver.
+4. **Nothing to approve.** A vault hands the keyset to any release of this repo at
+   or above its `EDGE_MIN_TAG`, as soon as it's published. Publication is the
+   control: it's public, and an alert fires on it. To retire an old release, raise
+   `EDGE_MIN_TAG` in a vault release.
 
 ## Verify
 
@@ -63,4 +66,4 @@ alerts on a mismatch.
 ## Accounts
 
 Protect tags and the default branch; require hardware keys on GitHub, AWS,
-Tinfoil, and DNS; keep keyserver approval on a separate credential.
+Tinfoil, and DNS.

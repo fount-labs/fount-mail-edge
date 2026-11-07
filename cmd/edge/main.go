@@ -3,10 +3,13 @@
 // key, and serves the Device API to the broker over the attested tunnel.
 //
 // Boot sequence (design §5, §6, §8):
-//  1. Load non-secret config; load keyserver secrets from env (fail fast).
-//  2. Load the per-boot attested keys (TLS ecdsa-p256, signing ed25519).
-//  3. Start the SMTP, Device API, and health listeners.
-//  4. Run ACME for the attested TLS key once the gateway's first health check
+//  1. Load the measured config (fail fast).
+//  2. Load the per-boot attested keys (TLS ecdsa-p256, signing ed25519,
+//     transfer x25519).
+//  3. Start the health listener, then pull the keyset from a vault, checked
+//     against KEYSET_COMMITMENT. Nothing else starts until that succeeds.
+//  4. Start the SMTP and Device API listeners.
+//  5. Run ACME for the attested TLS key once the gateway's first health check
 //     lands; answer 421 until the certificate loads.
 package main
 
@@ -60,7 +63,7 @@ func main() {
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		return err // a missing attested key or keyserver secret must not boot
+		return err // a bad measured config must not boot
 	}
 	log.Printf("edge: booting hostnames=%v domain=%s", cfg.MailHostnames, cfg.MailDomain)
 
@@ -73,6 +76,25 @@ func run() error {
 	}
 	log.Printf("edge: attested TLS spki(sha256)=%s", k.TLSPublicSPKI())
 	log.Printf("edge: attested signing pub(ed25519)=%s", k.SignPublicB64())
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// The health listener comes first, so the container stays healthy while it
+	// waits for a vault. /ready stays 503 until the certificate loads.
+	certMgr := certs.NewManager()
+	healthSrv := &http.Server{
+		Addr:              cfg.HealthAddr,
+		Handler:           health(certMgr),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	errc := make(chan error, 4)
+	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
+	if !cfg.Dev {
+		if err := pullKeys(ctx, cfg, k); err != nil {
+			return err
+		}
+	}
 
 	st, rt, err := storage(cfg, k)
 	if err != nil {
@@ -90,8 +112,6 @@ func run() error {
 		provisioner = rt
 		mutator = rt
 	}
-	certMgr := certs.NewManager()
-
 	// ACME: get a CA cert for the attested TLS key via the gateway HTTP-01 path.
 	challenges := acme.NewChallenges()
 	acmeSrv := &http.Server{
@@ -103,7 +123,7 @@ func run() error {
 	api := deviceapi.New(deviceapi.Options{
 		Store:          st,
 		Resolver:       resolver,
-		Entitlement:    cfg.Secrets.EntitlementVerifyKey,
+		Entitlement:    cfg.EntitlementVerifyKey,
 		Provisioner:    provisioner,
 		Mutator:        mutator,
 		MailDomain:     cfg.MailDomain,
@@ -122,12 +142,6 @@ func run() error {
 		MaxBytes:   cfg.MaxMessageBytes,
 	})
 
-	healthSrv := &http.Server{
-		Addr:              cfg.HealthAddr,
-		Handler:           health(certMgr),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
 	smtpLn, err := tunnelListener(cfg, k, cfg.SMTPAddr)
 	if err != nil {
 		return err
@@ -137,13 +151,8 @@ func run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-
-	errc := make(chan error, 4)
 	go func() { errc <- smtpSrv.Serve(ctx, smtpLn) }()
 	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
-	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
 	go func() { errc <- ignoreClosed(acmeSrv.Serve(acmeLn)) }()
 	go startCertLoop(ctx, cfg, k, certMgr, challenges)
 	go startRetentionSweep(ctx, st)

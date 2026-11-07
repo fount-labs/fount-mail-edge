@@ -1,0 +1,4 @@
+# github.com/fount-labs/fount-mail-vault/wire v0.0.0 => ../fount-mail-vault/wire
+## explicit; go 1.27.3
+github.com/fount-labs/fount-mail-vault/wire
+# github.com/fount-labs/fount-mail-vault/wire => ../fount-mail-vault/wire

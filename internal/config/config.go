@@ -2,15 +2,14 @@
 //
 // Two sources, deliberately separate:
 //
-//   - Non-secret runtime settings come from the environment with safe defaults
-//     (hostnames, listen addresses, limits).
-//   - Secrets come from the keyserver. The Tinfoil runtime fetches them after
-//     attestation and injects them as environment variables (see
-//     tinfoil-config.yml). The edge holds NO long-lived secret of its own;
-//     everything that must survive a boot comes from here. A missing secret is
-//     a FATAL boot error — there is deliberately no fallback to a Tinfoil-managed
-//     secret of the same name, because that path is reachable by Tinfoil's own
-//     infrastructure (design §5).
+//   - Runtime settings come from the environment, which tinfoil-config.yml sets
+//     and measures, so none of them is secret.
+//   - Secrets come from a Fount Mail vault after boot (InstallVaultKeys). The vault
+//     verifies this release before it seals them to the attested transfer key, and
+//     the edge checks them against KEYSET_COMMITMENT. The edge holds NO long-lived
+//     secret of its own, and there is deliberately no fallback to a Tinfoil-managed
+//     secret, because that path is reachable by Tinfoil's own infrastructure
+//     (design §5).
 //
 // For local development only, EDGE_DEV=1 fills placeholder secrets so the binary
 // can boot for smoke tests. It logs loudly and must never be set in a release.
@@ -28,6 +27,7 @@ import (
 
 	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
+	"github.com/fount-labs/fount-mail-vault/wire"
 )
 
 const defaultMaxMessageBytes = 25 * 1024 * 1024 // 25 MB, matches the probe's SIZE
@@ -41,15 +41,16 @@ const (
 	acmeProduction = "https://acme-v02.api.letsencrypt.org/directory"
 )
 
-// SecretNames are the keyserver secrets, by env var name.
+// SecretNames are the edge's secrets, by the env var names the routing commands
+// read them from. A release never sets them: they come from the vault.
 var SecretNames = []string{
-	"ACME_ACCOUNT_KEY", "ADDRESS_MAC_KEY", "ROUTING_DATA_KEY", "ENTITLEMENT_VERIFY_KEY",
+	"ACME_ACCOUNT_KEY", "ADDRESS_MAC_KEY", "ROUTING_DATA_KEY",
 	"S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
 }
 
-// VisibleSecret names a keyserver secret in this process's environment, or returns
-// "" if there is none. The forwarder checks this at startup, because Tinfoil doesn't
-// document whether a container's secrets stay out of its neighbours.
+// VisibleSecret names a secret in this process's environment, or returns "" if
+// there is none. The forwarder checks this at startup, as a tripwire against a
+// config that puts one back in the environment.
 func VisibleSecret() string {
 	for _, name := range SecretNames {
 		if _, ok := os.LookupEnv(name); ok {
@@ -59,16 +60,14 @@ func VisibleSecret() string {
 	return ""
 }
 
-// Secrets are delivered by the keyserver and injected as env vars. Every field
-// here must have a matching entry in the keyserver policy.yaml workload and in
-// tinfoil-config.yml's `secrets:` list, or the enclave will not boot.
+// Secrets come from the vault. The first three are the keyset KEYSET_COMMITMENT
+// pins; the S3 credentials are issued by AWS and imported into the vault.
 type Secrets struct {
-	ACMEAccountKeyPEM    []byte // CAA-pinned ACME account key (accounturi)
-	AddressMACKey        []byte // keyed hash of addresses, stable across boots
-	RoutingDataKey       []byte // decrypts the versioned owner/routing list
-	EntitlementVerifyKey []byte // Ed25519 public key that verifies device entitlements (§4/§8)
-	S3AccessKeyID        string
-	S3SecretAccessKey    string
+	ACMEAccountKeyPEM []byte // CAA-pinned ACME account key (accounturi)
+	AddressMACKey     []byte // keyed hash of addresses, stable across boots
+	RoutingDataKey    []byte // decrypts the versioned owner/routing list
+	S3AccessKeyID     string
+	S3SecretAccessKey string
 }
 
 type Config struct {
@@ -92,8 +91,13 @@ type Config struct {
 	EgressRoutes      []egress.Route   // one per bucket hostname; measured with the config
 	RecoveryRPID      string           // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
 	RecoveryOrigin    string           // optional: pins the assertion's clientDataJSON origin (e.g. https://mail.fount.sh)
-	Dev               bool
-	Secrets           Secrets
+	VaultHosts        []string         // vaults to pull the keyset from, tried in order
+	KeysetCommitment  string           // the only keyset this release accepts
+	// EntitlementVerifyKey is the Ed25519 public key that verifies device
+	// entitlements (§4/§8). It's public, so it's measured config, not a secret.
+	EntitlementVerifyKey []byte
+	Dev                  bool
+	Secrets              Secrets
 }
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
@@ -114,8 +118,8 @@ func (c *Config) BucketURL(bucket string) string {
 	return "https://" + bucket + ".s3." + c.S3Region + ".amazonaws.com"
 }
 
-// Load reads the environment and returns a validated Config, or a fatal error if
-// a required keyserver secret is absent (unless EDGE_DEV=1).
+// Load reads the environment and returns a validated Config. It holds no secrets
+// until InstallVaultKeys runs, except with EDGE_DEV=1, which fills placeholders.
 func Load() (*Config, error) {
 	dev := os.Getenv("EDGE_DEV") == "1"
 	c := &Config{
@@ -161,18 +165,62 @@ func Load() (*Config, error) {
 		}
 		c.GatewayPins = pins
 	}
-	if !dev {
-		if err := c.loadEgress(); err != nil {
-			return nil, err
-		}
+	if dev {
+		devSecrets(c)
+		return c, nil
 	}
-
-	s, err := loadSecrets(dev)
-	if err != nil {
+	if err := c.loadEgress(); err != nil {
 		return nil, err
 	}
-	c.Secrets = s
+	if err := c.loadVault(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// loadVault reads where the keyset comes from and which one to accept. The
+// entitlement key rides along because it used to be a keyserver secret.
+func (c *Config) loadVault() error {
+	c.VaultHosts = splitList(os.Getenv("VAULT_HOSTS"))
+	if len(c.VaultHosts) == 0 {
+		return fmt.Errorf("VAULT_HOSTS is empty: a release gets its keys only from a vault")
+	}
+	for _, h := range c.VaultHosts {
+		if strings.ContainsAny(h, "/?#@: ") {
+			return fmt.Errorf("VAULT_HOSTS entry %q must be a bare hostname", h)
+		}
+	}
+	c.KeysetCommitment = os.Getenv("KEYSET_COMMITMENT")
+	if err := wire.ValidateCommitment(c.KeysetCommitment); err != nil {
+		return fmt.Errorf("KEYSET_COMMITMENT: %w", err)
+	}
+	verify, err := RequireKey("ENTITLEMENT_VERIFY_KEY")
+	if err != nil {
+		return err
+	}
+	// A wrong-length key would boot and then reject every entitlement. KMS hands
+	// out a 44-byte DER key, so this is the likely mistake when filling it.
+	if len(verify) != ed25519.PublicKeySize {
+		return fmt.Errorf("ENTITLEMENT_VERIFY_KEY is %d bytes, want %d raw Ed25519 bytes", len(verify), ed25519.PublicKeySize)
+	}
+	c.EntitlementVerifyKey = verify
+	return nil
+}
+
+// InstallVaultKeys fills Secrets from a pull, which wire.Pull has already checked
+// against KeysetCommitment.
+func (c *Config) InstallVaultKeys(r *wire.PullResult) error {
+	if r.S3 == nil || r.S3.AccessKeyID == "" || r.S3.SecretAccessKey == "" {
+		return fmt.Errorf("the vault holds no S3 credentials: import them with vaultctl import-s3")
+	}
+	c.Secrets = Secrets{
+		ACMEAccountKeyPEM: r.Keyset.ACMEAccountKeyPEM(),
+		AddressMACKey:     append([]byte(nil), r.Keyset.AddressMACKey[:]...),
+		RoutingDataKey:    append([]byte(nil), r.Keyset.RoutingDataKey[:]...),
+		S3AccessKeyID:     r.S3.AccessKeyID,
+		S3SecretAccessKey: r.S3.SecretAccessKey,
+	}
+	return nil
 }
 
 // loadEgress is fatal on a gap, because a bucket with no route would otherwise fail
@@ -206,55 +254,16 @@ func (c *Config) loadEgress() error {
 	return nil
 }
 
-func loadSecrets(dev bool) (Secrets, error) {
-	if dev {
-		log.Printf("edge: *** EDGE_DEV=1 — using placeholder secrets; NEVER set this in a release ***")
-		return Secrets{
-			ACMEAccountKeyPEM:    []byte("DEV-PLACEHOLDER"),
-			AddressMACKey:        []byte("dev-address-mac-key-not-secret"),
-			RoutingDataKey:       []byte("dev-routing-data-key-not-secret"),
-			EntitlementVerifyKey: make([]byte, 32), // dev: all-zero, verifies nothing real
-			S3AccessKeyID:        "DEV",
-			S3SecretAccessKey:    "DEV",
-		}, nil
+func devSecrets(c *Config) {
+	log.Printf("edge: *** EDGE_DEV=1 — using placeholder secrets; NEVER set this in a release ***")
+	c.EntitlementVerifyKey = make([]byte, ed25519.PublicKeySize) // dev: all-zero, verifies nothing real
+	c.Secrets = Secrets{
+		ACMEAccountKeyPEM: []byte("DEV-PLACEHOLDER"),
+		AddressMACKey:     []byte("dev-address-mac-key-not-secret"),
+		RoutingDataKey:    []byte("dev-routing-data-key-not-secret"),
+		S3AccessKeyID:     "DEV",
+		S3SecretAccessKey: "DEV",
 	}
-	acme, err := requireRaw("ACME_ACCOUNT_KEY")
-	if err != nil {
-		return Secrets{}, err
-	}
-	mac, err := RequireKey("ADDRESS_MAC_KEY")
-	if err != nil {
-		return Secrets{}, err
-	}
-	routing, err := RequireKey("ROUTING_DATA_KEY")
-	if err != nil {
-		return Secrets{}, err
-	}
-	entVerify, err := RequireKey("ENTITLEMENT_VERIFY_KEY")
-	if err != nil {
-		return Secrets{}, err
-	}
-	// A wrong-length key would boot and then reject every entitlement. KMS hands
-	// out a 44-byte DER key, so this is the likely mistake when filling it.
-	if len(entVerify) != ed25519.PublicKeySize {
-		return Secrets{}, fmt.Errorf("ENTITLEMENT_VERIFY_KEY is %d bytes, want %d raw Ed25519 bytes", len(entVerify), ed25519.PublicKeySize)
-	}
-	id, err := requireStr("S3_ACCESS_KEY_ID")
-	if err != nil {
-		return Secrets{}, err
-	}
-	secret, err := requireStr("S3_SECRET_ACCESS_KEY")
-	if err != nil {
-		return Secrets{}, err
-	}
-	return Secrets{
-		ACMEAccountKeyPEM:    []byte(acme),
-		AddressMACKey:        mac,
-		RoutingDataKey:       routing,
-		EntitlementVerifyKey: entVerify,
-		S3AccessKeyID:        id,
-		S3SecretAccessKey:    secret,
-	}, nil
 }
 
 // HealthAddr is the health listener's address. It's separate from Load because
@@ -281,16 +290,13 @@ func splitList(s string) []string {
 func requireStr(key string) (string, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return "", fmt.Errorf("missing keyserver secret %s (no fallback by design)", key)
+		return "", fmt.Errorf("missing %s (no fallback by design)", key)
 	}
 	return v, nil
 }
 
-func requireRaw(key string) (string, error) { return requireStr(key) }
-
-// RequireKey reads a binary key. The keyserver may store it base64-encoded; if it
-// decodes cleanly as standard base64 we use the decoded bytes, otherwise the raw
-// bytes. (The exact encoding is pinned when the secrets are provisioned.)
+// RequireKey reads a binary key from the environment. If it decodes cleanly as
+// standard base64 we use the decoded bytes, otherwise the raw bytes.
 func RequireKey(key string) ([]byte, error) {
 	v, err := requireStr(key)
 	if err != nil {
