@@ -164,15 +164,15 @@ func loadSecrets(dev bool) (Secrets, error) {
 	if err != nil {
 		return Secrets{}, err
 	}
-	mac, err := requireKey("ADDRESS_MAC_KEY")
+	mac, err := RequireKey("ADDRESS_MAC_KEY")
 	if err != nil {
 		return Secrets{}, err
 	}
-	routing, err := requireKey("ROUTING_DATA_KEY")
+	routing, err := RequireKey("ROUTING_DATA_KEY")
 	if err != nil {
 		return Secrets{}, err
 	}
-	entVerify, err := requireKey("ENTITLEMENT_VERIFY_KEY")
+	entVerify, err := RequireKey("ENTITLEMENT_VERIFY_KEY")
 	if err != nil {
 		return Secrets{}, err
 	}
@@ -230,10 +230,10 @@ func requireStr(key string) (string, error) {
 
 func requireRaw(key string) (string, error) { return requireStr(key) }
 
-// requireKey reads a binary key. The keyserver may store it base64-encoded; if it
+// RequireKey reads a binary key. The keyserver may store it base64-encoded; if it
 // decodes cleanly as standard base64 we use the decoded bytes, otherwise the raw
 // bytes. (The exact encoding is pinned when the secrets are provisioned.)
-func requireKey(key string) ([]byte, error) {
+func RequireKey(key string) ([]byte, error) {
 	v, err := requireStr(key)
 	if err != nil {
 		return nil, err

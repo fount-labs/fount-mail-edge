@@ -66,6 +66,9 @@ func (b *memBlobs) Delete(_ context.Context, k string) error {
 func newRoutingStore(t *testing.T) (*routing.Store, *memBlobs) {
 	t.Helper()
 	blobs := newMemBlobs()
+	if err := routing.Initialize(context.Background(), blobs, []byte("test-routing-data-key")); err != nil {
+		t.Fatal(err)
+	}
 	rt, err := routing.New(context.Background(), blobs, []byte("test-routing-data-key"), []byte("test-mac-key"))
 	if err != nil {
 		t.Fatal(err)

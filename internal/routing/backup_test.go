@@ -30,6 +30,7 @@ func newBackedUp(t *testing.T) backedUp {
 	}
 	routingKey, macKey := keys(t)
 	b := backedUp{primary: newMemBlobs(), backups: newMemBlobs(), pub: pub, routingKey: routingKey, macKey: macKey}
+	initialize(t, b.primary, routingKey)
 	b.Store, err = routing.New(context.Background(), b.primary, routingKey, macKey,
 		routing.WithBackup(b.backups, priv, bytes.Repeat([]byte{7}, 16)))
 	if err != nil {
@@ -122,6 +123,7 @@ func flip(b []byte, i int) []byte {
 func TestBackupFailureDoesNotFailTheChange(t *testing.T) {
 	routingKey, macKey := keys(t)
 	primary := newMemBlobs()
+	initialize(t, primary, routingKey)
 	s, err := routing.New(context.Background(), primary, routingKey, macKey,
 		routing.WithBackup(failingBlobs{primary}, edKey(t), make([]byte, 16)))
 	if err != nil {

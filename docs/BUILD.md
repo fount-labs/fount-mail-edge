@@ -22,6 +22,13 @@ builder). Determinism levers, which must match across machines:
 Pin the dockerfile frontend and the golang base **by digest** in the `Dockerfile`
 before the first release, and keep the Go version equal to `go.mod`.
 
+## New deployment
+
+The edge refuses to boot without its routing object, so a lost object can't be
+mistaken for a new deployment. Before the first release, run `cmd/routing-init`
+once with the keyserver's `ROUTING_DATA_KEY` and S3 credentials. It never replaces
+an object that exists.
+
 ## Release (two-phase, matches the proven workflow)
 
 1. **Tag** via the GitHub *Tinfoil Release* workflow. It pushes the tag and

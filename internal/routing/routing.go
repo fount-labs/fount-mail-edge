@@ -57,8 +57,8 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
-// objectKey is the single routing object (design §4 S3 layout).
-const objectKey = "edge/routing/current"
+// ObjectKey is the single routing object (design §4 S3 layout).
+const ObjectKey = "edge/routing/current"
 
 const (
 	magic    = "FMR1" // frames the at-rest object: magic || nonce || sealed(json)
@@ -107,10 +107,45 @@ type Store struct {
 // Option tunes a Store built by New.
 type Option func(*Store)
 
-// New loads (or initializes) the routing object. A missing object is not an
-// error — a fresh edge has no mailboxes yet — but a present object that won't
-// decrypt or parse is fatal, because serving mail against corrupt routing data
-// would seal to the wrong keys.
+// ErrNoObject means the routing object doesn't exist. It's fatal at boot: treating
+// a lost object as empty would answer 550 for every address, free every handle,
+// restart the sequences, and overwrite the object on the first write. A new
+// deployment creates it once with Initialize.
+var ErrNoObject = errors.New("routing: no routing object; run cmd/routing-init once for a new deployment, or restore a backup")
+
+// ErrObjectExists means Initialize found a routing object and left it alone.
+var ErrObjectExists = errors.New("routing: routing object already exists")
+
+// Initialize writes the empty routing object for a new deployment. It runs once,
+// before the first release, and refuses to replace an object. Any read failure
+// other than a clean miss also stops it, because that can't show the object is
+// absent.
+func Initialize(ctx context.Context, blobs store.Blobs, routingDataKey []byte) error {
+	aead, err := newAEAD(routingDataKey)
+	if err != nil {
+		return err
+	}
+	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}}}
+	switch _, err := blobs.Get(ctx, ObjectKey); {
+	case err == nil:
+		return ErrObjectExists
+	case !errors.Is(err, store.ErrNotFound):
+		return fmt.Errorf("routing: check for an existing object: %w", err)
+	}
+	if err := s.persist(ctx); err != nil {
+		return fmt.Errorf("routing: write: %w", err)
+	}
+	raw, err := blobs.Get(ctx, ObjectKey)
+	if err != nil {
+		return fmt.Errorf("routing: read back: %w", err)
+	}
+	_, err = s.decrypt(raw)
+	return err
+}
+
+// New loads the routing object. A missing object is ErrNoObject, and a present
+// object that won't decrypt or parse is also fatal, because serving mail against
+// corrupt routing data would seal to the wrong keys.
 func New(ctx context.Context, blobs store.Blobs, routingDataKey, addressMACKey []byte, opts ...Option) (*Store, error) {
 	if len(addressMACKey) == 0 {
 		return nil, errors.New("routing: empty ADDRESS_MAC_KEY")
@@ -149,10 +184,9 @@ func newAEAD(routingDataKey []byte) (cipher.AEAD, error) {
 }
 
 func (s *Store) load(ctx context.Context) error {
-	raw, err := s.blobs.Get(ctx, objectKey)
+	raw, err := s.blobs.Get(ctx, ObjectKey)
 	if errors.Is(err, store.ErrNotFound) {
-		s.data = &Data{Version: 1, Mailboxes: map[string]*Mailbox{}}
-		return nil
+		return ErrNoObject
 	}
 	if err != nil {
 		return fmt.Errorf("routing: load: %w", err)
@@ -202,7 +236,7 @@ func (s *Store) persist(ctx context.Context) error {
 	out = append(out, magic...)
 	out = append(out, nonce...)
 	out = s.aead.Seal(out, nonce, pt, nil)
-	if err := s.blobs.Put(ctx, objectKey, out); err != nil {
+	if err := s.blobs.Put(ctx, ObjectKey, out); err != nil {
 		return err
 	}
 	s.backup.write(ctx, out)

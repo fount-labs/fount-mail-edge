@@ -120,11 +120,79 @@ func keys(t *testing.T) (routingKey, macKey []byte) {
 
 func newStore(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routing.Store {
 	t.Helper()
+	initialize(t, blobs, routingKey)
 	s, err := routing.New(context.Background(), blobs, routingKey, macKey)
 	if err != nil {
 		t.Fatalf("routing.New: %v", err)
 	}
 	return s
+}
+
+// initialize creates the routing object unless the test already has one.
+func initialize(t *testing.T, blobs store.Blobs, routingKey []byte) {
+	t.Helper()
+	if err := routing.Initialize(context.Background(), blobs, routingKey); err != nil && !errors.Is(err, routing.ErrObjectExists) {
+		t.Fatalf("routing.Initialize: %v", err)
+	}
+}
+
+// A lost object must stop the boot. Booting it as empty would answer 550 for every
+// address and let the first write replace it.
+func TestMissingObjectRefusesToBoot(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	if _, err := routing.New(context.Background(), blobs, routingKey, macKey); !errors.Is(err, routing.ErrNoObject) {
+		t.Fatalf("err = %v, want ErrNoObject", err)
+	}
+	if objs, _ := blobs.List(context.Background(), ""); len(objs) != 0 {
+		t.Fatalf("a refused boot wrote %d objects", len(objs))
+	}
+}
+
+func TestInitializeCreatesAnObjectTheEdgeCanOpen(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	if err := routing.Initialize(context.Background(), blobs, routingKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := routing.New(context.Background(), blobs, routingKey, macKey); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInitializeNeverReplacesAnObject(t *testing.T) {
+	routingKey, _ := keys(t)
+	blobs := newMemBlobs()
+	if err := routing.Initialize(context.Background(), blobs, routingKey); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := blobs.Get(context.Background(), "edge/routing/current")
+	if err := routing.Initialize(context.Background(), blobs, routingKey); !errors.Is(err, routing.ErrObjectExists) {
+		t.Fatalf("err = %v, want ErrObjectExists", err)
+	}
+	after, _ := blobs.Get(context.Background(), "edge/routing/current")
+	if !bytes.Equal(before, after) {
+		t.Fatal("Initialize replaced an existing object")
+	}
+}
+
+// failingGet stands in for an S3 permission error, where the object may well exist.
+type failingGet struct{ store.Blobs }
+
+func (failingGet) Get(context.Context, string) ([]byte, error) {
+	return nil, errors.New("s3: 403 Forbidden")
+}
+
+func TestInitializeStopsOnAReadError(t *testing.T) {
+	routingKey, _ := keys(t)
+	blobs := newMemBlobs()
+	err := routing.Initialize(context.Background(), failingGet{blobs}, routingKey)
+	if err == nil || errors.Is(err, routing.ErrObjectExists) {
+		t.Fatalf("err = %v", err)
+	}
+	if objs, _ := blobs.List(context.Background(), ""); len(objs) != 0 {
+		t.Fatalf("wrote %d objects after a read error", len(objs))
+	}
 }
 
 func TestResolveAndStatus(t *testing.T) {
