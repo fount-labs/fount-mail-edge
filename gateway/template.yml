@@ -86,7 +86,7 @@ Resources:
           cat > /etc/haproxy/haproxy.cfg <<'CFG'
           global
             log /dev/log local0
-            maxconn 200
+            maxconn 120
           defaults
             mode tcp
             log global

@@ -102,6 +102,21 @@ func TestPerWindowBudget(t *testing.T) {
 // Property: over a random mix of takes against a known clock, a key is never
 // allowed to spend more than burst + rate*elapsed tokens. This is the invariant
 // a flood brake rests on — no sequence of calls lets a source exceed its budget.
+// Waiting past the default idle horizon must not reset an hour's budget.
+func TestPerWindowEvictionDoesntRefill(t *testing.T) {
+	c := &clock{t: time.Unix(1_700_000_000, 0)}
+	l := PerWindow(60, time.Hour)
+	l.now = c.now
+	if !l.AllowN("k", 60) {
+		t.Fatal("first take denied")
+	}
+	c.t = c.t.Add(11 * time.Minute)
+	l.Allow("other") // gives eviction its chance to run
+	if l.AllowN("k", 12) {
+		t.Fatal("got back more than 11 minutes of refill")
+	}
+}
+
 func TestNeverExceedsBudgetProperty(t *testing.T) {
 	for seed := uint64(1); seed <= 30; seed++ {
 		rng := rand.New(rand.NewPCG(seed, 0xB0A710))

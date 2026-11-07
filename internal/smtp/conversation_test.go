@@ -119,7 +119,7 @@ func newTestServer(t *testing.T, store Storer, rc RecipientChecker, maxBytes int
 		Store:      store,
 		Recipients: rc,
 		MaxBytes:   maxBytes,
-		Deadline:   5 * time.Second,
+		Idle:       5 * time.Second,
 	})
 }
 
@@ -151,14 +151,25 @@ type convo struct {
 // and consumes the 220 greeting.
 func dial(t *testing.T, addr string) *convo {
 	t.Helper()
+	c := dialFrom(t, addr, "TCP4", "198.51.100.7")
+	c.expect("220")
+	return c
+}
+
+// dialFrom connects as a source, up to and not including the first reply.
+func dialFrom(t *testing.T, addr, proto, ip string) *convo {
+	t.Helper()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := &convo{t: t, conn: conn, r: bufio.NewReader(conn)}
 	t.Cleanup(func() { _ = conn.Close() })
-	c.send("PROXY TCP4 198.51.100.7 203.0.113.1 40000 25")
-	c.expect("220")
+	dst := "203.0.113.1"
+	if proto == "TCP6" {
+		dst = "2001:db8::1"
+	}
+	c.send("PROXY %s %s %s 40000 25", proto, ip, dst)
 	return c
 }
 
@@ -474,6 +485,10 @@ func TestFailedStoreEndsTransaction(t *testing.T) {
 	fmt.Fprint(c.conn, "body\r\n.\r\n")
 	c.expect("452")
 	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("503")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
 	c.expect("250")
 }
 
@@ -612,7 +627,7 @@ func TestPerIPByteBudgetThrottles(t *testing.T) {
 		Store:      store,
 		Recipients: mapRecipients{"worker@fountbox.com": RecipientAccepting},
 		MaxBytes:   4096,
-		Deadline:   5 * time.Second,
+		Idle:       5 * time.Second,
 		PerIP:      limit.New(0, 10), // 10-byte budget, no refill in-test
 	})
 	c := dial(t, addr)
@@ -644,7 +659,7 @@ func TestPerSenderDomainByteBudgetThrottles(t *testing.T) {
 		Store:      store,
 		Recipients: mapRecipients{"worker@fountbox.com": RecipientAccepting},
 		MaxBytes:   4096,
-		Deadline:   5 * time.Second,
+		Idle:       5 * time.Second,
 		PerSender:  limit.New(0, 10),  // shared 10-byte budget per sender domain
 		PerIP:      limit.New(0, 1e9), // keep the IP budget out of the way
 	})
@@ -664,4 +679,189 @@ func TestPerSenderDomainByteBudgetThrottles(t *testing.T) {
 	if got := c.deliver("carol@other.example", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "250") {
 		t.Fatalf("different-domain reply = %q, want 250", got)
 	}
+}
+
+func limitOptions(t *testing.T, st Storer) Options {
+	t.Helper()
+	return Options{
+		Hostname:   testHostname,
+		Domain:     testDomain,
+		Certs:      testCertSource(t),
+		Store:      st,
+		Recipients: mapRecipients{"worker@fountbox.com": RecipientAccepting},
+		MaxBytes:   4096,
+		Idle:       5 * time.Second,
+	}
+}
+
+func TestOneSourceCantHoldEverySlot(t *testing.T) {
+	o := limitOptions(t, &captureStore{})
+	o.MaxPerIP = 2
+	addr := serve(t, o)
+	first := dialFrom(t, addr, "TCP4", "198.51.100.7")
+	first.expect("220")
+	second := dialFrom(t, addr, "TCP4", "198.51.100.7")
+	second.expect("220")
+	over := dialFrom(t, addr, "TCP4", "198.51.100.7")
+	over.expect("421")
+	over.expectClosed(t)
+	dialFrom(t, addr, "TCP4", "198.51.100.8").expect("220")
+
+	// A slot comes back when its connection ends.
+	first.send("QUIT")
+	first.expect("221")
+	first.expectClosed(t)
+	for range 50 {
+		c := dialFrom(t, addr, "TCP4", "198.51.100.7")
+		line, err := c.r.ReadString('\n')
+		if err == nil && strings.HasPrefix(line, "220") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the slot never came back")
+}
+
+func TestIPv6SourcesCountByNetwork(t *testing.T) {
+	o := limitOptions(t, &captureStore{})
+	o.MaxPerIP = 1
+	addr := serve(t, o)
+	dialFrom(t, addr, "TCP6", "2001:db8:1:2::1").expect("220")
+	dialFrom(t, addr, "TCP6", "2001:db8:1:2::2").expect("421")
+	dialFrom(t, addr, "TCP6", "2001:db8:1:3::1").expect("220")
+}
+
+func TestMappedIPv4CountsAsIPv4(t *testing.T) {
+	o := limitOptions(t, &captureStore{})
+	o.MaxPerIP = 1
+	addr := serve(t, o)
+	dialFrom(t, addr, "TCP4", "198.51.100.9").expect("220")
+	dialFrom(t, addr, "TCP6", "::ffff:198.51.100.9").expect("421")
+}
+
+func TestBadProxySourceDropped(t *testing.T) {
+	c := dialFrom(t, serve(t, limitOptions(t, &captureStore{})), "TCP4", "not-an-ip")
+	c.expectClosed(t)
+}
+
+func TestRecipientMissesRunOut(t *testing.T) {
+	o := limitOptions(t, &captureStore{})
+	o.PerIPMisses = limit.New(0, 2)
+	addr := serve(t, o)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<s@elsewhere.com>")
+	c.expect("250")
+	for _, to := range []string{"a@fountbox.com", "b@elsewhere.com"} {
+		c.send("RCPT TO:<%s>", to)
+		c.expect("550")
+	}
+	c.send("RCPT TO:<c@fountbox.com>")
+	c.expect("421")
+	c.expectClosed(t)
+}
+
+func TestRcptNeedsMail(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("503")
+	c.send("RCPT TO:<nobody@fountbox.com>")
+	c.expect("503")
+	c.send("MAIL FROM:<s@elsewhere.com>")
+	c.expect("250")
+	c.send("RSET")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("503")
+}
+
+// Bounces arrive with an empty sender, so that can't read as "no MAIL".
+func TestNullSenderCanDeliver(t *testing.T) {
+	st := &captureStore{}
+	addr := newTestServer(t, st, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	if got := c.deliver("", "worker@fountbox.com", "bounce"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("reply = %q", got)
+	}
+}
+
+func TestEmptyMessagesCountAgainstTheSource(t *testing.T) {
+	st := &captureStore{}
+	o := limitOptions(t, st)
+	o.PerIPMessages = limit.New(0, 2)
+	addr := serve(t, o)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	for i, want := range []string{"250", "250", "452"} {
+		if got := c.deliver(fmt.Sprintf("s@domain%d.example", i), "worker@fountbox.com", ""); !strings.HasPrefix(got, want) {
+			t.Fatalf("message %d: reply = %q, want %s", i, got, want)
+		}
+	}
+	if st.count() != 2 {
+		t.Fatalf("stored %d", st.count())
+	}
+}
+
+func TestLongSenderDomainRefused(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<s@%s>", strings.Repeat("a", maxDomainBytes+1))
+	c.expect("553")
+	c.send("MAIL FROM:<s@%s>", strings.Repeat("a", maxDomainBytes))
+	c.expect("250")
+}
+
+// A sender that keeps moving outlives the idle timeout. This takes over 2x Idle.
+func TestSlowSenderFinishes(t *testing.T) {
+	st := &captureStore{}
+	o := limitOptions(t, st)
+	o.Idle = 300 * time.Millisecond
+	addr := serve(t, o)
+	c := dial(t, addr)
+	c.startData()
+	for range 8 {
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprint(c.conn, "more\r\n")
+	}
+	fmt.Fprint(c.conn, ".\r\n")
+	c.expect("250")
+}
+
+func TestIdleSenderIsDropped(t *testing.T) {
+	o := limitOptions(t, &captureStore{})
+	o.Idle = 100 * time.Millisecond
+	c := dial(t, serve(t, o))
+	c.expectClosed(t)
+}
+
+func TestTrickleHitsTheSessionLimit(t *testing.T) {
+	o := limitOptions(t, &captureStore{})
+	o.Idle = 300 * time.Millisecond
+	o.MaxSession = 500 * time.Millisecond
+	c := dial(t, serve(t, o))
+	start := time.Now()
+	for time.Since(start) < 3*time.Second {
+		time.Sleep(100 * time.Millisecond)
+		if _, err := fmt.Fprint(c.conn, "NOOP\r\n"); err != nil {
+			break
+		}
+		if _, err := c.r.ReadString('\n'); err != nil {
+			return
+		}
+	}
+	t.Fatal("the connection outlived its limit")
 }

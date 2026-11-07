@@ -55,12 +55,18 @@ func New(rate, burst float64) *Limiter {
 // PerWindow builds a limiter that allows up to `total` tokens over `window`,
 // refilling smoothly. Burst equals total, so one take as large as the whole
 // budget still passes (a single max-size message fits a per-IP byte budget).
+// Buckets last the whole window, because evicting a part-spent one hands its key a
+// full budget.
 func PerWindow(total float64, window time.Duration) *Limiter {
 	secs := window.Seconds()
 	if secs <= 0 {
 		secs = 1
 	}
-	return New(total/secs, total)
+	l := New(total/secs, total)
+	if window > l.idle {
+		l.idle = window
+	}
+	return l
 }
 
 // Allow is AllowN with a cost of one token.
