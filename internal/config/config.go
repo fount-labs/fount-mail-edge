@@ -21,10 +21,12 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 )
 
@@ -38,6 +40,24 @@ const (
 	acmeStaging    = "https://acme-staging-v02.api.letsencrypt.org/directory"
 	acmeProduction = "https://acme-v02.api.letsencrypt.org/directory"
 )
+
+// SecretNames are the keyserver secrets, by env var name.
+var SecretNames = []string{
+	"ACME_ACCOUNT_KEY", "ADDRESS_MAC_KEY", "ROUTING_DATA_KEY", "ENTITLEMENT_VERIFY_KEY",
+	"S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
+}
+
+// VisibleSecret names a keyserver secret in this process's environment, or returns
+// "" if there is none. The forwarder checks this at startup, because Tinfoil doesn't
+// document whether a container's secrets stay out of its neighbours.
+func VisibleSecret() string {
+	for _, name := range SecretNames {
+		if _, ok := os.LookupEnv(name); ok {
+			return name
+		}
+	}
+	return ""
+}
 
 // Secrets are delivered by the keyserver and injected as env vars. Every field
 // here must have a matching entry in the keyserver policy.yaml workload and in
@@ -68,6 +88,8 @@ type Config struct {
 	S3BackupBucket    string           // versioned bucket for routing backups
 	S3Region          string           // bucket region, e.g. us-east-1
 	S3Endpoint        string           // bucket root URL; derived from bucket+region if unset
+	EgressForwarder   string           // the forwarder container's name
+	EgressRoutes      []egress.Route   // one per bucket hostname; measured with the config
 	RecoveryRPID      string           // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
 	RecoveryOrigin    string           // optional: pins the assertion's clientDataJSON origin (e.g. https://mail.fount.sh)
 	Dev               bool
@@ -76,7 +98,7 @@ type Config struct {
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
 // S3_ENDPOINT wins (for an S3-compatible host); otherwise it is AWS
-// virtual-hosted-style, which Tinfoil's exact-hostname egress allowlist needs.
+// virtual-hosted-style, so each bucket has its own hostname to route.
 func (c *Config) S3EndpointURL() string {
 	if c.S3Endpoint != "" {
 		return c.S3Endpoint
@@ -139,6 +161,11 @@ func Load() (*Config, error) {
 		}
 		c.GatewayPins = pins
 	}
+	if !dev {
+		if err := c.loadEgress(); err != nil {
+			return nil, err
+		}
+	}
 
 	s, err := loadSecrets(dev)
 	if err != nil {
@@ -146,6 +173,37 @@ func Load() (*Config, error) {
 	}
 	c.Secrets = s
 	return c, nil
+}
+
+// loadEgress is fatal on a gap, because a bucket with no route would otherwise fail
+// only when the edge first touches it.
+func (c *Config) loadEgress() error {
+	c.EgressForwarder = os.Getenv("EGRESS_FORWARDER")
+	if c.EgressForwarder == "" {
+		return fmt.Errorf("EGRESS_FORWARDER is unset: a release reaches S3 only through the forwarder")
+	}
+	routes, err := egress.ParseRoutes(os.Getenv("EGRESS_ROUTES"))
+	if err != nil {
+		return fmt.Errorf("EGRESS_ROUTES: %w", err)
+	}
+	c.EgressRoutes = routes
+	routed := make(map[string]bool, len(routes))
+	for _, r := range routes {
+		routed[r.Host] = true
+	}
+	for _, endpoint := range []string{c.S3EndpointURL(), c.BucketURL(c.S3BootLogBucket), c.BucketURL(c.S3BackupBucket)} {
+		if endpoint == "" {
+			continue // newBlobs reports a missing bucket
+		}
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return fmt.Errorf("S3 endpoint %q: %w", endpoint, err)
+		}
+		if !routed[u.Host] {
+			return fmt.Errorf("EGRESS_ROUTES has no route to %s", u.Host)
+		}
+	}
+	return nil
 }
 
 func loadSecrets(dev bool) (Secrets, error) {

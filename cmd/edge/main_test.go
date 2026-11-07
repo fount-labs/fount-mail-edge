@@ -44,3 +44,19 @@ func TestDeviceAPIServerBoundsRequests(t *testing.T) {
 		t.Fatalf("MaxHeaderBytes = %d", s.MaxHeaderBytes)
 	}
 }
+
+func TestForwarderRefusesToRunWithASecret(t *testing.T) {
+	t.Setenv("EGRESS_ROUTES", "9001=bucket.example")
+	t.Setenv("S3_SECRET_ACCESS_KEY", "x")
+	err := forward()
+	if err == nil || !strings.Contains(err.Error(), "S3_SECRET_ACCESS_KEY") {
+		t.Fatalf("forward() err = %v", err)
+	}
+}
+
+func TestForwarderNeedsRoutes(t *testing.T) {
+	t.Setenv("EGRESS_ROUTES", "")
+	if err := forward(); err == nil || !strings.Contains(err.Error(), "EGRESS_ROUTES") {
+		t.Fatalf("forward() err = %v", err)
+	}
+}

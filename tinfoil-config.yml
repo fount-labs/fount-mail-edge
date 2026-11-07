@@ -30,14 +30,15 @@ networks:
     allow:
       - keys.fount.sh
       - acme-v02.api.letsencrypt.org
-      - fount-mail-063207099341.s3.us-east-1.amazonaws.com # mail bucket
-      - fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com # Object Lock boot and key logs
-      - fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com
+  internal: {} # closed: mail-edge reaches the forwarder here and nothing else
+  # The forwarder only. S3 doesn't work through an allowlist (design §6).
+  storage:
+    egress: open
 
 containers:
   - name: mail-edge
     image: "ghcr.io/fount-labs/fount-mail-edge@sha256:PLACEHOLDER_DIGEST" # set by release
-    networks: [edge]
+    networks: [edge, internal]
     keys: [mail-tls, mail-sign]
     restart: always
     # Runs inside the image, which is FROM scratch, so the edge checks itself.
@@ -59,6 +60,8 @@ containers:
       - S3_BOOT_LOG_BUCKET: "fount-mail-bootlog-063207099341"
       - S3_BACKUP_BUCKET: "fount-mail-routing-backup-063207099341"
       - S3_REGION: "us-east-1"
+      - EGRESS_FORWARDER: "forwarder"
+      - EGRESS_ROUTES: "9001=fount-mail-063207099341.s3.us-east-1.amazonaws.com,9002=fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com,9003=fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com" # same value on the forwarder
       - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
     # Secrets delivered by the keyserver after attestation, injected as env vars.
     # Every name here MUST have a matching entry in policy.yaml's workload, or the
@@ -73,6 +76,22 @@ containers:
 
 # The gateway's HAProxy opens the backend only after /ready passes twice, which
 # is not-ready until the edge's certificate loads (design §6).
+  # Copies S3 traffic along fixed routes. The edge keeps TLS and the S3 credentials,
+  # so this holds no secrets and no keys, and the binary exits if it can see one.
+  - name: forwarder
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:PLACEHOLDER_DIGEST" # set by release, same digest as mail-edge
+    networks: [internal, storage]
+    command: ["egress-forward"]
+    restart: always
+    healthcheck:
+      test: ["CMD", "/edge", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    env:
+      - EGRESS_ROUTES: "9001=fount-mail-063207099341.s3.us-east-1.amazonaws.com,9002=fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com,9003=fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com"
+
 shim:
   upstream-port: 8080
   paths:

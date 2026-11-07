@@ -28,6 +28,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
 	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/deviceapi"
+	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 	"github.com/fount-labs/fount-mail-edge/internal/keys"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
@@ -41,6 +42,12 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
 		if err := healthcheck(config.HealthAddr()); err != nil {
 			log.Fatalf("edge: unhealthy: %v", err)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "egress-forward" {
+		if err := forward(); err != nil {
+			log.Fatalf("edge: forwarder: %v", err)
 		}
 		return
 	}
@@ -161,6 +168,37 @@ func run() error {
 	return nil
 }
 
+// forward runs the S3 forwarder container (§6). It starts before config.Load
+// because it needs no secrets, and refuses to run with any in reach.
+func forward() error {
+	if name := config.VisibleSecret(); name != "" {
+		return fmt.Errorf("%s is visible here, and this container must hold no secrets", name)
+	}
+	routes, err := egress.ParseRoutes(os.Getenv("EGRESS_ROUTES"))
+	if err != nil {
+		return fmt.Errorf("EGRESS_ROUTES: %w", err)
+	}
+	_, port, err := net.SplitHostPort(config.HealthAddr())
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	healthSrv := &http.Server{
+		Addr:              net.JoinHostPort("127.0.0.1", port),
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) }),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	errc := make(chan error, 2)
+	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
+	go func() { errc <- (&egress.Forwarder{Routes: routes}).Serve(ctx) }()
+	log.Printf("edge: forwarding %d routes", len(routes))
+	err = <-errc
+	_ = healthSrv.Close()
+	return err
+}
+
 // deviceAPIServer bounds what one request can hold: a stalled client can't keep a
 // tunnel forever, and headers can't use the default 1 MiB when they carry only a
 // signature and a short token. WriteTimeout has to cover a full 25 MB message.
@@ -251,6 +289,7 @@ func newBlobs(cfg *config.Config, endpoint string) (*s3.Client, error) {
 		Region:          cfg.S3Region,
 		AccessKeyID:     cfg.Secrets.S3AccessKeyID,
 		SecretAccessKey: cfg.Secrets.S3SecretAccessKey,
+		HTTPClient:      egress.NewHTTPClient(cfg.EgressForwarder, cfg.EgressRoutes),
 	})
 }
 

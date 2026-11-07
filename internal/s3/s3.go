@@ -4,8 +4,8 @@
 // keeps its zero-dependency reproducible build — no AWS SDK.
 //
 // It targets virtual-hosted-style addressing (the bucket is part of the
-// endpoint host), which is what Tinfoil's exact-hostname egress allowlist
-// requires: one fixed host, no wildcards. The object key is the URL path.
+// endpoint host), so each bucket has one fixed host and its own forwarder route
+// (see internal/egress). The object key is the URL path.
 //
 // The client implements store.Blobs; Get returns store.ErrNotFound on a 404 so
 // the routing and mail layers can distinguish a miss from a transient failure.
@@ -41,7 +41,7 @@ type Client struct {
 
 // Config configures a Client. Endpoint is the bucket root URL (for AWS,
 // https://<bucket>.s3.<region>.amazonaws.com); it must already name the bucket,
-// because Tinfoil pins the egress host exactly.
+// because egress is routed by exact host.
 type Config struct {
 	Endpoint        string
 	Region          string

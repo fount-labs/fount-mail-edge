@@ -37,7 +37,8 @@ an object that exists.
    `measure-image-action`, which builds, measures, attests (keyless), and creates
    the GitHub release. CI's `reproducible-build` matrix builds on two runners and
    fails if the digests differ.
-3. **Pin the digest** into `tinfoil-config.yml` and run Tinfoil's measured-release
+3. **Pin the digest** into both containers in `tinfoil-config.yml` (the forwarder
+   runs the same image as the edge) and run Tinfoil's measured-release
    workflows.
 4. **Wait 24 hours in public.** Only an exploitable security bug or mail being
    down skips this, and the release says why.
