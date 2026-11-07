@@ -27,12 +27,22 @@ const challengeTTL = 2 * time.Minute
 // followed by its HMAC-SHA256 tag.
 const challengeLen = 8 + sha256.Size
 
+// recoveryHash is the kc a recovery challenge binds: the new key chain and the new
+// mailbox key. The chain alone isn't enough, because the mailbox key signs it rather
+// than appearing in it. The chain's framing is fixed, so the join is unambiguous.
+func recoveryHash(chain, mailboxKey []byte) []byte {
+	h := sha256.New()
+	h.Write(chain)
+	h.Write(mailboxKey)
+	return h.Sum(nil)
+}
+
 // mintChallenge issues a stateless recovery challenge bound to a mailbox and the
-// exact new key chain it authorizes. The token is exp || HMAC(recoverKey, mid ||
-// kc || exp); because the MAC covers kc (the hash of the new key chain), a
-// passkey assertion over this challenge can only approve these new keys, not a
-// set a man-in-the-middle swapped in. The recoverKey is per boot, so a challenge
-// never outlives the enclave that issued it.
+// exact new keys it authorizes. The token is exp || HMAC(recoverKey, mid || kc ||
+// exp); because the MAC covers kc (recoveryHash of the new keys), a passkey
+// assertion over this challenge can only approve these new keys, not a set a
+// man-in-the-middle swapped in. The recoverKey is per boot, so a challenge never
+// outlives the enclave that issued it.
 func (a *API) mintChallenge(mid, kc []byte, exp int64) []byte {
 	var expBytes [8]byte
 	binary.BigEndian.PutUint64(expBytes[:], uint64(exp))
@@ -61,9 +71,9 @@ func (a *API) validChallenge(tok, mid, kc []byte, now time.Time) bool {
 
 // issueRecoveryChallenge handles GET /recover/{id}?kc=<hex>. It is unsigned: a
 // lost device has no key, and the challenge reveals nothing (it is an opaque
-// MAC). {id} is the hex mailbox id; kc is the SHA-256 of the new key chain the
-// device intends to install, so the challenge binds the passkey approval to
-// those exact keys.
+// MAC). {id} is the hex mailbox id; kc is the recoveryHash of the keys the device
+// intends to install, so the challenge binds the passkey approval to those exact
+// keys.
 func (a *API) issueRecoveryChallenge() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mid, err := hex.DecodeString(r.PathValue("id"))
@@ -110,15 +120,15 @@ type recoverRequest struct {
 // gone); this handler is the whole authorization:
 //
 //  1. the challenge is a valid, unexpired edge token bound to this mailbox and
-//     the exact new keys (so a swapped key chain is rejected);
+//     the exact new keys, mailbox key included (so a swapped key is rejected);
 //  2. the new mailbox key signs the new key chain (the keys are self-consistent);
 //  3. the registered passkey signed a WebAuthn assertion over that challenge
 //     (the real owner, not the host, approved this).
 //
-// Only then does it spend the nonce, so unauthenticated requests can't fill the
-// cache, and record the new mailbox key in the write-once log and rotate.
-// The log write happens first and must succeed, so a key is never made live
-// without being auditable (§9).
+// Only then does it spend the nonce and the challenge, each once, so
+// unauthenticated requests can't fill the cache, and rotate. RotateKeys writes the
+// new mailbox key to the write-once log first, and that must succeed, so a key is
+// never made live without being auditable (§9).
 func (a *API) recover() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mid, ok := callerMailbox(r)
@@ -142,8 +152,7 @@ func (a *API) recover() http.Handler {
 
 		// The challenge binds the approval to exactly these new keys.
 		chain := keyChain(req.DecryptionKey, req.SigningKey, req.OwnerChangeKey, req.PasskeyKey)
-		kc := sha256.Sum256(chain)
-		if !a.validChallenge(req.Challenge, mid, kc[:], time.Now()) {
+		if !a.validChallenge(req.Challenge, mid, recoveryHash(chain, req.MailboxKey), time.Now()) {
 			writeErr(w, http.StatusUnauthorized, "challenge invalid or expired")
 			return
 		}
@@ -166,24 +175,27 @@ func (a *API) recover() http.Handler {
 			writeErr(w, nonceStatus(err), err.Error())
 			return
 		}
-
-		// Log the new mailbox key before it goes live, so it is never swapped in
-		// without an auditable record (§9). Fail closed if the log write fails.
-		keyHash := sha256.Sum256(req.MailboxKey)
-		if err := a.keylog.AppendMailboxKeyHash(r.Context(), hex.EncodeToString(mid), keyHash[:], time.Now().Unix()); err != nil {
-			writeErr(w, http.StatusInternalServerError, "could not record key")
+		// The nonce is the caller's choice, so it can't stop an approval being
+		// resent. The challenge's lifetime is shorter than the cache's retention.
+		if err := a.nonces.useOnce("challenge:"+hex.EncodeToString(req.Challenge), time.Now()); err != nil {
+			writeErr(w, nonceStatus(err), "challenge already used")
 			return
 		}
+
 		_, err := a.mutator.RotateKeys(r.Context(), mid, routing.RotatedKeys{
 			DecryptionKey:  req.DecryptionKey,
 			SigningKey:     req.SigningKey,
 			MailboxKey:     req.MailboxKey,
 			OwnerChangeKey: req.OwnerChangeKey,
 			PasskeyKey:     req.PasskeyKey,
+			Log:            a.logKey(),
 		})
 		switch {
 		case errors.Is(err, routing.ErrNoMailbox):
 			writeErr(w, http.StatusNotFound, "no such mailbox")
+			return
+		case errors.Is(err, routing.ErrKeyNotLogged):
+			writeErr(w, http.StatusInternalServerError, "could not record key")
 			return
 		case err != nil:
 			writeErr(w, http.StatusInternalServerError, "rotate failed")

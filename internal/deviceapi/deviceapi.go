@@ -142,23 +142,21 @@ var routes = map[string]route{
 type Provisioner interface {
 	Available(ctx context.Context, address string) (bool, error)
 	Create(ctx context.Context, p routing.NewMailbox) (mailboxID []byte, err error)
-	// MailboxID is the id Create will assign an address (the keyed hash, §4), so
-	// the handler can record the initial mailbox key in the write-once log before
-	// the mailbox goes live.
-	MailboxID(address string) []byte
 }
 
 // Mutator is the per-mailbox routing layer behind the signed write routes
 // (design §8 POST /address, PUT /routing, POST /entitlement, POST /recover).
 // RotateKeys and PasskeyOf back recovery: the latter reads the registered
-// passkey credential key the assertion is verified against. routing.Store
-// implements it; nil leaves those routes as 501 stubs.
+// passkey credential key the assertion is verified against. LicenseOf keys the
+// per-license limits. routing.Store implements it; nil leaves those routes as 501
+// stubs.
 type Mutator interface {
 	AddAddress(ctx context.Context, p routing.NewAddress) (mailboxID []byte, err error)
 	SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error
 	RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error
 	RotateKeys(ctx context.Context, mailboxID []byte, k routing.RotatedKeys) (newMailboxKeyHash []byte, err error)
 	PasskeyOf(mailboxID []byte) (credPubKey []byte, ok bool)
+	LicenseOf(mailboxID []byte) (licenseHash []byte, ok bool)
 }
 
 // Options configures the API. Store is required; the rest enable the routes that
@@ -178,8 +176,8 @@ type Options struct {
 	RecoveryRPID   string
 	RecoveryOrigin string
 
-	// HandleLimiter throttles GET /handle availability probes (§8), keyed by the
-	// caller's entitlement license so one subscription can't enumerate the
+	// HandleLimiter throttles every route that shows whether an address is taken
+	// (§8), keyed by the caller's license so one subscription can't enumerate the
 	// namespace. nil builds a per-enclave default.
 	HandleLimiter *limit.Limiter
 }
@@ -431,6 +429,28 @@ func (a *API) stub(pattern string, rt route) http.Handler {
 			"note":      rt.desc,
 		})
 	})
+}
+
+// allowProbe spends from the license's shared budget for routes that show whether
+// an address is taken, answering 429 if it's empty.
+func (a *API) allowProbe(w http.ResponseWriter, license []byte) bool {
+	if a.handleLimiter.Allow(hex.EncodeToString(license)) {
+		return true
+	}
+	w.Header().Set("Retry-After", "1")
+	writeErr(w, http.StatusTooManyRequests, "too many handle checks, slow down")
+	return false
+}
+
+// logKey is the routing write paths' hook into the write-once key log, or nil where
+// the store has none.
+func (a *API) logKey() routing.LogKey {
+	if a.keylog == nil {
+		return nil
+	}
+	return func(ctx context.Context, mailboxID, keyHash []byte) error {
+		return a.keylog.AppendMailboxKeyHash(ctx, hex.EncodeToString(mailboxID), keyHash, time.Now().Unix())
+	}
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {

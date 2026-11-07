@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -93,10 +94,9 @@ func TestSequenceNeverReusedProperty(t *testing.T) {
 }
 
 // Property: the routing (owner-list) version never goes backwards. SetOwners
-// accepts a version iff it is >= the stored one (re-asserting the current version
-// corrects a rolled-back object; only a strictly greater version changes the
-// list), a lower version is ErrStaleVersion, and the stored version equals the
-// running maximum — including across a reload. This is the §4 rollback defense: a
+// accepts a greater version, or the stored version with the stored list (a resend).
+// A lower version, or the stored version with a new list, is ErrStaleVersion, and
+// the stored version equals the running maximum — including across a reload. This is the §4 rollback defense: a
 // stale owner set can never be replayed over a newer one.
 func TestRoutingVersionMonotonicProperty(t *testing.T) {
 	ctx := context.Background()
@@ -111,6 +111,7 @@ func TestRoutingVersionMonotonicProperty(t *testing.T) {
 		}
 
 		var cur uint64 // highest accepted (and therefore stored) version
+		var list []string
 		for step := 0; step < 200; step++ {
 			v := uint64(rng.IntN(12)) // spans below, at, and above cur
 			owners := make([]string, rng.IntN(4))
@@ -120,11 +121,11 @@ func TestRoutingVersionMonotonicProperty(t *testing.T) {
 
 			err := s.SetOwners(ctx, id, v, owners)
 			switch {
-			case v >= cur:
+			case v > cur || v == cur && slices.Equal(owners, list):
 				if err != nil {
-					t.Fatalf("seed %d step %d: version %d >= stored %d rejected: %v", seed, step, v, cur, err)
+					t.Fatalf("seed %d step %d: version %d, stored %d, rejected: %v", seed, step, v, cur, err)
 				}
-				cur = v
+				cur, list = v, owners
 			default:
 				if !errors.Is(err, routing.ErrStaleVersion) {
 					t.Fatalf("seed %d step %d: stale version %d (stored %d) err = %v, want ErrStaleVersion", seed, step, v, cur, err)

@@ -139,8 +139,8 @@ func TestRecoverRotatesKeys(t *testing.T) {
 	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
 
 	nk := freshKeys(t)
-	kc := sha256.Sum256(nk.chain())
-	challenge := getChallenge(t, api, mb.idHex, kc[:])
+	kc := recoveryHash(nk.chain(), nk.mboxPub)
+	challenge := getChallenge(t, api, mb.idHex, kc)
 
 	body := recoverRequest{
 		Challenge:      challenge,
@@ -157,8 +157,8 @@ func TestRecoverRotatesKeys(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	if n := len(api.nonces.seen); n != 1 {
-		t.Fatalf("%d nonces spent by a verified recovery, want 1", n)
+	if n := len(api.nonces.seen); n != 2 {
+		t.Fatalf("%d entries spent by a verified recovery, want the nonce and the challenge", n)
 	}
 
 	// The record now holds the new keys.
@@ -186,8 +186,8 @@ func TestRecoverRejectsSwappedKeys(t *testing.T) {
 
 	// Challenge is issued for one key chain...
 	approved := freshKeys(t)
-	kc := sha256.Sum256(approved.chain())
-	challenge := getChallenge(t, api, mb.idHex, kc[:])
+	kc := recoveryHash(approved.chain(), approved.mboxPub)
+	challenge := getChallenge(t, api, mb.idHex, kc)
 
 	// ...but the POST submits a different key chain. The passkey approved the
 	// first; the challenge MAC binds it, so the swap must be refused.
@@ -220,8 +220,8 @@ func TestRecoverRejectsWrongPasskey(t *testing.T) {
 	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
 
 	nk := freshKeys(t)
-	kc := sha256.Sum256(nk.chain())
-	challenge := getChallenge(t, api, mb.idHex, kc[:])
+	kc := recoveryHash(nk.chain(), nk.mboxPub)
+	challenge := getChallenge(t, api, mb.idHex, kc)
 
 	attacker, _ := testCredential(t) // not the registered passkey
 	body := recoverRequest{
@@ -246,9 +246,9 @@ func TestRecoverRejectsExpiredChallenge(t *testing.T) {
 	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
 
 	nk := freshKeys(t)
-	kc := sha256.Sum256(nk.chain())
+	kc := recoveryHash(nk.chain(), nk.mboxPub)
 	// Mint a challenge that already expired (internal path, so we control exp).
-	challenge := api.mintChallenge(mb.id, kc[:], time.Now().Add(-time.Minute).Unix())
+	challenge := api.mintChallenge(mb.id, kc, time.Now().Add(-time.Minute).Unix())
 
 	body := recoverRequest{
 		Challenge:      challenge,
@@ -275,8 +275,8 @@ func TestRecoverUnknownMailbox(t *testing.T) {
 	unknownHex := hex.EncodeToString(unknown)
 
 	nk := freshKeys(t)
-	kc := sha256.Sum256(nk.chain())
-	challenge := getChallenge(t, api, unknownHex, kc[:])
+	kc := recoveryHash(nk.chain(), nk.mboxPub)
+	challenge := getChallenge(t, api, unknownHex, kc)
 
 	priv, _ := testCredential(t)
 	body := recoverRequest{
@@ -335,5 +335,126 @@ func TestRecoverMissingNonce(t *testing.T) {
 	api.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401 without a nonce, got %d", rec.Code)
+	}
+}
+
+func recoveryBody(t *testing.T, mb mbox, api *API, nk newKeySet) recoverRequest {
+	t.Helper()
+	challenge := getChallenge(t, api, mb.idHex, recoveryHash(nk.chain(), nk.mboxPub))
+	return recoverRequest{
+		Challenge:      challenge,
+		DecryptionKey:  nk.dec,
+		SigningKey:     nk.signPub,
+		MailboxKey:     nk.mboxPub,
+		OwnerChangeKey: nk.ownerPub,
+		PasskeyKey:     nk.passkey,
+		KeyChainSig:    ed25519.Sign(nk.mboxPriv, nk.chain()),
+		Assertion:      passkeyAssertion(t, mb.passkeyPriv, challenge, recoverTestRPID, recoverTestOrigin),
+	}
+}
+
+// The mailbox key signs the chain instead of sitting in it, so an approved request
+// could carry a different mailbox key that signs the same chain.
+func TestRecoverChallengeCoversTheMailboxKey(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, klog := recoverAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+
+	nk := freshKeys(t)
+	body := recoveryBody(t, mb, api, nk)
+	swap := freshKeys(t)
+	body.MailboxKey = swap.mboxPub
+	body.KeyChainSig = ed25519.Sign(swap.mboxPriv, nk.chain())
+
+	rec := recoverPost(t, api, mb.idHex, body)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401 for a swapped mailbox key, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if snap, _ := rt.Snapshot(mb.id); bytes.Equal(snap.MailboxKey, swap.mboxPub) {
+		t.Fatal("the swapped mailbox key went live")
+	}
+	if len(klog.appends) != 0 {
+		t.Fatal("a refused recovery logged a key")
+	}
+}
+
+// recoverPost uses a fresh nonce each time, so only the challenge can stop this.
+func TestRecoverChallengeWorksOnce(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, klog := recoverAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+
+	body := recoveryBody(t, mb, api, freshKeys(t))
+	if rec := recoverPost(t, api, mb.idHex, body); rec.Code != http.StatusOK {
+		t.Fatalf("first use: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Put the original passkey back, so its assertion still verifies and only the
+	// spent challenge can refuse the resend.
+	nk := freshKeys(t)
+	if _, err := rt.RotateKeys(context.Background(), mb.id, routing.RotatedKeys{
+		DecryptionKey: nk.dec, SigningKey: nk.signPub, MailboxKey: nk.mboxPub, OwnerChangeKey: nk.ownerPub,
+		PasskeyKey: mustPublic(mb),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := recoverPost(t, api, mb.idHex, body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("resend: want 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := len(klog.appends[mb.idHex]); n != 1 {
+		t.Fatalf("%d log entries, want 1", n)
+	}
+}
+
+func mustPublic(mb mbox) []byte {
+	k := mb.passkeyPriv
+	return append([]byte{0x04}, append(k.X.FillBytes(make([]byte, 32)), k.Y.FillBytes(make([]byte, 32))...)...)
+}
+
+// One mailbox key covers the handle and its workers, so a lost device's key must
+// stop working everywhere, and each address needs its own log entry.
+func TestRecoverRotatesTheMailboxKeyOnEveryAddress(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, klog := recoverAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+
+	raw, _ := json.Marshal(childBody(t, "sub.worker@fountbox.com", mb.mailbox))
+	add := httptest.NewRecorder()
+	api.ServeHTTP(add, signedRequest(t, mb.mailbox, mb.idHex, "POST", "/address", raw, time.Now(), "add-1"))
+	if add.Code != http.StatusCreated {
+		t.Fatalf("add: %d %s", add.Code, add.Body.String())
+	}
+	var created struct {
+		MailboxID string `json:"mailbox_id"`
+	}
+	if err := json.Unmarshal(add.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	childID, _ := hex.DecodeString(created.MailboxID)
+	before, _ := rt.Snapshot(childID)
+
+	nk := freshKeys(t)
+	if rec := recoverPost(t, api, mb.idHex, recoveryBody(t, mb, api, nk)); rec.Code != http.StatusOK {
+		t.Fatalf("recover: %d %s", rec.Code, rec.Body.String())
+	}
+
+	after, _ := rt.Snapshot(childID)
+	if !bytes.Equal(after.MailboxKey, nk.mboxPub) {
+		t.Fatal("the worker kept the old mailbox key")
+	}
+	if !bytes.Equal(after.SigningKey, before.SigningKey) || !bytes.Equal(after.DecryptionKey, before.DecryptionKey) {
+		t.Fatal("recovery replaced a sibling's own keys")
+	}
+	want := sha256.Sum256(nk.mboxPub)
+	for _, id := range []string{mb.idHex, created.MailboxID} {
+		entries := klog.appends[id]
+		if len(entries) == 0 || !bytes.Equal(entries[len(entries)-1], want[:]) {
+			t.Fatalf("no log entry for the new key on %s", id)
+		}
+	}
+	raw, _ = json.Marshal(childBody(t, "other.worker@fountbox.com", mb.mailbox))
+	old := httptest.NewRecorder()
+	api.ServeHTTP(old, signedRequest(t, mb.mailbox, created.MailboxID, "POST", "/address", raw, time.Now(), "add-2"))
+	if old.Code != http.StatusUnauthorized {
+		t.Fatalf("old key through the worker's id: want 401, got %d: %s", old.Code, old.Body.String())
 	}
 }

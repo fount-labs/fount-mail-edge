@@ -3,13 +3,11 @@ package deviceapi
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/webauthn"
@@ -46,12 +44,8 @@ func (a *API) checkHandle() http.Handler {
 		// Throttle availability probes per entitlement license (§8) so one
 		// subscription can't sweep the handle namespace. The guard has already
 		// verified the entitlement, so the claims are present.
-		if claims, ok := claimsFrom(r.Context()); ok {
-			if !a.handleLimiter.Allow(hex.EncodeToString(claims.LicenseHash)) {
-				w.Header().Set("Retry-After", "1")
-				writeErr(w, http.StatusTooManyRequests, "too many handle checks, slow down")
-				return
-			}
+		if claims, ok := claimsFrom(r.Context()); ok && !a.allowProbe(w, claims.LicenseHash) {
+			return
 		}
 		name := r.PathValue("name")
 		if !validHandle(name) {
@@ -89,6 +83,9 @@ func (a *API) createMailbox() http.Handler {
 			writeErr(w, http.StatusInternalServerError, "missing entitlement claims")
 			return
 		}
+		if !a.allowProbe(w, claims.LicenseHash) {
+			return
+		}
 		var req mailboxRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad request body")
@@ -120,20 +117,11 @@ func (a *API) createMailbox() http.Handler {
 			return
 		}
 
-		// Record the initial mailbox key in the write-once log before the mailbox
-		// exists, so every legitimate key — not just later rotations — has an
-		// auditable entry and the broker has a baseline (§9). Fail closed: a
-		// mailbox is never created whose first key wasn't logged.
-		address := req.Handle + a.mailDomain
-		if a.keylog != nil {
-			h := sha256.Sum256(req.MailboxKey)
-			id := a.provisioner.MailboxID(address)
-			if err := a.keylog.AppendMailboxKeyHash(r.Context(), hex.EncodeToString(id), h[:], time.Now().Unix()); err != nil {
-				writeErr(w, http.StatusInternalServerError, "could not record key")
-				return
-			}
-		}
-
+		// Create records the initial mailbox key in the write-once log once the
+		// handle and license are known to be free, so every legitimate key has an
+		// auditable entry and the broker has a baseline (§9), and a refused request
+		// adds nothing to someone else's log. Fail closed: a mailbox is never
+		// created whose first key wasn't logged.
 		id, err := a.provisioner.Create(r.Context(), routing.NewMailbox{
 			Address:        req.Handle + a.mailDomain,
 			LicenseHash:    claims.LicenseHash,
@@ -143,6 +131,7 @@ func (a *API) createMailbox() http.Handler {
 			OwnerChangeKey: req.OwnerChangeKey,
 			PasskeyKey:     req.PasskeyKey,
 			EntitlementExp: claims.ExpiresAt,
+			Log:            a.logKey(),
 		})
 		switch {
 		case errors.Is(err, routing.ErrHandleTaken):
@@ -150,6 +139,9 @@ func (a *API) createMailbox() http.Handler {
 			return
 		case errors.Is(err, routing.ErrLicenseTaken):
 			writeErr(w, http.StatusConflict, "license already has a mailbox")
+			return
+		case errors.Is(err, routing.ErrKeyNotLogged):
+			writeErr(w, http.StatusInternalServerError, "could not record key")
 			return
 		case err != nil:
 			writeErr(w, http.StatusInternalServerError, "create failed")

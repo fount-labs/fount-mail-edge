@@ -6,8 +6,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/limit"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
@@ -216,6 +219,106 @@ func TestPostAddressConflict(t *testing.T) {
 	}
 	if code := post("a5"); code != http.StatusConflict {
 		t.Fatalf("second add: want 409, got %d", code)
+	}
+}
+
+func TestPostAddressNameRules(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, _ := mutatorAPI(t, rt)
+	parent := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	for i, addr := range []string{
+		"admin@fountbox.com", "postmaster@fountbox.com", "newname@fountbox.com",
+		"admin.worker@fountbox.com", "a.b.worker@fountbox.com", "sub.admin@fountbox.com",
+		".worker@fountbox.com", "sub.@fountbox.com", "Sub.worker@fountbox.com",
+	} {
+		raw, _ := json.Marshal(childBody(t, addr, parent.mailbox))
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, parent.mailbox, parent.idHex, "POST", "/address", raw, time.Now(), fmt.Sprintf("n%d", i)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d", addr, rec.Code)
+		}
+	}
+}
+
+// Whether the name is taken must not change the answer, or this route tells a
+// caller about someone else's namespace.
+func TestPostAddressUnderAnotherHandle(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, _ := mutatorAPI(t, rt)
+	parent := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	other := createMbox(t, rt, "other@fountbox.com", "lic-2")
+	raw, _ := json.Marshal(childBody(t, "real.other@fountbox.com", other.mailbox))
+	seed := httptest.NewRecorder()
+	api.ServeHTTP(seed, signedRequest(t, other.mailbox, other.idHex, "POST", "/address", raw, time.Now(), "seed"))
+	if seed.Code != http.StatusCreated {
+		t.Fatalf("seed: %d", seed.Code)
+	}
+
+	var bodies []string
+	for i, addr := range []string{"real.other@fountbox.com", "free.other@fountbox.com", "free.absent@fountbox.com"} {
+		raw, _ := json.Marshal(childBody(t, addr, parent.mailbox))
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, parent.mailbox, parent.idHex, "POST", "/address", raw, time.Now(), fmt.Sprintf("o%d", i)))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: want 403, got %d", addr, rec.Code)
+		}
+		bodies = append(bodies, rec.Body.String())
+	}
+	if bodies[0] != bodies[1] || bodies[1] != bodies[2] {
+		t.Fatalf("answers differ: %q", bodies)
+	}
+}
+
+// A worker can add a sibling with the shared mailbox key.
+func TestPostAddressFromAWorker(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, _ := mutatorAPI(t, rt)
+	parent := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	id, err := rt.AddAddress(context.Background(), routing.NewAddress{
+		ParentMailboxID: parent.id, Handle: "worker@fountbox.com", Address: "one.worker@fountbox.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(childBody(t, "two.worker@fountbox.com", parent.mailbox))
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, parent.mailbox, hex.EncodeToString(id), "POST", "/address", raw, time.Now(), "w1"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostAddressLogsTheWorkersKey(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, klog := recoverAPI(t, rt)
+	parent := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	raw, _ := json.Marshal(childBody(t, "sub.worker@fountbox.com", parent.mailbox))
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, parent.mailbox, parent.idHex, "POST", "/address", raw, time.Now(), "l1"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	want := sha256.Sum256(parent.mailbox.Public().(ed25519.PublicKey))
+	got := klog.appends[hex.EncodeToString(rt.MailboxID("sub.worker@fountbox.com"))]
+	if len(got) != 1 || !bytes.Equal(got[0], want[:]) {
+		t.Fatalf("log entries = %d", len(got))
+	}
+}
+
+func TestPostAddressIsThrottled(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api := New(Options{
+		Store: store.NewDiscard(), Resolver: NewKeyResolver(rt), Mutator: rt,
+		MailDomain: "@fountbox.com", HandleLimiter: limit.New(0, 1),
+	})
+	parent := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	for i, want := range []int{http.StatusCreated, http.StatusTooManyRequests} {
+		raw, _ := json.Marshal(childBody(t, "sub.worker@fountbox.com", parent.mailbox))
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, parent.mailbox, parent.idHex, "POST", "/address", raw, time.Now(), fmt.Sprintf("t%d", i)))
+		if rec.Code != want {
+			t.Fatalf("attempt %d: want %d, got %d", i, want, rec.Code)
+		}
 	}
 }
 

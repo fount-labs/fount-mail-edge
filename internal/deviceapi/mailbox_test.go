@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -58,13 +59,6 @@ func (f *fakeProv) Create(_ context.Context, p routing.NewMailbox) ([]byte, erro
 		return f.id, nil
 	}
 	return make([]byte, 32), nil
-}
-
-func (f *fakeProv) MailboxID(string) []byte {
-	if f.id != nil {
-		return f.id
-	}
-	return make([]byte, 32)
 }
 
 type deviceKeys struct {
@@ -174,12 +168,12 @@ func TestCreateMailbox(t *testing.T) {
 
 func TestCreateMailboxLogsInitialKey(t *testing.T) {
 	ks := newRecoverStore() // implements store.KeyLog, so creation logs the key
-	prov := &fakeProv{id: make([]byte, 32)}
+	rt, _ := newRoutingStore(t)
 	verifyPub, backend, _ := ed25519.GenerateKey(rand.Reader)
 	api := New(Options{
 		Store:       ks,
 		Entitlement: verifyPub,
-		Provisioner: prov,
+		Provisioner: rt,
 		MailDomain:  "@fountbox.com",
 	})
 	dk := newDeviceKeys(t)
@@ -191,9 +185,50 @@ func TestCreateMailboxLogsInitialKey(t *testing.T) {
 		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 	want := sha256.Sum256(dk.mboxPub)
-	got := ks.appends[hex.EncodeToString(prov.id)]
+	got := ks.appends[hex.EncodeToString(rt.MailboxID("worker@fountbox.com"))]
 	if len(got) != 1 || !bytes.Equal(got[0], want[:]) {
 		t.Fatalf("creation did not log the initial mailbox key (entries=%d)", len(got))
+	}
+}
+
+// A failed request for a taken handle must not add to that mailbox's log, where it
+// would look like a key swap.
+func TestCreateMailboxLeavesATakenHandlesLogAlone(t *testing.T) {
+	ks := newRecoverStore()
+	rt, _ := newRoutingStore(t)
+	createMbox(t, rt, "worker@fountbox.com", "first-license")
+	verifyPub, backend, _ := ed25519.GenerateKey(rand.Reader)
+	api := New(Options{Store: ks, Entitlement: verifyPub, Provisioner: rt, MailDomain: "@fountbox.com"})
+	dk := newDeviceKeys(t)
+	tok := entToken(t, backend, dk.signPub, time.Now().Add(time.Hour))
+
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, mailboxPost(t, dk.signPriv, tok, dk.request(t), "mk-taken"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(ks.appends) != 0 {
+		t.Fatalf("a refused create logged a key: %d mailboxes", len(ks.appends))
+	}
+}
+
+func TestCreateMailboxSharesTheProbeBudget(t *testing.T) {
+	verifyPub, backend, _ := ed25519.GenerateKey(rand.Reader)
+	api := New(Options{
+		Store:         store.NewDiscard(),
+		Entitlement:   verifyPub,
+		Provisioner:   &fakeProv{createErr: routing.ErrHandleTaken},
+		MailDomain:    "@fountbox.com",
+		HandleLimiter: limit.New(0, 1),
+	})
+	dk := newDeviceKeys(t)
+	tok := entToken(t, backend, dk.signPub, time.Now().Add(time.Hour))
+	for i, want := range []int{http.StatusConflict, http.StatusTooManyRequests} {
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, mailboxPost(t, dk.signPriv, tok, dk.request(t), fmt.Sprintf("p%d", i)))
+		if rec.Code != want {
+			t.Fatalf("attempt %d: want %d, got %d", i, want, rec.Code)
+		}
 	}
 }
 

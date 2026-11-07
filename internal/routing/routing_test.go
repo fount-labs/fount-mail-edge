@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -479,6 +480,7 @@ func TestAddAddressInheritsLicenseAndMailboxKey(t *testing.T) {
 	const childAddr = "sub.worker@fountbox.com"
 	childID, err := s.AddAddress(ctx, routing.NewAddress{
 		ParentMailboxID: parentID,
+		Handle:          "worker@fountbox.com",
 		Address:         childAddr,
 		DecryptionKey:   child.dec.PublicKey().Bytes(),
 		SigningKey:      child.sign.Public().(ed25519.PublicKey),
@@ -506,7 +508,7 @@ func TestAddAddressInheritsLicenseAndMailboxKey(t *testing.T) {
 	}
 
 	// A second address, same handle -> taken; under an unknown parent -> no mailbox.
-	if _, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: parentID, Address: childAddr, DecryptionKey: child.dec.PublicKey().Bytes(), SigningKey: child.sign.Public().(ed25519.PublicKey), OwnerChangeKey: child.ownerChange.Public().(ed25519.PublicKey), PasskeyKey: child.passkey.Public().(ed25519.PublicKey)}); !errors.Is(err, routing.ErrHandleTaken) {
+	if _, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: parentID, Handle: "worker@fountbox.com", Address: childAddr, DecryptionKey: child.dec.PublicKey().Bytes(), SigningKey: child.sign.Public().(ed25519.PublicKey), OwnerChangeKey: child.ownerChange.Public().(ed25519.PublicKey), PasskeyKey: child.passkey.Public().(ed25519.PublicKey)}); !errors.Is(err, routing.ErrHandleTaken) {
 		t.Fatalf("err = %v, want ErrHandleTaken", err)
 	}
 	if _, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: make([]byte, 32), Address: "x.worker@fountbox.com"}); !errors.Is(err, routing.ErrNoMailbox) {
@@ -536,9 +538,16 @@ func TestSetOwnersMonotonicVersion(t *testing.T) {
 		t.Fatal("owner plaintext stored")
 	}
 
-	// Re-asserting the same version is accepted (corrects a rollback).
-	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com"}); err != nil {
-		t.Fatalf("re-assert version 1: %v", err)
+	// Resending the same version and list changes nothing.
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com", "bob@smithcpa.com"}); err != nil {
+		t.Fatalf("resend version 1: %v", err)
+	}
+	// Only a greater version can change the list.
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com"}); !errors.Is(err, routing.ErrStaleVersion) {
+		t.Fatalf("new list at version 1: err = %v, want ErrStaleVersion", err)
+	}
+	if snap, _ := s.Snapshot(id); len(snap.OwnerHashes) != 2 {
+		t.Fatalf("list changed without a new version: %+v", snap)
 	}
 	// Advancing is accepted.
 	if err := s.SetOwners(ctx, id, 2, []string{"jane@smithcpa.com"}); err != nil {
@@ -623,6 +632,198 @@ func TestRotateKeys(t *testing.T) {
 	}
 	if _, err := s.RotateKeys(ctx, make([]byte, 32), routing.RotatedKeys{}); !errors.Is(err, routing.ErrNoMailbox) {
 		t.Fatalf("err = %v, want ErrNoMailbox", err)
+	}
+}
+
+// family is a handle with two workers.
+func family(t *testing.T, s *routing.Store) (root, one, two []byte) {
+	t.Helper()
+	ctx := context.Background()
+	root, err := s.Create(ctx, routing.NewMailbox{
+		Address: "worker@fountbox.com", LicenseHash: []byte("lic-1"), EntitlementExp: 100,
+		MailboxKey: newKeyset(t).mailbox.Public().(ed25519.PublicKey),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(parent []byte, addr string) []byte {
+		id, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: parent, Handle: "worker@fountbox.com", Address: addr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	one = add(root, "one.worker@fountbox.com")
+	return root, one, add(one, "two.worker@fountbox.com") // a worker can add a sibling
+}
+
+func TestRenewingAnyAddressRenewsThemAll(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	s := newStore(t, blobs, routingKey, macKey)
+	root, one, two := family(t, s)
+	if _, err := s.Create(context.Background(), routing.NewMailbox{Address: "other@fountbox.com", LicenseHash: []byte("lic-2"), EntitlementExp: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RenewEntitlement(context.Background(), two, []byte("lic-1"), 500); err != nil {
+		t.Fatal(err)
+	}
+	s = reload(t, blobs, routingKey, macKey)
+	for _, id := range [][]byte{root, one, two} {
+		if snap, _ := s.Snapshot(id); snap.EntitlementExp != 500 {
+			t.Fatalf("expiry = %d, want 500", snap.EntitlementExp)
+		}
+	}
+	if snap, _ := s.Snapshot(s.MailboxID("other@fountbox.com")); snap.EntitlementExp != 100 {
+		t.Fatal("renewal reached another mailbox")
+	}
+}
+
+func reload(t *testing.T, blobs store.Blobs, routingKey, macKey []byte) *routing.Store {
+	t.Helper()
+	s, err := routing.New(context.Background(), blobs, routingKey, macKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+type refusingPut struct {
+	store.Blobs
+	refuse *bool
+}
+
+func (b refusingPut) Put(ctx context.Context, k string, d []byte) error {
+	if *b.refuse {
+		return errors.New("s3 down")
+	}
+	return b.Blobs.Put(ctx, k, d)
+}
+
+func TestFailedWriteLeavesEveryAddressUnchanged(t *testing.T) {
+	routingKey, macKey := keys(t)
+	refuse := false
+	s := newStore(t, refusingPut{newMemBlobs(), &refuse}, routingKey, macKey)
+	root, one, two := family(t, s)
+	want, _ := s.Snapshot(root)
+
+	refuse = true
+	if err := s.RenewEntitlement(context.Background(), one, []byte("lic-1"), 500); err == nil {
+		t.Fatal("renew survived a failed write")
+	}
+	if _, err := s.RotateKeys(context.Background(), one, routing.RotatedKeys{MailboxKey: []byte("new")}); err == nil {
+		t.Fatal("rotate survived a failed write")
+	}
+	for _, id := range [][]byte{root, one, two} {
+		snap, _ := s.Snapshot(id)
+		if snap.EntitlementExp != 100 || !bytes.Equal(snap.MailboxKey, want.MailboxKey) {
+			t.Fatalf("a failed write changed memory: %+v", snap)
+		}
+	}
+}
+
+func TestAKeyLogFailureStopsTheWrite(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	root, one, _ := family(t, s)
+	want, _ := s.Snapshot(one)
+	refuse := func(context.Context, []byte, []byte) error { return errors.New("log down") }
+
+	if _, err := s.RotateKeys(ctx, root, routing.RotatedKeys{MailboxKey: []byte("new"), Log: refuse}); !errors.Is(err, routing.ErrKeyNotLogged) {
+		t.Fatalf("rotate err = %v", err)
+	}
+	if snap, _ := s.Snapshot(one); !bytes.Equal(snap.MailboxKey, want.MailboxKey) {
+		t.Fatal("a key went live without a log entry")
+	}
+	_, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: root, Handle: "worker@fountbox.com", Address: "three.worker@fountbox.com", Log: refuse})
+	if !errors.Is(err, routing.ErrKeyNotLogged) {
+		t.Fatalf("add err = %v", err)
+	}
+	if ok, _ := s.Available(ctx, "three.worker@fountbox.com"); !ok {
+		t.Fatal("an address went live without a log entry")
+	}
+	_, err = s.Create(ctx, routing.NewMailbox{Address: "new@fountbox.com", Log: refuse})
+	if !errors.Is(err, routing.ErrKeyNotLogged) {
+		t.Fatalf("create err = %v", err)
+	}
+	if ok, _ := s.Available(ctx, "new@fountbox.com"); !ok {
+		t.Fatal("a mailbox went live without a log entry")
+	}
+}
+
+func TestAddAddressChecksTheHandleBeforeTheName(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	root, _, _ := family(t, s)
+	other, err := s.Create(ctx, routing.NewMailbox{Address: "other@fountbox.com", LicenseHash: []byte("lic-2")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: other, Handle: "worker@fountbox.com", Address: "one.worker@fountbox.com"})
+	if !errors.Is(err, routing.ErrNotHandle) {
+		t.Fatalf("err = %v, want ErrNotHandle", err)
+	}
+	if _, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: root, Handle: "other@fountbox.com", Address: "x.other@fountbox.com"}); !errors.Is(err, routing.ErrNotHandle) {
+		t.Fatalf("err = %v, want ErrNotHandle", err)
+	}
+}
+
+func TestWorkerLimit(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	root, err := s.Create(ctx, routing.NewMailbox{Address: "worker@fountbox.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(i int) error {
+		_, err := s.AddAddress(ctx, routing.NewAddress{ParentMailboxID: root, Handle: "worker@fountbox.com", Address: fmt.Sprintf("w%d.worker@fountbox.com", i)})
+		return err
+	}
+	for i := range routing.MaxWorkers {
+		if err := add(i); err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+	if err := add(routing.MaxWorkers); !errors.Is(err, routing.ErrWorkerLimit) {
+		t.Fatalf("err = %v, want ErrWorkerLimit", err)
+	}
+}
+
+// Readers must not see a record while a rotation replaces it. Run under -race.
+func TestReadersDontRaceWrites(t *testing.T) {
+	routingKey, macKey := keys(t)
+	s := newStore(t, newMemBlobs(), routingKey, macKey)
+	ctx := context.Background()
+	ks := newKeyset(t)
+	id := s.MailboxID("a@fountbox.com")
+	if err := s.Upsert(ctx, ks.record(id)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			if _, err := s.RotateKeys(ctx, id, routing.RotatedKeys{
+				DecryptionKey: ks.dec.PublicKey().Bytes(),
+				SigningKey:    ks.sign.Public().(ed25519.PublicKey),
+			}); err != nil {
+				t.Error(err)
+			}
+			s.RenewEntitlement(ctx, id, []byte("lic-hash"), 0)
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			s.AddressKey(hex.EncodeToString(id))
+			s.Resolve(ctx, "a@fountbox.com")
+			s.Status(ctx, "a@fountbox.com")
+		}
 	}
 }
 

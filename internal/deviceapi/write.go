@@ -41,12 +41,21 @@ func (a *API) createAddress() http.Handler {
 			writeErr(w, http.StatusBadRequest, "bad key id")
 			return
 		}
+		license, ok := a.mutator.LicenseOf(parentID)
+		if !ok {
+			writeErr(w, http.StatusNotFound, "no such mailbox")
+			return
+		}
+		if !a.allowProbe(w, license) {
+			return
+		}
 		var req addressRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad request body")
 			return
 		}
-		if _, ok := a.localPart(req.Address); !ok {
+		handle, ok := a.workerHandle(req.Address)
+		if !ok {
 			writeErr(w, http.StatusBadRequest, "invalid address")
 			return
 		}
@@ -73,13 +82,24 @@ func (a *API) createAddress() http.Handler {
 
 		id, err := a.mutator.AddAddress(r.Context(), routing.NewAddress{
 			ParentMailboxID: parentID,
+			Handle:          handle,
 			Address:         req.Address,
 			DecryptionKey:   req.DecryptionKey,
 			SigningKey:      req.SigningKey,
 			OwnerChangeKey:  req.OwnerChangeKey,
 			PasskeyKey:      req.PasskeyKey,
+			Log:             a.logKey(),
 		})
 		switch {
+		case errors.Is(err, routing.ErrNotHandle):
+			writeErr(w, http.StatusForbidden, "address is not under this handle")
+			return
+		case errors.Is(err, routing.ErrWorkerLimit):
+			writeErr(w, http.StatusForbidden, "worker limit reached")
+			return
+		case errors.Is(err, routing.ErrKeyNotLogged):
+			writeErr(w, http.StatusInternalServerError, "could not record key")
+			return
 		case errors.Is(err, routing.ErrHandleTaken):
 			writeErr(w, http.StatusConflict, "address already registered")
 			return
@@ -195,6 +215,21 @@ func (a *API) renewEntitlement() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"entitlement_exp": claims.ExpiresAt})
 	})
+}
+
+// workerHandle returns the full address of the handle a worker address sits under.
+// A worker is <label>.<handle>@domain, one dot, so a bare name can't be claimed here
+// and reserved names stay reserved on both sides of the dot (§4).
+func (a *API) workerHandle(address string) (string, bool) {
+	local, ok := a.localPart(address)
+	if !ok {
+		return "", false
+	}
+	label, handle, _ := strings.Cut(local, ".")
+	if !validHandle(label) || !validHandle(handle) {
+		return "", false
+	}
+	return handle + a.mailDomain, true
 }
 
 // localPart splits a full address into its local part and reports whether it is

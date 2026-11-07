@@ -49,6 +49,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,16 @@ type Mailbox struct {
 
 	OwnerHashes    [][]byte `json:"owner_hashes,omitempty"`    // keyed hashes of the owners (§4; encrypted owner addresses are M3)
 	RoutingVersion uint64   `json:"routing_version,omitempty"` // device-held owner-list version; monotonic, the §4 rollback defense
+
+	Root []byte `json:"root,omitempty"` // a worker address's handle record; empty on the handle itself
+}
+
+// root is the id shared by a handle and its workers.
+func (m *Mailbox) root() []byte {
+	if len(m.Root) > 0 {
+		return m.Root
+	}
+	return m.MailboxID
 }
 
 // Store is the live routing data, loaded once at construction and persisted back
@@ -256,11 +267,15 @@ func (s *Store) keyedHash(v string) []byte {
 	return m.Sum(nil)
 }
 
-func (s *Store) lookup(mailboxIDHex string) (*Mailbox, bool) {
+// lookup returns a copy, because the live record changes under s.mu.
+func (s *Store) lookup(mailboxIDHex string) (Mailbox, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.data.Mailboxes[mailboxIDHex]
-	return m, ok
+	if !ok {
+		return Mailbox{}, false
+	}
+	return m.clone(), true
 }
 
 // Snapshot returns a copy of a mailbox's record for read-only inspection (the
@@ -275,6 +290,16 @@ func (s *Store) Snapshot(mailboxID []byte) (Mailbox, bool) {
 		return Mailbox{}, false
 	}
 	return m.clone(), true
+}
+
+// LicenseOf returns a copy of a mailbox's license hash, the key for per-license
+// limits. Reports false if no mailbox has that id.
+func (s *Store) LicenseOf(mailboxID []byte) ([]byte, bool) {
+	m, ok := s.Snapshot(mailboxID)
+	if !ok {
+		return nil, false
+	}
+	return m.LicenseHash, true
 }
 
 // PasskeyOf returns a copy of a mailbox's registered passkey credential key
@@ -294,7 +319,7 @@ func (m *Mailbox) clone() Mailbox {
 		&c.MailboxID: m.MailboxID, &c.DecryptionKey: m.DecryptionKey,
 		&c.SigningKey: m.SigningKey, &c.MailboxKey: m.MailboxKey,
 		&c.OwnerChangeKey: m.OwnerChangeKey, &c.PasskeyKey: m.PasskeyKey,
-		&c.LicenseHash: m.LicenseHash,
+		&c.LicenseHash: m.LicenseHash, &c.Root: m.Root,
 	} {
 		*dst = append([]byte(nil), src...)
 	}
@@ -363,7 +388,7 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 	if !ok {
 		return nil, false
 	}
-	b := pick(m)
+	b := pick(&m)
 	if len(b) != ed25519.PublicKeySize {
 		return nil, false
 	}
@@ -433,13 +458,87 @@ func (s *Store) put(ctx context.Context, m *Mailbox) error {
 // re-asserting the current version, never an older one). ErrLicenseMismatch
 // means a renewal's entitlement is for a different license than the one bound at
 // creation (409), so a renewal can't move a mailbox between licenses.
+// ErrNotHandle means a worker address names a handle other than the caller's, and
+// ErrWorkerLimit means the handle has reached MaxWorkers (both 403). ErrKeyNotLogged
+// means the write-once log refused a key, so nothing changed (500).
 var (
 	ErrHandleTaken     = errors.New("routing: handle already registered")
 	ErrLicenseTaken    = errors.New("routing: license already has a mailbox")
 	ErrNoMailbox       = errors.New("routing: no such mailbox")
 	ErrStaleVersion    = errors.New("routing: routing version did not advance")
 	ErrLicenseMismatch = errors.New("routing: entitlement license does not match mailbox")
+	ErrNotHandle       = errors.New("routing: address is not under this handle")
+	ErrWorkerLimit     = errors.New("routing: worker limit reached")
+	ErrKeyNotLogged    = errors.New("routing: could not record key")
 )
+
+// MaxWorkers is the soft limit on workers under one handle (§4). A firm may run
+// one worker per client, so it's far above any real firm's needs and exists only
+// to stop abuse. Each worker adds a record to the single routing object.
+const MaxWorkers = 500
+
+// logConcurrency bounds the key log writes for one rotation, which happen while
+// the store's lock is held.
+const logConcurrency = 16
+
+// LogKey records a mailbox key's hash in the write-once log (§9). The write paths
+// call it under the store's lock, after their checks and before the record
+// changes, so a refused request leaves no entry and no key goes live unlogged. A
+// record write that fails afterwards leaves an entry for a key that never went
+// live, which the log can't undo and an auditor can tolerate. Nil skips the log.
+type LogKey func(ctx context.Context, mailboxID, keyHash []byte) error
+
+func logKey(ctx context.Context, log LogKey, key []byte, ids ...[]byte) error {
+	if log == nil {
+		return nil
+	}
+	h := sha256.Sum256(key)
+	errs := make([]error, len(ids))
+	slots := make(chan struct{}, logConcurrency)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			errs[i] = log(ctx, id, h[:])
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: %v", ErrKeyNotLogged, err)
+	}
+	return nil
+}
+
+// family returns the records of m's handle and its workers. Caller holds s.mu.
+func (s *Store) family(m *Mailbox) []*Mailbox {
+	root := m.root()
+	var out []*Mailbox
+	for _, c := range s.data.Mailboxes {
+		if hmac.Equal(c.root(), root) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// update applies change to each record and persists, restoring them all on a
+// write failure. change replaces fields and never mutates a slice in place. Caller
+// holds s.mu.
+func (s *Store) update(ctx context.Context, records []*Mailbox, change func(*Mailbox)) error {
+	prev := make([]Mailbox, len(records))
+	for i, m := range records {
+		prev[i] = *m
+		change(m)
+	}
+	if err := s.persist(ctx); err != nil {
+		for i, m := range records {
+			*m = prev[i]
+		}
+		return err
+	}
+	return nil
+}
 
 // NewMailbox is a mailbox to create: its handle address, the keyed license hash
 // from the verified entitlement, and the device-asserted public keys (whose key
@@ -453,6 +552,7 @@ type NewMailbox struct {
 	OwnerChangeKey []byte
 	PasskeyKey     []byte
 	EntitlementExp int64
+	Log            LogKey
 }
 
 // Available reports whether a handle address is free to register.
@@ -476,6 +576,9 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 		if len(p.LicenseHash) > 0 && hmac.Equal(m.LicenseHash, p.LicenseHash) {
 			return nil, ErrLicenseTaken
 		}
+	}
+	if err := logKey(ctx, p.Log, p.MailboxKey, id); err != nil {
+		return nil, err
 	}
 	if err := s.put(ctx, &Mailbox{
 		MailboxID:      id,
@@ -503,17 +606,20 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 // the key chain, checked by the handler before calling this.
 type NewAddress struct {
 	ParentMailboxID []byte
+	Handle          string // the handle's full address, which Address sits under
 	Address         string
 	DecryptionKey   []byte
 	SigningKey      []byte
 	OwnerChangeKey  []byte
 	PasskeyKey      []byte
+	Log             LogKey
 }
 
 // AddAddress registers a worker address under an existing mailbox, inheriting
 // its license (so it does not count as a second mailbox for that license) and
-// returning the new address's mailbox id. It refuses an address that is already
-// registered (§4: a released handle is never reissued).
+// returning the new address's mailbox id. It refuses an address under any handle
+// but the caller's, before looking at whether that address is taken, and an address
+// that is already registered (§4: a released handle is never reissued).
 func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -521,12 +627,23 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 	if !ok {
 		return nil, ErrNoMailbox
 	}
+	root := parent.root()
+	if !hmac.Equal(s.keyedHash(p.Handle), root) {
+		return nil, ErrNotHandle
+	}
 	id := s.keyedHash(p.Address)
 	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
 		return nil, ErrHandleTaken
 	}
+	if len(s.family(parent)) > MaxWorkers { // the handle's own record is in there too
+		return nil, ErrWorkerLimit
+	}
+	if err := logKey(ctx, p.Log, parent.MailboxKey, id); err != nil {
+		return nil, err
+	}
 	if err := s.put(ctx, &Mailbox{
 		MailboxID:      id,
+		Root:           root,
 		DecryptionKey:  p.DecryptionKey,
 		SigningKey:     p.SigningKey,
 		MailboxKey:     parent.MailboxKey,
@@ -543,9 +660,11 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 
 // SetOwners writes the versioned owner list (design §8 PUT /routing). Owners are
 // stored only as keyed hashes (§4; the encrypted owner addresses are M3). The
-// version must not go backwards: the device re-asserts the current version on
+// version must not go backwards: the device re-asserts its current version on
 // each sync, which overwrites a rolled-back object, and only a strictly greater
-// version changes the list. A version below the stored one is ErrStaleVersion.
+// version changes the list. Resending the stored version with the same list is a
+// no-op. A lower version, or the stored version with a different list, is
+// ErrStaleVersion.
 func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -560,13 +679,15 @@ func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64,
 	for _, o := range owners {
 		hashes = append(hashes, s.keyedHash(o))
 	}
-	prevHashes, prevVer := m.OwnerHashes, m.RoutingVersion
-	m.OwnerHashes, m.RoutingVersion = hashes, version
-	if err := s.persist(ctx); err != nil {
-		m.OwnerHashes, m.RoutingVersion = prevHashes, prevVer
-		return err
+	if version == m.RoutingVersion {
+		if !slices.EqualFunc(hashes, m.OwnerHashes, hmac.Equal) {
+			return ErrStaleVersion
+		}
+		return nil
 	}
-	return nil
+	return s.update(ctx, []*Mailbox{m}, func(m *Mailbox) {
+		m.OwnerHashes, m.RoutingVersion = hashes, version
+	})
 }
 
 // RotatedKeys is the new key set a recovery (or move) installs on an existing
@@ -579,14 +700,17 @@ type RotatedKeys struct {
 	MailboxKey     []byte
 	OwnerChangeKey []byte
 	PasskeyKey     []byte
+	Log            LogKey
 }
 
-// RotateKeys replaces a mailbox's device-held keys and returns the SHA-256 of the
-// new mailbox key, which the caller records in the write-once key log (§9) so the
-// rotation is auditable. The authorization — a passkey assertion over an edge
-// challenge and the new mailbox key's signature over the new key chain — is the
-// handler's job, checked before calling this. ErrNoMailbox if the mailbox is
-// absent.
+// RotateKeys replaces an address's device-held keys and returns the SHA-256 of the
+// new mailbox key. There is one mailbox key per mailbox (§5), so it changes on the
+// handle and every worker, each with its own log entry. Otherwise the old key would
+// still authorize POST /address through a sibling's id. The other keys are per
+// address, and a worker on a healthy device keeps them. The authorization — a
+// passkey assertion over an edge challenge and the new mailbox key's signature over
+// the new key chain — is the handler's job, checked before calling this.
+// ErrNoMailbox if the mailbox is absent.
 func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -594,24 +718,35 @@ func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys)
 	if !ok {
 		return nil, ErrNoMailbox
 	}
-	prev := *m
-	m.DecryptionKey = k.DecryptionKey
-	m.SigningKey = k.SigningKey
-	m.MailboxKey = k.MailboxKey
-	m.OwnerChangeKey = k.OwnerChangeKey
-	m.PasskeyKey = k.PasskeyKey
-	if err := s.persist(ctx); err != nil {
-		*m = prev // the old slice headers are intact; we replaced, never mutated
+	family := s.family(m)
+	ids := make([][]byte, len(family))
+	for i, f := range family {
+		ids[i] = f.MailboxID
+	}
+	if err := logKey(ctx, k.Log, k.MailboxKey, ids...); err != nil {
+		return nil, err
+	}
+	err := s.update(ctx, family, func(f *Mailbox) {
+		f.MailboxKey = k.MailboxKey
+		if f == m {
+			f.DecryptionKey = k.DecryptionKey
+			f.SigningKey = k.SigningKey
+			f.OwnerChangeKey = k.OwnerChangeKey
+			f.PasskeyKey = k.PasskeyKey
+		}
+	})
+	if err != nil {
 		return nil, err
 	}
 	h := sha256.Sum256(k.MailboxKey)
 	return h[:], nil
 }
 
-// RenewEntitlement updates the mailbox's stored entitlement expiry (design §8
-// POST /entitlement, §4 "renews it like a license check"). The renewal's license
-// hash must match the one bound at creation, so a renewal can't move a mailbox
-// to a different license; a mismatch is ErrLicenseMismatch.
+// RenewEntitlement updates the stored entitlement expiry on the handle and all its
+// workers (design §8 POST /entitlement, §4 "renews it like a license check"), since
+// they share a license. The renewal's license hash must match the one bound at
+// creation, so a renewal can't move a mailbox to a different license; a mismatch is
+// ErrLicenseMismatch.
 func (s *Store) RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -622,11 +757,5 @@ func (s *Store) RenewEntitlement(ctx context.Context, mailboxID, licenseHash []b
 	if len(m.LicenseHash) > 0 && !hmac.Equal(m.LicenseHash, licenseHash) {
 		return ErrLicenseMismatch
 	}
-	prev := m.EntitlementExp
-	m.EntitlementExp = exp
-	if err := s.persist(ctx); err != nil {
-		m.EntitlementExp = prev
-		return err
-	}
-	return nil
+	return s.update(ctx, s.family(m), func(f *Mailbox) { f.EntitlementExp = exp })
 }
