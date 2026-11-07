@@ -8,7 +8,8 @@
 //   - STARTTLS is mandatory in the enclave, terminated with the attested key's
 //     CA cert. Senders that won't use TLS are refused.
 //   - Unknown recipients are rejected during SMTP; there is no catch-all.
-//   - Bare LF / bare CR are rejected and the buffer is cleared after STARTTLS.
+//   - Bare LF / bare CR are rejected, in commands and in message bodies, and the
+//     buffer is cleared after STARTTLS.
 //   - Size and (later) per-mailbox / per-IP / per-sender limits apply.
 //   - The edge never parses MIME; it stores each raw message whole and answers
 //     250 only after the store confirms the write.
@@ -32,6 +33,19 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/limit"
+)
+
+const (
+	maxLineBytes = 8192 // an SMTP command line, CRLF included
+	drainTimeout = 2 * time.Second
+	drainBytes   = 1 << 20
+)
+
+var (
+	errLineTooLong  = errors.New("line too long")
+	errTooLarge     = errors.New("message too large")
+	errBareNewline  = errors.New("bare CR or LF in message")
+	errClosedInData = errors.New("connection closed mid-DATA")
 )
 
 type CertSource interface {
@@ -244,7 +258,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				se.reply("530 5.7.0 Must issue a STARTTLS command first")
 				continue
 			}
-			se.command(ctx, verb, rest)
+			if !se.command(ctx, verb, rest) {
+				return
+			}
 		case "NOOP":
 			se.reply("250 ok")
 		case "RSET":
@@ -259,29 +275,39 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
-func (se *session) command(ctx context.Context, verb, rest string) {
+// command runs one mail verb. It returns false when the connection must close,
+// which is any time a message's framing can't be trusted: whatever follows could
+// be another sender's bytes read as commands.
+func (se *session) command(ctx context.Context, verb, rest string) bool {
 	switch verb {
 	case "MAIL":
 		se.recipient = ""
 		se.sender = extractAddr(rest)
 		se.reply("250 ok")
 	case "RCPT":
+		// One transaction is one stored copy for one recipient. Accepting a second
+		// would have to store two and could fail between them, so ask the sender to
+		// retry it separately.
+		if se.recipient != "" {
+			se.reply("452 4.5.3 too many recipients, send separately")
+			return true
+		}
 		addr := extractAddr(rest)
 		if !strings.HasSuffix(strings.ToLower(addr), strings.ToLower(se.s.opt.Domain)) {
 			se.reply("550 5.1.1 no such user")
-			return
+			return true
 		}
 		if rc := se.s.opt.Recipients; rc != nil {
 			switch st, err := rc.Status(ctx, addr); {
 			case err != nil:
 				se.reply("451 4.3.0 try again later")
-				return
+				return true
 			case st == RecipientUnknown:
 				se.reply("550 5.1.1 no such user")
-				return
+				return true
 			case st == RecipientExpired:
 				se.reply("550 5.7.1 mailbox not accepting mail")
-				return
+				return true
 			}
 		}
 		se.recipient = addr
@@ -289,13 +315,21 @@ func (se *session) command(ctx context.Context, verb, rest string) {
 	case "DATA":
 		if se.recipient == "" {
 			se.reply("503 5.5.1 need RCPT")
-			return
+			return true
 		}
 		se.reply("354 end with <CRLF>.<CRLF>")
 		raw, err := se.readData()
-		if err != nil {
+		recipient := se.recipient
+		se.recipient = ""
+		switch {
+		case errors.Is(err, errBareNewline):
+			se.reply("554 5.6.0 message rejected: %v", err)
+			se.drain()
+			return false
+		case err != nil:
 			se.reply("552 5.3.4 message rejected: %v", err)
-			return
+			se.drain()
+			return false
 		}
 		// Rolling byte budgets slow a flood (§6). A sender can't be verified, so
 		// cap what one source IP or sender domain can push per window; 452 asks it
@@ -303,22 +337,22 @@ func (se *session) command(ctx context.Context, verb, rest string) {
 		n := float64(len(raw))
 		if !se.s.perIP.AllowN(se.srcIP, n) {
 			se.reply("452 4.3.1 source over rate limit, retry later")
-			return
+			return true
 		}
 		if dom := senderDomain(se.sender); dom != "" && !se.s.perSender.AllowN(dom, n) {
 			se.reply("452 4.3.1 sender domain over rate limit, retry later")
-			return
+			return true
 		}
-		id, err := se.s.opt.Store.Put(ctx, se.recipient, se.sender, raw)
+		id, err := se.s.opt.Store.Put(ctx, recipient, se.sender, raw)
 		if err != nil {
 			// S3 not confirmed: do NOT 250. 452 asks the sender to retry.
 			se.reply("452 4.3.0 temporary storage failure")
-			log.Printf("smtp: store failed for %s: %v", se.recipient, err)
-			return
+			log.Printf("smtp: store failed for %s: %v", recipient, err)
+			return true
 		}
 		se.reply("250 2.0.0 stored %s", id)
-		se.recipient = ""
 	}
+	return true
 }
 
 // readProxyHeader consumes the single PROXY v1 line and records the source IP.
@@ -337,12 +371,9 @@ func (se *session) readProxyHeader() bool {
 }
 
 func (se *session) readLine() (string, error) {
-	line, err := se.r.ReadBytes('\n')
+	line, err := se.readBounded(nil, maxLineBytes)
 	if err != nil {
 		return "", err
-	}
-	if len(line) > 8192 {
-		return "", errors.New("line too long")
 	}
 	// Reject bare LF / bare CR: a valid command line ends in CRLF.
 	if !bytes.HasSuffix(line, []byte("\r\n")) {
@@ -355,29 +386,71 @@ func (se *session) readLine() (string, error) {
 	return string(body), nil
 }
 
+// readBounded reads through the next LF into line's storage. It stops with
+// errLineTooLong as soon as the line passes max, so a peer that never sends LF
+// costs no more than max bytes.
+func (se *session) readBounded(line []byte, max int) ([]byte, error) {
+	line = line[:0]
+	for {
+		frag, err := se.r.ReadSlice('\n')
+		if len(line)+len(frag) > max {
+			return nil, errLineTooLong
+		}
+		line = append(line, frag...)
+		if err == nil {
+			return line, nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return nil, err
+		}
+	}
+}
+
 // readData reads the DATA body until <CRLF>.<CRLF>, enforcing the size cap and
 // undoing dot-stuffing. It returns the raw message bytes.
+//
+// Every line must end in CRLF, with no CR or LF inside it. Otherwise a bare LF
+// could end the message here while a mail system that framed it differently saw
+// one message, and the rest would run as a new transaction under the relay's
+// source IP. Any error here means the reader has stopped mid-message, so the
+// caller must close the connection rather than read commands from what's left.
 func (se *session) readData() ([]byte, error) {
 	var buf bytes.Buffer
-	lr := &io.LimitedReader{R: se.r, N: se.s.opt.MaxBytes + 1024}
-	br := bufio.NewReader(lr)
+	var line []byte
 	for {
-		line, err := br.ReadBytes('\n')
-		if err != nil {
-			return nil, errors.New("connection closed mid-DATA")
+		// The room left, plus enough for the terminator.
+		room := se.s.opt.MaxBytes - int64(buf.Len()) + int64(len(".\r\n"))
+		var err error
+		line, err = se.readBounded(line, int(room))
+		switch {
+		case errors.Is(err, errLineTooLong):
+			return nil, errTooLarge
+		case err != nil:
+			return nil, errClosedInData
 		}
-		if int64(buf.Len()) > se.s.opt.MaxBytes {
-			return nil, errors.New("message too large")
+		if !bytes.HasSuffix(line, []byte("\r\n")) || bytes.IndexByte(line[:len(line)-2], '\r') >= 0 {
+			return nil, errBareNewline
 		}
 		if bytes.Equal(line, []byte(".\r\n")) {
-			break
+			return buf.Bytes(), nil
 		}
-		if bytes.HasPrefix(line, []byte("..")) {
-			line = line[1:] // undo dot-stuffing
+		content := line
+		if bytes.HasPrefix(content, []byte("..")) {
+			content = content[1:] // undo dot-stuffing
 		}
-		buf.Write(line)
+		if int64(buf.Len()+len(content)) > se.s.opt.MaxBytes {
+			return nil, errTooLarge
+		}
+		buf.Write(content)
 	}
-	return buf.Bytes(), nil
+}
+
+// drain reads a little of what's still arriving before a rejected connection
+// closes. Closing with unread data resets the connection, which can destroy the
+// reply before a sender still writing its message reads it.
+func (se *session) drain() {
+	_ = se.conn.SetReadDeadline(time.Now().Add(drainTimeout))
+	_, _ = io.CopyN(io.Discard, se.r, drainBytes)
 }
 
 func (se *session) reply(format string, a ...any) {

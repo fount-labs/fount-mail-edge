@@ -87,6 +87,7 @@ func FuzzReadData(f *testing.F) {
 	f.Add([]byte("..dotstuffed\r\n.\r\n"))
 	f.Add([]byte("no terminator ever"))
 	f.Add([]byte(".\r\n"))
+	f.Add([]byte("a\n.\r\nb\r\n.\r\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		se := &session{
 			s: &Server{opt: Options{MaxBytes: maxBytes}},
@@ -95,6 +96,13 @@ func FuzzReadData(f *testing.F) {
 		raw, err := se.readData()
 		if err == nil && int64(len(raw)) > maxBytes {
 			t.Fatalf("readData returned %d bytes, over cap %d", len(raw), maxBytes)
+		}
+		if err == nil {
+			// An accepted body has only CRLF line endings.
+			stripped := bytes.ReplaceAll(raw, []byte("\r\n"), nil)
+			if bytes.ContainsAny(stripped, "\r\n") {
+				t.Fatalf("readData accepted a bare CR or LF: %q", raw)
+			}
 		}
 	})
 }

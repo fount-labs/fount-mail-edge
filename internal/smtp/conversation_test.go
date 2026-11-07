@@ -18,6 +18,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"strconv"
@@ -318,6 +319,213 @@ func TestMessageTooLargeRejected(t *testing.T) {
 	c.expect("552")
 	if _, ok := store.last(); ok {
 		t.Fatal("an over-size message must not be stored")
+	}
+}
+
+// startData runs a conversation up to the DATA prompt.
+func (c *convo) startData() {
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("250")
+	c.send("DATA")
+	c.expect("354")
+}
+
+// expectClosed fails unless the server has closed the connection.
+func (c *convo) expectClosed(t *testing.T) {
+	t.Helper()
+	_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if line, err := c.r.ReadString('\n'); err == nil {
+		t.Fatalf("connection still open, read %q", line)
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("connection still open")
+	}
+}
+
+// Text past an overrun must not run as commands. Before, MAIL/RCPT/DATA inside an
+// oversize body became a new transaction under this connection's source IP.
+func TestOverrunClosesConnection(t *testing.T) {
+	store := &captureStore{}
+	addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting, "other@fountbox.com": RecipientAccepting}, 64)
+	c := dial(t, addr)
+	c.startData()
+	fmt.Fprint(c.conn, strings.Repeat("A", 200)+"\r\nMAIL FROM:<x@elsewhere.com>\r\nRCPT TO:<other@fountbox.com>\r\nDATA\r\nhidden\r\n.\r\n")
+	c.expect("552")
+	c.expectClosed(t)
+	if n := store.count(); n != 0 {
+		t.Fatalf("stored %d messages from an overrun", n)
+	}
+}
+
+// A bare line ending can't close a message, and the text after it can't become a
+// second transaction.
+func TestBareNewlinesInDataRejected(t *testing.T) {
+	const hidden = "MAIL FROM:<x@elsewhere.com>\r\nRCPT TO:<worker@fountbox.com>\r\nDATA\r\nhidden\r\n.\r\n"
+	for name, ending := range map[string]string{
+		"LF dot CRLF":   "first\n.\r\n",
+		"CRLF dot LF":   "first\r\n.\n",
+		"LF dot LF":     "first\n.\n",
+		"bare CR":       "fir\rst\r\n.\r\n",
+		"CR dot CRLF":   "first\r.\r\n",
+		"bare LF alone": "first\nsecond\r\n.\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &captureStore{}
+			addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+			c := dial(t, addr)
+			c.startData()
+			fmt.Fprint(c.conn, ending+hidden)
+			c.expect("554")
+			c.expectClosed(t)
+			if n := store.count(); n != 0 {
+				t.Fatalf("stored %d messages", n)
+			}
+		})
+	}
+}
+
+// A message exactly at the cap fits, and one byte more doesn't.
+func TestSizeCapBoundary(t *testing.T) {
+	line := strings.Repeat("A", 62) + "\r\n" // 64 bytes
+	for _, tc := range []struct {
+		body string
+		want string
+	}{
+		{line, "250"},
+		{"x" + line, "552"},
+	} {
+		store := &captureStore{}
+		addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 64)
+		c := dial(t, addr)
+		c.startData()
+		fmt.Fprint(c.conn, tc.body+".\r\n")
+		c.expect(tc.want)
+	}
+}
+
+// A dot-stuffed line ending exactly at the cap fits once unstuffed.
+func TestDotStuffedLineAtCap(t *testing.T) {
+	store := &captureStore{}
+	addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 64)
+	c := dial(t, addr)
+	c.startData()
+	body := "." + "." + strings.Repeat("A", 61) + "\r\n" // 64 bytes unstuffed
+	fmt.Fprint(c.conn, body+".\r\n")
+	c.expect("250")
+	if got, ok := store.last(); !ok || len(got.raw) != 64 {
+		t.Fatalf("stored %d bytes, ok=%v", len(got.raw), ok)
+	}
+}
+
+// Only the first recipient can be accepted, so a sender is never told 250 for a
+// recipient that won't be stored.
+func TestSecondRecipientDeferred(t *testing.T) {
+	store := &captureStore{}
+	addr := newTestServer(t, store, mapRecipients{"one@fountbox.com": RecipientAccepting, "two@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<one@fountbox.com>")
+	c.expect("250")
+	c.send("RCPT TO:<two@fountbox.com>")
+	if got := c.expect("452"); !strings.Contains(got, "4.5.3") {
+		t.Fatalf("reply = %q", got)
+	}
+	c.send("DATA")
+	c.expect("354")
+	fmt.Fprint(c.conn, "body\r\n.\r\n")
+	c.expect("250")
+	if got, _ := store.last(); got.recipient != "one@fountbox.com" {
+		t.Fatalf("stored for %q", got.recipient)
+	}
+
+	// The sender's retry of the second recipient goes through on the same connection.
+	c.send("MAIL FROM:<sender@elsewhere.com>")
+	c.expect("250")
+	c.send("RCPT TO:<two@fountbox.com>")
+	c.expect("250")
+	c.send("DATA")
+	c.expect("354")
+	fmt.Fprint(c.conn, "body\r\n.\r\n")
+	c.expect("250")
+	if got, _ := store.last(); got.recipient != "two@fountbox.com" {
+		t.Fatalf("stored for %q", got.recipient)
+	}
+	if n := store.count(); n != 2 {
+		t.Fatalf("stored %d, want 2", n)
+	}
+}
+
+// A failed store ends the transaction, so a retry can name its recipient again.
+func TestFailedStoreEndsTransaction(t *testing.T) {
+	store := &captureStore{err: errors.New("s3 unavailable")}
+	addr := newTestServer(t, store, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startData()
+	fmt.Fprint(c.conn, "body\r\n.\r\n")
+	c.expect("452")
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("250")
+}
+
+// countingReader serves one long line with no LF and counts what was taken. It
+// ends rather than running forever, so a read with no cap fails its test instead
+// of filling this machine's memory.
+type countingReader struct{ n int64 }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	if r.n >= 64<<20 {
+		return 0, io.EOF
+	}
+	for i := range p {
+		p[i] = 'A'
+	}
+	r.n += int64(len(p))
+	return len(p), nil
+}
+
+// The line cap has to stop the read, not check it afterwards: a peer that never
+// sends LF would otherwise fill memory before the check ever ran.
+func TestLineCapStopsTheRead(t *testing.T) {
+	src := &countingReader{}
+	se := &session{r: bufio.NewReader(src)}
+	if _, err := se.readLine(); !errors.Is(err, errLineTooLong) {
+		t.Fatalf("err = %v", err)
+	}
+	if src.n > 2*maxLineBytes {
+		t.Fatalf("read %d bytes for a %d byte cap", src.n, maxLineBytes)
+	}
+}
+
+func TestLongestCommandLineAccepted(t *testing.T) {
+	line := strings.Repeat("A", maxLineBytes-2) + "\r\n"
+	se := &session{r: bufio.NewReader(strings.NewReader(line))}
+	if got, err := se.readLine(); err != nil || len(got) != maxLineBytes-2 {
+		t.Fatalf("len=%d err=%v", len(got), err)
+	}
+	se = &session{r: bufio.NewReader(strings.NewReader("A" + line))}
+	if _, err := se.readLine(); !errors.Is(err, errLineTooLong) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// DATA is bounded the same way: an endless line stops at the message cap.
+func TestDataCapStopsTheRead(t *testing.T) {
+	const maxBytes = 1 << 20
+	src := &countingReader{}
+	se := &session{s: &Server{opt: Options{MaxBytes: maxBytes}}, r: bufio.NewReader(src)}
+	if _, err := se.readData(); !errors.Is(err, errTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+	if src.n > maxBytes+2*4096 {
+		t.Fatalf("read %d bytes for a %d byte cap", src.n, maxBytes)
 	}
 }
 
