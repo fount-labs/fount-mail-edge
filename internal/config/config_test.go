@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,45 @@ func setSecrets(t *testing.T) {
 		t.Setenv(k, "x")
 	}
 	t.Setenv("ENTITLEMENT_VERIFY_KEY", base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)))
+	t.Setenv("ACME_DIRECTORY", acmeProduction)
+}
+
+// A staging certificate boots fine and every sender then refuses it.
+func TestReleaseRefusesStagingACME(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	for name, v := range map[string]string{"unset": "", "explicit": acmeStaging} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ACME_DIRECTORY", v)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ACME_DIRECTORY") {
+				t.Fatalf("Load() err = %v", err)
+			}
+		})
+	}
+}
+
+func TestDevMayUseStagingACME(t *testing.T) {
+	t.Setenv("EDGE_DEV", "1")
+	t.Setenv("ACME_DIRECTORY", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ACMEDirectory != acmeStaging {
+		t.Fatalf("ACMEDirectory = %q", c.ACMEDirectory)
+	}
+}
+
+// The measured config is what a release boots with, and Load refuses staging.
+func TestReleaseConfigNamesProductionACME(t *testing.T) {
+	raw, err := os.ReadFile("../../tinfoil-config.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `ACME_DIRECTORY: "`+acmeProduction+`"`) {
+		t.Fatalf("tinfoil-config.yml must set ACME_DIRECTORY to %s", acmeProduction)
+	}
 }
 
 // KMS returns a DER key; loading it raw would reject every entitlement at runtime.

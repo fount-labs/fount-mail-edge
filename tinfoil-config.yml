@@ -29,8 +29,7 @@ networks:
     egress: allowlist # Tinfoil has no wildcards; list every host by exact name
     allow:
       - keys.fount.sh
-      - acme-v02.api.letsencrypt.org        # ACME production
-      - acme-staging-v02.api.letsencrypt.org
+      - acme-v02.api.letsencrypt.org
       - fount-mail-063207099341.s3.us-east-1.amazonaws.com # mail bucket
       - fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com # Object Lock boot and key logs
       - fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com
@@ -47,6 +46,7 @@ containers:
     env:
       - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
       - MAIL_DOMAIN: "@fountbox.com"
+      - ACME_DIRECTORY: "https://acme-v02.api.letsencrypt.org/directory"
       - S3_BUCKET: "fount-mail-063207099341"
       - S3_BOOT_LOG_BUCKET: "fount-mail-bootlog-063207099341"
       - S3_BACKUP_BUCKET: "fount-mail-routing-backup-063207099341"

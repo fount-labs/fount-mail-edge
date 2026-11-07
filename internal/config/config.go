@@ -32,8 +32,8 @@ const defaultMaxMessageBytes = 25 * 1024 * 1024 // 25 MB, matches the probe's SI
 
 // Let's Encrypt directories. Default to STAGING so development and the first
 // tunnel tests don't burn the production rate limit (5 certs/week per exact name
-// set). Set ACME_DIRECTORY to the production URL at deploy — real senders reject
-// staging certs.
+// set). A release must set ACME_DIRECTORY to the production URL, because real
+// senders reject staging certs; Load refuses to boot one that doesn't.
 const (
 	acmeStaging    = "https://acme-staging-v02.api.letsencrypt.org/directory"
 	acmeProduction = "https://acme-v02.api.letsencrypt.org/directory"
@@ -126,6 +126,9 @@ func Load() (*Config, error) {
 
 	if len(c.MailHostnames) == 0 {
 		return nil, fmt.Errorf("MAIL_HOSTNAMES is empty")
+	}
+	if !dev && c.ACMEDirectory == acmeStaging {
+		return nil, fmt.Errorf("ACME_DIRECTORY is Let's Encrypt staging: senders refuse those certificates, so a release must set the production directory")
 	}
 	// A release with no pins would leave the tunnelled ports open to any tk_ key,
 	// so it's fatal. Only a dev boot may run them in the clear.
