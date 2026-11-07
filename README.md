@@ -33,32 +33,37 @@ Device API, §17 build/release). This repo realises M2 build steps 2–3.
   `method · path · sha256(body) · timestamp · nonce`, so a captured request can't
   be replayed.
 
-## Status — M2 steps 2–3
+## Status — M2 edge
 
 Real and exercised now:
 
 - boot sequence, attested-key loading, fail-fast secret validation;
-- the SMTP state machine (PROXY → mandatory STARTTLS → recipient/size checks);
-- the full Device API route table with real signature verification (timestamp
-  window + nonce replay cache + Ed25519), handlers stubbed at `501`;
-- **ACME (RFC 8555, HTTP-01)** for the attested TLS key: the keyserver's
-  CAA-pinned account key signs the order, the attested `mail-tls` key is the
-  cert key, the challenge is served on the ACME port the gateway forwards from
-  port 80. Issuance waits for gateway reachability, then 15s, then retries with
-  backoff; the issued cert is cached (disk in dev, S3 in prod). Exercised
-  end-to-end against a mock ACME server (`internal/acme`);
+- the SMTP state machine (mutual TLS → PROXY → mandatory STARTTLS →
+  recipient/size checks), with per-IP and per-sender byte budgets;
+- the full Device API with real signature verification (timestamp window + nonce
+  replay cache + Ed25519), including mailbox creation, the write path, and
+  passkey recovery;
+- **ACME (RFC 8555, HTTP-01)** for the attested TLS key, with one certificate
+  covering both MX names. The keyserver's CAA-pinned account key signs the order,
+  the attested `mail-tls` key is the cert key, and the certificate is cached (disk
+  in dev, chain-only S3 in prod). Exercised end-to-end against a mock ACME server;
+- **HPKE-to-address storage over S3**, the per-mailbox quota, the 30-day retention
+  sweep with signed expiry records, routing data with signed backups, and the boot
+  and key logs in their own Object Lock bucket;
+- **gateway mutual TLS** on the SMTP and ACME ports, with client keys pinned in
+  the attested config, tested against a local HAProxy 2.8;
 - the **gateway** CloudFormation stack (`gateway/`) adapted from the proven
   port-25 probe;
 - reproducible `FROM scratch` build + the two Tinfoil release workflows + a
   two-runner digest-comparison CI, present from the first commit.
 
-Clearly-marked seams, not yet built:
+Not yet built or tested:
 
-- **S3 cert cache** (`certs.DiskCache` is the dev stand-in) and **`shim.authenticated`
-  + mutual TLS on the tunnel + the live load test** (the infra half of step 3).
-- **HPKE-to-address + S3 storage** and the Device API handlers / key resolver
-  (M2 step 4).
-- **The gateway pins** — marked and listed in `docs/DEV.md`.
+- **`shim.authenticated`, a run through a real tunnel, and the live load test.**
+- **A real upload to the Object Lock bucket.** The first boot is that test.
+- **Full Tinfoil attestation under `GET /boots`**, which today publishes the boot's
+  signing key.
+- **The broker side of the contract**, in `fount-broker`.
 
 ## Develop
 
