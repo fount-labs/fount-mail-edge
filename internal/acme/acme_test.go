@@ -1,6 +1,7 @@
 package acme
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,10 +9,13 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func testAccountPEM(t *testing.T) ([]byte, *ecdsa.PrivateKey) {
@@ -124,5 +128,39 @@ func TestBuildCertEmptyChainErrors(t *testing.T) {
 	_, key := testAccountPEM(t)
 	if _, err := buildCert([]byte("no pem here"), key); err == nil {
 		t.Fatal("expected error for empty chain")
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	for in, want := range map[string]time.Duration{
+		"":                              0,
+		"120":                           2 * time.Minute,
+		"soon":                          0,
+		"Sat, 07 Nov 2026 13:00:00 GMT": time.Hour,
+	} {
+		if got := parseRetryAfter(in, now); got != want {
+			t.Errorf("parseRetryAfter(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestPostCarriesRetryAfter(t *testing.T) {
+	pemBytes, _ := testAccountPEM(t)
+	i, err := NewIssuer(pemBytes, "https://example/dir", NewChallenges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	i.http = srv.Client()
+	i.nonce = "n"
+	_, _, err = i.post(context.Background(), srv.URL, map[string]any{})
+	var asked interface{ RetryAfter() time.Duration }
+	if !errors.As(fmt.Errorf("newOrder: %w", err), &asked) || asked.RetryAfter() != time.Hour {
+		t.Fatalf("err = %v", err)
 	}
 }

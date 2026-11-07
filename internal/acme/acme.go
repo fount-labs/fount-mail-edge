@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -294,11 +295,40 @@ func (i *Issuer) post(ctx context.Context, url string, payload any) (http.Header
 				lastErr = fmt.Errorf("badNonce, retrying")
 				continue
 			}
-			return nil, nil, fmt.Errorf("%s: %d %s", url, res.StatusCode, truncate(body))
+			err := fmt.Errorf("%s: %d %s", url, res.StatusCode, truncate(body))
+			if d := parseRetryAfter(res.Header.Get("Retry-After"), time.Now()); d > 0 {
+				return nil, nil, &retryAfterError{err, d}
+			}
+			return nil, nil, err
 		}
 		return res.Header, body, nil
 	}
 	return nil, nil, fmt.Errorf("%s: %v", url, lastErr)
+}
+
+// retryAfterError is a refusal the CA attached a wait to. The certificate loop finds
+// it through its RetryAfter method.
+type retryAfterError struct {
+	err   error
+	after time.Duration
+}
+
+func (e *retryAfterError) Error() string             { return e.err.Error() }
+func (e *retryAfterError) Unwrap() error             { return e.err }
+func (e *retryAfterError) RetryAfter() time.Duration { return e.after }
+
+// parseRetryAfter reads either form of the header: seconds, or an HTTP date.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 func (i *Issuer) waitValid(ctx context.Context, url string) ([]byte, error) {

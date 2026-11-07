@@ -19,13 +19,13 @@ func (d *DiskCache) paths(host string) (cert, key string) {
 	return filepath.Join(d.dir, host+".cert.pem"), filepath.Join(d.dir, host+".key.pem")
 }
 
-func (d *DiskCache) Load(host string) (*tls.Certificate, bool) {
+func (d *DiskCache) Load(host string) (*tls.Certificate, bool, error) {
 	certPath, keyPath := d.paths(host)
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
-	return &cert, true
+	return &cert, true, nil
 }
 
 func (d *DiskCache) Store(host string, cert *tls.Certificate) error {

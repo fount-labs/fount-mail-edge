@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 // memBlobs is an in-memory stand-in for the S3 client the cache writes to.
@@ -43,7 +45,7 @@ func (b *memBlobs) Get(_ context.Context, key string) ([]byte, error) {
 	}
 	v, ok := b.m[key]
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, store.ErrNotFound
 	}
 	return append([]byte(nil), v...), nil
 }
@@ -99,9 +101,9 @@ func TestS3CacheRoundTrip(t *testing.T) {
 		t.Fatal("cached object has no certificate")
 	}
 
-	cert, ok := c.Load(cacheHost)
-	if !ok {
-		t.Fatal("Load miss after Store")
+	cert, ok, err := c.Load(cacheHost)
+	if err != nil || !ok {
+		t.Fatalf("Load after Store: ok=%v err=%v", ok, err)
 	}
 	if cert.PrivateKey != key {
 		t.Fatal("loaded cert not paired with the attested key")
@@ -122,21 +124,21 @@ func TestS3CacheRejectsForeignKey(t *testing.T) {
 	}
 	// This boot holds a different attested key.
 	newBootKey := newKey(t)
-	if _, ok := NewS3Cache(blobs, newBootKey).Load(cacheHost); ok {
-		t.Fatal("loaded a chain bound to a previous boot's key")
+	if _, ok, err := NewS3Cache(blobs, newBootKey).Load(cacheHost); ok || err != nil {
+		t.Fatalf("a chain bound to a previous boot's key: ok=%v err=%v", ok, err)
 	}
 }
 
-// An absent object and a transient S3 error are both misses (the edge issues),
-// not hard failures.
+// An absent object is a clean miss, so the edge issues. A transient S3 error is not,
+// because the certificate may be there, and issuing would burn a slot.
 func TestS3CacheMisses(t *testing.T) {
 	key := newKey(t)
-	if _, ok := NewS3Cache(newMemBlobs(), key).Load(cacheHost); ok {
-		t.Fatal("empty cache reported a hit")
+	if _, ok, err := NewS3Cache(newMemBlobs(), key).Load(cacheHost); ok || err != nil {
+		t.Fatalf("empty cache: ok=%v err=%v", ok, err)
 	}
 	blobs := newMemBlobs()
 	blobs.err = errors.New("s3 unavailable")
-	if _, ok := NewS3Cache(blobs, key).Load(cacheHost); ok {
-		t.Fatal("transient S3 error reported a hit")
+	if _, ok, err := NewS3Cache(blobs, key).Load(cacheHost); ok || err == nil {
+		t.Fatalf("transient S3 error: ok=%v err=%v", ok, err)
 	}
 }

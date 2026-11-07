@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
+	"errors"
 	"time"
+
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 // Blobs is the subset of the S3 client the certificate cache needs. The real
-// s3.Client satisfies it, so certs stays decoupled from the store/s3 packages.
+// s3.Client satisfies it.
 type Blobs interface {
 	Put(ctx context.Context, key string, data []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
@@ -39,24 +42,28 @@ func NewS3Cache(blobs Blobs, key *ecdsa.PrivateKey) *S3Cache {
 func (c *S3Cache) objectKey(host string) string { return "edge/certs/" + host + ".pem" }
 
 // Load returns the cached certificate for host paired with the attested key, or
-// a miss. Any fetch or decode failure is a miss (the edge then issues), as is a
-// chain whose leaf doesn't match the current key.
-func (c *S3Cache) Load(host string) (*tls.Certificate, bool) {
+// a miss. An absent object, an unreadable chain, and a chain whose leaf doesn't
+// match the current key are all misses, which the edge answers by issuing. A failed
+// fetch is an error, because the certificate may well be there.
+func (c *S3Cache) Load(host string) (*tls.Certificate, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 	pemBytes, err := c.blobs.Get(ctx, c.objectKey(host))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, false // absent or transient: treat as a miss and issue
+		return nil, false, err
 	}
 	chain, leaf, err := parseChainPEM(pemBytes)
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	leafKey, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || !leafKey.Equal(&c.key.PublicKey) {
-		return nil, false // a prior boot's chain; this boot holds a different key
+		return nil, false, nil // a prior boot's chain; this boot holds a different key
 	}
-	return &tls.Certificate{Certificate: chain, PrivateKey: c.key, Leaf: leaf}, true
+	return &tls.Certificate{Certificate: chain, PrivateKey: c.key, Leaf: leaf}, true, nil
 }
 
 // Store writes the certificate chain (no key) for host, overwriting any prior
