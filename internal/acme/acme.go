@@ -223,7 +223,11 @@ func (i *Issuer) loadDirectory(ctx context.Context) error {
 	return json.NewDecoder(res.Body).Decode(&i.dirCache)
 }
 
+// register finds or creates the account. It can run again after a failed Issue,
+// and newAccount must always be signed with the jwk (RFC 8555 §6.2), so it clears
+// any kid left by the earlier attempt.
 func (i *Issuer) register(ctx context.Context) error {
+	i.kid = ""
 	hdr, _, err := i.post(ctx, i.dirCache["newAccount"], map[string]any{"termsOfServiceAgreed": true})
 	if err != nil {
 		return err

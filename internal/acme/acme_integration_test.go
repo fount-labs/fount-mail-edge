@@ -1,6 +1,7 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,14 +12,92 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// requireJWK fails a newAccount request not signed with the jwk, as a real CA does
+// (RFC 8555 §6.2). r's body is left readable.
+func requireJWK(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var jws struct {
+		Protected string `json:"protected"`
+	}
+	if err := json.Unmarshal(body, &jws); err != nil {
+		t.Error(err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(jws.Protected)
+	if err != nil {
+		t.Error(err)
+	}
+	var protected map[string]any
+	if err := json.Unmarshal(raw, &protected); err != nil {
+		t.Error(err)
+	}
+	_, hasKid := protected["kid"]
+	_, hasJWK := protected["jwk"]
+	if hasKid || !hasJWK {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"urn:ietf:params:acme:error:malformed"}`))
+		return false
+	}
+	return true
+}
+
+// A failed Issue leaves the account's kid behind. The retry must still sign
+// newAccount with the jwk, or the edge can't get a certificate until it restarts.
+func TestRetryAfterFailureSignsNewAccountWithJWK(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dir", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"newNonce": base + "/nonce", "newAccount": base + "/acct", "newOrder": base + "/neworder",
+		})
+	})
+	mux.HandleFunc("HEAD /nonce", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Replay-Nonce", "n")
+	})
+	mux.HandleFunc("POST /acct", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Replay-Nonce", "n")
+		if !requireJWK(t, w, r) {
+			return
+		}
+		w.Header().Set("Location", base+"/acct/1")
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /neworder", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Replay-Nonce", "n")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+
+	accountPEM, _ := testAccountPEM(t)
+	issuer, err := NewIssuer(accountPEM, base+"/dir", NewChallenges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	for attempt := range 2 {
+		_, err := issuer.Issue(context.Background(), []string{"mx1.fountbox.test"}, certKey)
+		if err == nil || !strings.Contains(err.Error(), "newOrder") {
+			t.Fatalf("attempt %d: err = %v, want a newOrder failure", attempt, err)
+		}
+	}
+}
 
 // A compact, compliant-enough ACME server to drive the client through a full
 // order: directory -> nonce -> account -> order -> authz -> challenge ->
@@ -72,8 +151,11 @@ func TestIssueEndToEndAgainstMockACME(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("HEAD /nonce", func(w http.ResponseWriter, _ *http.Request) { nonce(w); w.WriteHeader(200) })
-	mux.HandleFunc("POST /acct", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /acct", func(w http.ResponseWriter, r *http.Request) {
 		nonce(w)
+		if !requireJWK(t, w, r) {
+			return
+		}
 		w.Header().Set("Location", base+"/acct/1")
 		w.WriteHeader(201)
 		_, _ = w.Write([]byte(`{}`))
