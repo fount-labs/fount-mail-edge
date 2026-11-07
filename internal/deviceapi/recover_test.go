@@ -458,3 +458,39 @@ func TestRecoverRotatesTheMailboxKeyOnEveryAddress(t *testing.T) {
 		t.Fatalf("old key through the worker's id: want 401, got %d: %s", old.Code, old.Body.String())
 	}
 }
+
+// A challenge approved for one mailbox can't rotate another, even with that other
+// mailbox's own passkey signing it.
+func TestRecoverChallengeIsBoundToTheMailbox(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, klog := recoverAPI(t, rt)
+	a := createMbox(t, rt, "a@fountbox.com", "lic-1")
+	b := createMbox(t, rt, "b@fountbox.com", "lic-2")
+
+	body := recoveryBody(t, a, api, freshKeys(t))
+	body.Assertion = passkeyAssertion(t, b.passkeyPriv, body.Challenge, recoverTestRPID, recoverTestOrigin)
+	rec := recoverPost(t, api, b.idHex, body)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(klog.appends) != 0 {
+		t.Fatal("a refused recovery logged a key")
+	}
+}
+
+func TestRecoverRejectsABadKeyChainSignature(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, _ := recoverAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+
+	nk := freshKeys(t)
+	body := recoveryBody(t, mb, api, nk)
+	body.KeyChainSig = ed25519.Sign(freshKeys(t).mboxPriv, nk.chain())
+	rec := recoverPost(t, api, mb.idHex, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if snap, _ := rt.Snapshot(mb.id); bytes.Equal(snap.MailboxKey, nk.mboxPub) {
+		t.Fatal("keys rotated on a bad key chain signature")
+	}
+}

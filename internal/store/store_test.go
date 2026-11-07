@@ -874,3 +874,30 @@ func TestGaps(t *testing.T) {
 		t.Fatalf("rest = %d", len(rest))
 	}
 }
+
+// An id comes from the request path, so it can't be allowed to leave its prefix.
+func TestCraftedIDsStayInTheirPrefix(t *testing.T) {
+	ctx := context.Background()
+	blobs := newMemBlobs()
+	s, dir := sweepBox(t, blobs)
+	mailbox := dir.mailboxID("a@fountbox.com")
+	const crafted = "../../routing/current"
+	mailKey := mailObjectKey(mailbox, crafted)
+	bootKey := bootObjectKey(crafted)
+	blobs.objs[mailKey] = []byte("secret")
+	blobs.objs[bootKey] = []byte(`{"boot_id":"x"}`)
+
+	r := s.(MailReader)
+	if _, err := r.Get(ctx, mailbox, crafted); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get err = %v", err)
+	}
+	if err := r.Delete(ctx, mailbox, crafted); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete err = %v", err)
+	}
+	if _, ok := blobs.objs[mailKey]; !ok {
+		t.Fatal("Delete reached outside the mailbox")
+	}
+	if _, err := s.(BootStore).ReadBoot(ctx, crafted); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ReadBoot err = %v", err)
+	}
+}

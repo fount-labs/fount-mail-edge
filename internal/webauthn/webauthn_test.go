@@ -37,9 +37,14 @@ func newCredential(tb testing.TB) credential {
 // signature over SHA256(authData || SHA256(clientDataJSON)).
 func (c credential) assert(tb testing.TB, challenge []byte, flags byte) Assertion {
 	tb.Helper()
+	return c.assertType(tb, "webauthn.get", challenge, flags)
+}
+
+func (c credential) assertType(tb testing.TB, typ string, challenge []byte, flags byte) Assertion {
+	tb.Helper()
 	cdj := []byte(fmt.Sprintf(
-		`{"type":"webauthn.get","challenge":"%s","origin":"%s","crossOrigin":false}`,
-		base64.RawURLEncoding.EncodeToString(challenge), c.origin))
+		`{"type":"%s","challenge":"%s","origin":"%s","crossOrigin":false}`,
+		typ, base64.RawURLEncoding.EncodeToString(challenge), c.origin))
 	rpHash := sha256.Sum256([]byte(testRPID))
 	authData := append(rpHash[:], flags, 0, 0, 0, 1)
 
@@ -109,6 +114,18 @@ func TestVerifyRejections(t *testing.T) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// A registration ceremony's signature must not pass as a login. The real signature
+// here covers the wrong type, so this reaches the type check.
+func TestVerifyRejectsARegistration(t *testing.T) {
+	c := newCredential(t)
+	ch := make([]byte, 32)
+	rand.Read(ch)
+	a := c.assertType(t, "webauthn.create", ch, flagUserPresent|flagUserVerified)
+	if err := Verify(c.sec1, a, ch, testRPID, c.origin); !errors.Is(err, ErrWrongType) {
+		t.Fatalf("got %v, want %v", err, ErrWrongType)
 	}
 }
 

@@ -29,6 +29,10 @@ mistaken for a new deployment. Before the first release, run `cmd/routing-init`
 once with the keyserver's `ROUTING_DATA_KEY` and S3 credentials. It never replaces
 an object that exists. To put a lost object back, follow `docs/RESTORE.md`.
 
+`abuse@` and `postmaster@` must exist before real mail, and the Device API refuses
+those names. Run `cmd/routing-provision` once for each, with the public keys of the
+device that reads them.
+
 ## Release (two-phase, matches the proven workflow)
 
 1. **Tag** via the GitHub *Tinfoil Release* workflow. It pushes the tag and

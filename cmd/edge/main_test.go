@@ -2,14 +2,26 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
+	"github.com/fount-labs/fount-mail-edge/internal/config"
+	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
+	"github.com/fount-labs/fount-mail-edge/internal/keys"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
@@ -95,5 +107,73 @@ func TestPublishBootGivesUpLoudly(t *testing.T) {
 	}
 	if b.calls != 3 {
 		t.Fatalf("calls = %d", b.calls)
+	}
+}
+
+func testKeys(t *testing.T) *keys.Keys {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name string, key any) {
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+		if err := os.WriteFile(filepath.Join(path, "private_key.pem"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tlsKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sign, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("mail-tls", tlsKey)
+	write("mail-sign", sign)
+	k, err := keys.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// A tunnel without a pinned client key can't reach SMTP, or anyone with a tk_ key
+// could write a PROXY header naming a fake sender.
+func TestTunnelRefusesAPlainConnection(t *testing.T) {
+	cfg := &config.Config{GatewayPins: []gatewaytls.Pin{{1}}}
+	ln, err := tunnelListener(cfg, testKeys(t), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			got <- err
+			return
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, err = c.Read(make([]byte, 64))
+		got <- err
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("PROXY TCP4 198.51.100.7 203.0.113.1 40000 25\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-got; err == nil {
+		t.Fatal("the edge read plaintext from a tunnel with no client key")
 	}
 }

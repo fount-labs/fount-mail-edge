@@ -865,3 +865,42 @@ func TestTrickleHitsTheSessionLimit(t *testing.T) {
 	}
 	t.Fatal("the connection outlived its limit")
 }
+
+// Anything over the line cap ends the connection rather than running as a command.
+func TestOverlongCommandDropped(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{}, 4096)
+	c := dial(t, addr)
+	c.send("NOOP %s", strings.Repeat("A", maxLineBytes-len("NOOP \r\n")))
+	c.expect("250")
+	c.send("NOOP %s", strings.Repeat("A", maxLineBytes-len("NOOP \r\n")+1))
+	c.expectClosed(t)
+}
+
+// A command line must end in CRLF with no other CR or LF, or a sender and the edge
+// could disagree about where one command ends.
+func TestBareNewlinesInCommandsDropped(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{}, 4096)
+	for _, line := range []string{"NOOP\n", "NO\rOP\r\n", "NOOP\nNOOP\r\n"} {
+		c := dial(t, addr)
+		fmt.Fprint(c.conn, line)
+		c.expectClosed(t)
+	}
+}
+
+// Bytes sent in the clear behind STARTTLS must not run as commands inside TLS. A
+// sender can't protect them, so a relay in the path could have put them there.
+func TestCommandsPipelinedBehindSTARTTLSAreDiscarded(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.send("EHLO client.example")
+	c.expect("250")
+	fmt.Fprint(c.conn, "STARTTLS\r\nMAIL FROM:<planted@elsewhere.com>\r\n")
+	c.expect("220")
+	tc := tls.Client(c.conn, &tls.Config{InsecureSkipVerify: true, ServerName: testHostname})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	c.conn, c.r = tc, bufio.NewReader(tc)
+	c.send("RCPT TO:<worker@fountbox.com>")
+	c.expect("503")
+}
