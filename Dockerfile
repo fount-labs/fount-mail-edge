@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.19@sha256:b6afd42430b15f2d2a4c5a02b919e98a525b785b1aaff16747d2f623364e39b6
 # Reproducible, minimal image for the Fount Fleet mail edge (design §17).
 #
 # Goals: a bit-for-bit identical image digest on any machine, and a final image
@@ -5,12 +6,8 @@
 # determinism flags that must match across runners live in scripts/build-image.sh;
 # this Dockerfile is the recipe that script drives.
 #
-# TODO(before first release): pin BOTH the dockerfile frontend and the golang
-# base image by digest, and pin the exact Go patch version to go.mod's. Resolve
-# the digests deliberately (not :latest) and commit them; CI rebuilds on two
-# runners and fails if the resulting image digests differ.
-
-# syntax=docker/dockerfile:1.19@sha256:b6afd42430b15f2d2a4c5a02b919e98a525b785b1aaff16747d2f623364e39b6
+# BuildKit reads the syntax line only at the very top of the file.
+# Bump the frontend, base image, and go.mod's Go version on purpose, together.
 
 FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 WORKDIR /src
