@@ -51,7 +51,7 @@ containers:
       - S3_BOOT_LOG_BUCKET: "fount-mail-bootlog-063207099341"
       - S3_BACKUP_BUCKET: "fount-mail-routing-backup-063207099341"
       - S3_REGION: "us-east-1"
-      - GATEWAY_CLIENT_PINS: "PLACEHOLDER" # one sha256 per gateway; the edge refuses to boot on this value
+      - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
     # Secrets delivered by the keyserver after attestation, injected as env vars.
     # Every name here MUST have a matching entry in policy.yaml's workload, or the
     # workload will not boot — there is no fallback to a Tinfoil-managed secret.
