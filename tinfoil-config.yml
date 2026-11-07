@@ -14,7 +14,7 @@ cvm-version: 0.14.17 # https://github.com/tinfoilsh/cvmimage/releases/latest, no
 cpus: 2
 memory: 8192
 
-keyserver-url: https://keys.fount.sh # PLACEHOLDER — the deployed keyserver host
+keyserver-url: https://keys.fount.sh
 
 # Per-boot keys generated inside the enclave; their public halves are in the
 # attestation, so the keyserver never holds them (design §5 "Edge keys").
@@ -28,7 +28,7 @@ networks:
   edge:
     egress: allowlist # Tinfoil has no wildcards; list every host by exact name
     allow:
-      - keys.fount.sh                       # PLACEHOLDER — the deployed keyserver host
+      - keys.fount.sh
       - acme-v02.api.letsencrypt.org        # ACME production
       - acme-staging-v02.api.letsencrypt.org
       - fount-mail-063207099341.s3.us-east-1.amazonaws.com # mail bucket

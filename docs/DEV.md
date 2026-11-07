@@ -55,7 +55,7 @@ printf 'PROXY TCP4 203.0.113.9 10.0.0.1 1 25\r\n' | nc -w1 localhost 12525   # 4
 
 ## TODO markers to resolve before a real release
 
-- `tinfoil-config.yml`: keyserver host (`keys.fount.sh`), `GATEWAY_CLIENT_PINS`
+- `tinfoil-config.yml`: `GATEWAY_CLIENT_PINS`
   (the edge refuses to boot on the placeholder), and the image digest (set by the
   release workflow).
 - The GitHub org (`fount-labs`) and the pinned deployment domain
