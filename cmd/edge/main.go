@@ -19,6 +19,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -37,6 +38,12 @@ import (
 
 func main() {
 	log.SetFlags(log.LUTC | log.Ldate | log.Ltime | log.Lmicroseconds)
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		if err := healthcheck(config.HealthAddr()); err != nil {
+			log.Fatalf("edge: unhealthy: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("edge: fatal: %v", err)
 	}
@@ -319,6 +326,27 @@ func health(c *certs.Manager) http.Handler {
 		_, _ = w.Write([]byte("certificate not ready\n"))
 	})
 	return mux
+}
+
+// healthcheck is the container's health check. The image is FROM scratch, so it
+// has no curl to call /health with. This checks /health rather than /ready: the
+// certificate depends on the gateways, and a gateway outage isn't a reason to
+// fail a deployment.
+func healthcheck(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	res, err := client.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/health")
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("/health answered %s", res.Status)
+	}
+	return nil
 }
 
 func ignoreClosed(err error) error {

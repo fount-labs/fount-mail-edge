@@ -102,7 +102,7 @@ func Load() (*Config, error) {
 		AttestedKeyDir:    env("ATTESTED_KEY_DIR", "/run/tinfoil/keys"),
 		SMTPAddr:          env("SMTP_ADDR", ":2525"),
 		DeviceAPIAddr:     env("DEVICE_API_ADDR", ":8443"),
-		HealthAddr:        env("HEALTH_ADDR", ":8080"),
+		HealthAddr:        HealthAddr(),
 		ACMEChallengeAddr: env("ACME_CHALLENGE_ADDR", ":8088"),
 		ACMEDirectory:     env("ACME_DIRECTORY", acmeStaging),
 		CertCacheDir:      os.Getenv("CERT_CACHE_DIR"),
@@ -198,6 +198,10 @@ func loadSecrets(dev bool) (Secrets, error) {
 		S3SecretAccessKey:    secret,
 	}, nil
 }
+
+// HealthAddr is the health listener's address. It's separate from Load because
+// the container's health check runs as its own process, with no secrets to load.
+func HealthAddr() string { return env("HEALTH_ADDR", ":8080") }
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
