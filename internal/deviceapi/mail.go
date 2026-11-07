@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
@@ -36,6 +37,37 @@ func (a *API) listMail(mail store.MailReader) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs})
+	})
+}
+
+// listGaps handles GET /gaps?after=<sequence>: the signed records for sequence
+// numbers above after that hold no message. Each is an edge-signed token the broker
+// verifies itself (§9). A full page means there may be more, from its last sequence.
+func (a *API) listGaps() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mailboxID, ok := callerMailbox(r)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "bad key id")
+			return
+		}
+		var after uint64
+		if v := r.URL.Query().Get("after"); v != "" {
+			var err error
+			if after, err = strconv.ParseUint(v, 10, 64); err != nil {
+				writeErr(w, http.StatusBadRequest, "bad after")
+				return
+			}
+		}
+		recs, err := a.gaps.Gaps(r.Context(), mailboxID, after)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "list failed")
+			return
+		}
+		out := make([]string, len(recs))
+		for i, rec := range recs {
+			out[i] = string(rec)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"records": out})
 	})
 }
 

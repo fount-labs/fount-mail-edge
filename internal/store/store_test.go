@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -437,12 +438,12 @@ func TestRetentionSweep(t *testing.T) {
 	blobs.setMod("edge/mail/"+mboxHex+"/"+ids[1], now.Add(-31*24*time.Hour))
 	blobs.setMod("edge/mail/"+mboxHex+"/"+ids[2], now.Add(-1*24*time.Hour)) // fresh
 
-	n, err := sw.Sweep(ctx, now)
+	res, err := sw.Sweep(ctx, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("swept %d, want 2", n)
+	if res.Expired != 2 {
+		t.Fatalf("swept %d, want 2", res.Expired)
 	}
 
 	// The two old messages are gone, the fresh one remains.
@@ -499,8 +500,8 @@ func TestSweepSkipsUndatableAndDisabled(t *testing.T) {
 	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body")); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.(Sweeper).Sweep(ctx, now); err != nil || n != 0 {
-		t.Fatalf("sweep of undatable objects: n=%d err=%v, want 0/nil", n, err)
+	if res, err := s.(Sweeper).Sweep(ctx, now); err != nil || res.Expired != 0 {
+		t.Fatalf("sweep of undatable objects: n=%d err=%v, want 0/nil", res.Expired, err)
 	}
 
 	// Disabled: even a provably-old object is left alone.
@@ -511,8 +512,8 @@ func TestSweepSkipsUndatableAndDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	blobs2.setMod("edge/mail/"+hexStr(dir.mailboxID("a@fountbox.com"))+"/"+id, now.Add(-365*24*time.Hour))
-	if n, err := s2.(Sweeper).Sweep(ctx, now); err != nil || n != 0 {
-		t.Fatalf("disabled sweep: n=%d err=%v, want 0/nil", n, err)
+	if res, err := s2.(Sweeper).Sweep(ctx, now); err != nil || res.Expired != 0 {
+		t.Fatalf("disabled sweep: n=%d err=%v, want 0/nil", res.Expired, err)
 	}
 	if len(blobs2.objs) != 1 {
 		t.Fatalf("disabled sweep deleted objects: %d remain, want 1", len(blobs2.objs))
@@ -630,3 +631,246 @@ func TestLogFailuresAreReported(t *testing.T) {
 type failingLog struct{ *memBlobs }
 
 func (failingLog) Put(context.Context, string, []byte) error { return errors.New("log down") }
+
+// sweepBox is a store with one address, plus what a test needs to age its mail.
+func sweepBox(t *testing.T, blobs Blobs) (Store, *memDir) {
+	t.Helper()
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	bootID := make([]byte, lenBootID)
+	rand.Read(bootID)
+	return New(dir, blobs, mustSign(t), bootID, WithRetention(time.Hour)), dir
+}
+
+// Mail outlives the boot that stored it, so a sweep has to recognise earlier boots.
+func TestSweepExpiresMailFromAnEarlierBoot(t *testing.T) {
+	ctx := context.Background()
+	blobs := newMemBlobs()
+	earlier, dir := sweepBox(t, blobs)
+	if err := earlier.(BootStore).WriteBoot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id, err := earlier.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbox := hexStr(dir.mailboxID("a@fountbox.com"))
+	key := "edge/mail/" + mbox + "/" + id
+	now := time.Now()
+	blobs.setMod(key, now.Add(-2*time.Hour))
+	parsed, err := Parse(blobs.objs[key], earlier.(*realStore).sign.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current := New(dir, blobs, mustSign(t), bytes.Repeat([]byte{7}, lenBootID), WithRetention(time.Hour))
+	res, err := current.(Sweeper).Sweep(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != (SweepResult{Expired: 1}) {
+		t.Fatalf("result = %+v", res)
+	}
+	if _, ok := blobs.objs[key]; ok {
+		t.Fatal("old mail is still stored, and still counts against the quota")
+	}
+	rec, err := ParseExpiryRecord(blobs.objs[expiryKey(mbox, parsed.Sequence)], current.(*realStore).sign.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.MessageBoot != hexStr(parsed.BootID) || rec.BootID == rec.MessageBoot || rec.Reason != ReasonExpired {
+		t.Fatalf("record = %+v", rec)
+	}
+}
+
+func TestSweepSkipsWhatItCantVerify(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	blobs := newMemBlobs()
+	earlier, dir := sweepBox(t, blobs)
+	mbox := hexStr(dir.mailboxID("a@fountbox.com"))
+	put := func() string {
+		t.Helper()
+		id, err := earlier.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "edge/mail/" + mbox + "/" + id
+	}
+	noRecord := put() // earlier never wrote its boot record
+	if err := blobs.Put(ctx, "edge/mail/"+mbox+"/junk", []byte("not a message")); err != nil {
+		t.Fatal(err)
+	}
+	blobs.setMod(noRecord, now.Add(-2*time.Hour))
+	blobs.setMod("edge/mail/"+mbox+"/junk", now.Add(-2*time.Hour))
+
+	current := New(dir, blobs, mustSign(t), bytes.Repeat([]byte{7}, lenBootID), WithRetention(time.Hour))
+	res, err := current.(Sweeper).Sweep(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != (SweepResult{Skipped: 2}) {
+		t.Fatalf("result = %+v", res)
+	}
+	if _, ok := blobs.objs[noRecord]; !ok {
+		t.Fatal("deleted a message it couldn't verify")
+	}
+
+	// A record that names the wrong key verifies nothing either.
+	raw, _ := json.Marshal(Boot{SigningKey: mustSign(t).Public().(ed25519.PublicKey)})
+	bootID, _ := bootIDOf(blobs.objs[noRecord])
+	if err := blobs.Put(ctx, bootObjectKey(hexStr(bootID)), raw); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := current.(Sweeper).Sweep(ctx, now); err != nil || res != (SweepResult{Skipped: 2}) {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+
+	// S3 holds the record, so a short key can't be allowed to crash the sweep.
+	raw, _ = json.Marshal(Boot{SigningKey: []byte{1, 2, 3}})
+	if err := blobs.Put(ctx, bootObjectKey(hexStr(bootID)), raw); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := current.(Sweeper).Sweep(ctx, now); err != nil || res != (SweepResult{Skipped: 2}) {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+}
+
+// A real message filed under another mailbox must not write that mailbox's record.
+func TestSweepSkipsAMessageInTheWrongPlace(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	blobs := newMemBlobs()
+	s, dir := sweepBox(t, blobs)
+	id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbox := hexStr(dir.mailboxID("a@fountbox.com"))
+	moved := "edge/mail/" + strings.Repeat("ab", 32) + "/" + id
+	blobs.objs[moved] = blobs.objs["edge/mail/"+mbox+"/"+id]
+	delete(blobs.objs, "edge/mail/"+mbox+"/"+id)
+	blobs.setMod(moved, now.Add(-2*time.Hour))
+	if res, err := s.(Sweeper).Sweep(ctx, now); err != nil || res != (SweepResult{Skipped: 1}) {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	if _, ok := blobs.objs[expiryKey(mbox, 1)]; ok {
+		t.Fatal("wrote an expiry record for a moved message")
+	}
+}
+
+type mailDown struct {
+	*memBlobs
+	logDown bool
+}
+
+func (b mailDown) Put(ctx context.Context, k string, d []byte) error {
+	if strings.HasPrefix(k, "edge/mail/") || b.logDown {
+		return errors.New("s3 down")
+	}
+	return b.memBlobs.Put(ctx, k, d)
+}
+
+func TestFailedWriteVoidsItsSequence(t *testing.T) {
+	ctx := context.Background()
+	blobs := newMemBlobs()
+	s, dir := sweepBox(t, mailDown{memBlobs: blobs})
+	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body")); err == nil {
+		t.Fatal("Put hid a failed write")
+	}
+	mbox := hexStr(dir.mailboxID("a@fountbox.com"))
+	rec, err := ParseExpiryRecord(blobs.objs[expiryKey(mbox, 1)], s.(*realStore).sign.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatalf("no void record: %v", err)
+	}
+	if rec.Reason != ReasonVoid || rec.Sequence != 1 || rec.MailboxID != mbox {
+		t.Fatalf("record = %+v", rec)
+	}
+}
+
+func TestFailedVoidIsReportedWithTheCause(t *testing.T) {
+	blobs := mailDown{memBlobs: newMemBlobs(), logDown: true}
+	s, _ := sweepBox(t, blobs)
+	if _, err := s.Put(context.Background(), "a@fountbox.com", "x@y.com", []byte("body")); err == nil || strings.Count(err.Error(), "s3 down") != 2 {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+type ctxCheckingBlobs struct{ *memBlobs }
+
+func (b ctxCheckingBlobs) Put(ctx context.Context, k string, d []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return b.memBlobs.Put(ctx, k, d)
+}
+
+type cancelOnSequence struct {
+	Directory
+	cancel context.CancelFunc
+	seen   error
+}
+
+func (d *cancelOnSequence) NextSequence(ctx context.Context, id []byte) (uint64, error) {
+	d.cancel()
+	d.seen = ctx.Err()
+	return d.Directory.NextSequence(ctx, id)
+}
+
+// Shutdown cancels the session, and a sequence that's been spent has to reach S3.
+func TestSessionEndingDoesntStopTheWrite(t *testing.T) {
+	macKey := make([]byte, 32)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &cancelOnSequence{Directory: dir, cancel: cancel}
+	blobs := ctxCheckingBlobs{newMemBlobs()}
+	s := New(d, blobs, mustSign(t), make([]byte, lenBootID))
+	id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, ok := blobs.objs["edge/mail/"+hexStr(dir.mailboxID("a@fountbox.com"))+"/"+id]; !ok {
+		t.Fatal("message not stored")
+	}
+	if d.seen != nil {
+		t.Fatalf("the sequence write inherited the session's end: %v", d.seen)
+	}
+}
+
+func TestGaps(t *testing.T) {
+	ctx := context.Background()
+	blobs := newMemBlobs()
+	s, dir := sweepBox(t, blobs)
+	mailbox := dir.mailboxID("a@fountbox.com")
+	mbox := hexStr(mailbox)
+	for seq := uint64(1); seq <= MaxGaps+5; seq++ {
+		if err := blobs.Put(ctx, expiryKey(mbox, seq), []byte(strconv.FormatUint(seq, 10))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := blobs.Put(ctx, expiryPrefix(mbox)+"not-a-number", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := blobs.Put(ctx, expiryKey(strings.Repeat("ab", 32), 1), []byte("other mailbox")); err != nil {
+		t.Fatal(err)
+	}
+	g := s.(GapReader)
+	first, err := g.Gaps(ctx, mailbox, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != MaxGaps || string(first[0]) != "1" || string(first[9]) != "10" {
+		t.Fatalf("got %d, first %q, tenth %q", len(first), first[0], first[9])
+	}
+	rest, err := g.Gaps(ctx, mailbox, MaxGaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 5 || string(rest[0]) != strconv.Itoa(MaxGaps+1) {
+		t.Fatalf("rest = %d", len(rest))
+	}
+}

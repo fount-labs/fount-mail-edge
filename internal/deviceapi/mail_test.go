@@ -3,10 +3,13 @@ package deviceapi
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,4 +174,62 @@ func TestMailBadKeyIDShape(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 for bad key id shape, got %d", rec.Code)
 	}
+}
+
+func TestGetGaps(t *testing.T) {
+	rt, blobs := newRoutingStore(t)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+	other := createMbox(t, rt, "other@fountbox.com", "lic-2")
+	failing := failPuts{blobs}
+	_, sign, _ := ed25519.GenerateKey(rand.Reader)
+	st := store.New(rt, failing, sign, make([]byte, 16))
+	if _, err := st.Put(context.Background(), "worker@fountbox.com", "x@y.com", []byte("body")); err == nil {
+		t.Fatal("want a failed write")
+	}
+	api := New(Options{Store: st, Resolver: NewKeyResolver(rt), Mutator: rt, MailDomain: "@fountbox.com"})
+
+	get := func(m mbox, path, nonce string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := signedRequest(t, m.sign, m.idHex, "GET", "/gaps", nil, time.Now(), nonce)
+		req.URL.RawQuery = strings.TrimPrefix(path, "?")
+		api.ServeHTTP(rec, req)
+		return rec
+	}
+	var out struct {
+		Records []string `json:"records"`
+	}
+	rec := get(mb, "", "g1")
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if len(out.Records) != 1 {
+		t.Fatalf("records = %d", len(out.Records))
+	}
+	got, err := store.ParseExpiryRecord([]byte(out.Records[0]), sign.Public().(ed25519.PublicKey))
+	if err != nil || got.Reason != store.ReasonVoid || got.Sequence != 1 {
+		t.Fatalf("record %+v, %v", got, err)
+	}
+	if rec := get(mb, "?after=1", "g2"); !strings.Contains(rec.Body.String(), `"records":[]`) {
+		t.Fatalf("after=1: %s", rec.Body.String())
+	}
+	if rec := get(other, "", "g3"); !strings.Contains(rec.Body.String(), `"records":[]`) {
+		t.Fatalf("another mailbox saw this one's records: %s", rec.Body.String())
+	}
+	if rec := get(mb, "?after=x", "g4"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad after: %d", rec.Code)
+	}
+	unsigned := httptest.NewRecorder()
+	api.ServeHTTP(unsigned, signedRequest(t, mb.owner, mb.idHex, "GET", "/gaps", nil, time.Now(), "g5"))
+	if unsigned.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong key: %d", unsigned.Code)
+	}
+}
+
+type failPuts struct{ *memBlobs }
+
+func (b failPuts) Put(ctx context.Context, k string, d []byte) error {
+	if strings.HasPrefix(k, "edge/mail/") {
+		return errors.New("s3 down")
+	}
+	return b.memBlobs.Put(ctx, k, d)
 }

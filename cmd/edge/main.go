@@ -266,16 +266,32 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 	}
 	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", cfg.S3EndpointURL(), bootID)
 	st := store.New(rt, blobs, k.Sign, bootID, store.WithLogBlobs(logBlobs))
-	// Publish this boot's attestation (§9) so the broker can check stored
-	// messages' signatures against it, even after this enclave is gone. A failure
-	// here is loud but not fatal: the edge can still serve mail, and the broker
-	// alerts on a missing attestation.
 	if bs, ok := st.(store.BootStore); ok {
-		if err := bs.WriteBoot(context.Background()); err != nil {
-			log.Printf("edge: WARNING could not publish boot attestation (boot-id=%x): %v", bootID, err)
+		if err := publishBoot(context.Background(), bs, bootRetries); err != nil {
+			return nil, nil, fmt.Errorf("publish boot attestation (boot-id=%x): %w", bootID, err)
 		}
 	}
 	return st, rt, nil
+}
+
+// bootRetries are the waits between tries at the boot record, about a minute in all.
+var bootRetries = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second}
+
+// publishBoot writes this boot's attestation (§9) before any mail is accepted. The
+// broker checks stored messages' signatures against it, even after this enclave is
+// gone, so mail from a boot without one can't be verified. If it keeps failing the
+// edge exits, and the restart policy tries again.
+func publishBoot(ctx context.Context, bs store.BootStore, retries []time.Duration) error {
+	err := bs.WriteBoot(ctx)
+	for _, wait := range retries {
+		if err == nil {
+			return nil
+		}
+		log.Printf("edge: boot attestation not written, retrying in %s: %v", wait, err)
+		time.Sleep(wait)
+		err = bs.WriteBoot(ctx)
+	}
+	return err
 }
 
 // newBlobs builds an S3 client for one bucket. It fails if the endpoint is empty,
@@ -338,13 +354,15 @@ func startRetentionSweep(ctx context.Context, st store.Store) {
 		return
 	}
 	run := func() {
-		n, err := sweeper.Sweep(ctx, time.Now())
+		res, err := sweeper.Sweep(ctx, time.Now())
 		if err != nil {
 			log.Printf("edge: retention sweep error: %v", err)
-			return
 		}
-		if n > 0 {
-			log.Printf("edge: retention sweep expired %d message(s)", n)
+		if res.Expired > 0 {
+			log.Printf("edge: retention sweep expired %d message(s)", res.Expired)
+		}
+		if res.Skipped > 0 {
+			log.Printf("edge: WARNING retention sweep skipped %d message(s) it couldn't verify", res.Skipped)
 		}
 	}
 	run()

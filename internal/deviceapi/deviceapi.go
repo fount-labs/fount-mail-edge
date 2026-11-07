@@ -127,6 +127,7 @@ var routes = map[string]route{
 	"GET /mail":          {sigAddress, "M2", "Lists waiting messages"},
 	"GET /mail/{id}":     {sigAddress, "M2", "Returns a message and its signature"},
 	"DELETE /mail/{id}":  {sigAddress, "M2", "Confirms receipt and deletes"},
+	"GET /gaps":          {sigAddress, "M2", "Lists signed records for sequence numbers with no message"},
 	"GET /boots/{id}":    {sigNone, "M2", "Returns a boot's attestation"},
 	"GET /recover/{id}":  {sigNone, "M2", "Issues a recovery challenge bound to a mailbox and new keys (§5)"},
 	"POST /recover":      {sigPasskey, "M2", "Accepts a new mailbox key after a lost device (§5)"},
@@ -194,6 +195,7 @@ type API struct {
 	recoverOrigin string
 	recoverKey    []byte // per-boot HMAC key for stateless recovery challenges
 	keylog        store.KeyLog
+	gaps          store.GapReader
 	nonces        *nonceCache
 	handleLimiter *limit.Limiter
 }
@@ -222,6 +224,7 @@ func New(o Options) *API {
 	mail, _ := o.Store.(store.MailReader) // nil in dev (discard store) -> routes stay 501
 	boots, _ := o.Store.(store.BootStore) // same
 	a.keylog, _ = o.Store.(store.KeyLog)  // same; nil leaves POST /recover 501
+	a.gaps, _ = o.Store.(store.GapReader) // same
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail, boots)))
 	}
@@ -240,6 +243,8 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.getMail(mail)
 	case mail != nil && pattern == "DELETE /mail/{id}":
 		return a.deleteMail(mail)
+	case a.gaps != nil && pattern == "GET /gaps":
+		return a.listGaps()
 	case a.provisioner != nil && pattern == "POST /mailbox":
 		return a.createMailbox()
 	case a.provisioner != nil && pattern == "GET /handle/{name}":

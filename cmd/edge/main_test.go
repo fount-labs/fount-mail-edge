@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 func TestHealthcheckFollowsHealthRoute(t *testing.T) {
@@ -58,5 +62,38 @@ func TestForwarderNeedsRoutes(t *testing.T) {
 	t.Setenv("EGRESS_ROUTES", "")
 	if err := forward(); err == nil || !strings.Contains(err.Error(), "EGRESS_ROUTES") {
 		t.Fatalf("forward() err = %v", err)
+	}
+}
+
+type flakyBoots struct {
+	store.BootStore
+	failures, calls int
+}
+
+func (b *flakyBoots) WriteBoot(context.Context) error {
+	b.calls++
+	if b.calls <= b.failures {
+		return errors.New("s3 down")
+	}
+	return nil
+}
+
+func TestPublishBootRetries(t *testing.T) {
+	b := &flakyBoots{failures: 2}
+	if err := publishBoot(context.Background(), b, []time.Duration{0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if b.calls != 3 {
+		t.Fatalf("calls = %d", b.calls)
+	}
+}
+
+func TestPublishBootGivesUpLoudly(t *testing.T) {
+	b := &flakyBoots{failures: 99}
+	if err := publishBoot(context.Background(), b, []time.Duration{0, 0}); err == nil {
+		t.Fatal("publishBoot hid a boot with no record")
+	}
+	if b.calls != 3 {
+		t.Fatalf("calls = %d", b.calls)
 	}
 }

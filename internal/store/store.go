@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -164,10 +166,31 @@ type KeyLog interface {
 // dev has no sweep.
 type Sweeper interface {
 	// Sweep deletes every message older than the retention window as of now,
-	// writing a signed expiry record for each before it deletes the message, and
-	// returns how many it expired.
-	Sweep(ctx context.Context, now time.Time) (expired int, err error)
+	// writing a signed expiry record for each before it deletes the message.
+	Sweep(ctx context.Context, now time.Time) (SweepResult, error)
 }
+
+// SweepResult counts one sweep. Skipped messages are past the window but couldn't
+// be verified, so they stay until the bucket's lifecycle rule removes them, and a
+// nonzero count needs a look.
+type SweepResult struct {
+	Expired, Skipped int
+}
+
+// GapReader returns the signed records for sequence numbers that have no message,
+// so the broker can tell them from withheld mail (§8). realStore implements it; the
+// discard store does not, so GET /gaps stays 501 in dev.
+type GapReader interface {
+	// Gaps returns up to MaxGaps records above sequence after, lowest first.
+	Gaps(ctx context.Context, mailboxID []byte, after uint64) ([][]byte, error)
+}
+
+// MaxGaps bounds one GET /gaps. The broker pages by the last sequence it saw.
+const MaxGaps = 256
+
+// storeBudget bounds finishing a message once its sequence is spent, on a context
+// of its own. S3 calls take at most 30 seconds, and there are at most two.
+const storeBudget = 60 * time.Second
 
 type realStore struct {
 	dir        Directory
@@ -229,13 +252,19 @@ func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byt
 		}
 	}
 
-	seq, err := s.dir.NextSequence(ctx, addr.MailboxID)
-	if err != nil {
-		return "", fmt.Errorf("sequence: %w", err)
-	}
 	edgeID := make([]byte, lenEdgeID)
 	if _, err := rand.Read(edgeID); err != nil {
 		return "", err
+	}
+
+	// A sequence with no message looks like withheld mail (§8). So from here a
+	// session ending can't stop the write, and a failed write leaves a signed void
+	// record. A crash can still leave a gap, and that's what the broker's check is for.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeBudget)
+	defer cancel()
+	seq, err := s.dir.NextSequence(ctx, addr.MailboxID)
+	if err != nil {
+		return "", fmt.Errorf("sequence: %w", err)
 	}
 
 	msg := &Message{
@@ -247,15 +276,32 @@ func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byt
 		BootID:     s.bootID,
 	}
 	if err := msg.seal(addr.PublicKey, sender, recipient, raw); err != nil {
-		return "", fmt.Errorf("seal: %w", err)
+		return "", s.void(ctx, msg, fmt.Errorf("seal: %w", err))
 	}
 
 	// edge/mail/<mailbox id>/<edge id> (design §4 S3 layout).
 	key := mailObjectKey(addr.MailboxID, hex.EncodeToString(edgeID))
 	if err := s.blobs.Put(ctx, key, msg.MarshalSigned(s.sign)); err != nil {
-		return "", fmt.Errorf("blob put: %w", err)
+		return "", s.void(ctx, msg, fmt.Errorf("blob put: %w", err))
 	}
 	return hex.EncodeToString(edgeID), nil
+}
+
+// void records that msg's sequence will never hold a message, and returns cause
+// along with any failure to say so. The sender got a temporary failure and will
+// retry, under a new sequence.
+func (s *realStore) void(ctx context.Context, msg *Message, cause error) error {
+	boot := hex.EncodeToString(s.bootID)
+	return errors.Join(cause, s.writeRecord(ctx, ExpiryRecord{
+		MailboxID:   hex.EncodeToString(msg.MailboxID),
+		EdgeID:      hex.EncodeToString(msg.EdgeID),
+		Sequence:    msg.Sequence,
+		ReceivedAt:  msg.ReceivedAt.UnixMilli(),
+		ExpiredAt:   s.now().UTC().Unix(),
+		BootID:      boot,
+		MessageBoot: boot,
+		Reason:      ReasonVoid,
+	}))
 }
 
 func mailboxPrefix(mailboxID []byte) string {
@@ -400,42 +446,88 @@ func (s *realStore) AppendMailboxKeyHash(ctx context.Context, mailboxIDHex strin
 
 // --- Retention sweep (design §6) -------------------------------------------
 
-// ExpiryRecord is what the edge writes when the sweep deletes an unfetched
-// message. The sender already got a 250 and the edge can't read who they were,
-// so this tells the broker which per-mailbox sequence number expired — turning
-// what would otherwise look like withheld mail (a gap in the counter, §8) into
-// an accountable expiry the app can report to the owner. Signed by the boot's
-// mail-sign key, so the broker trusts it against that boot's attestation (§9).
+// ExpiryRecord accounts for a sequence number with no message. ReasonExpired means
+// the sweep deleted an unfetched message: the sender already got a 250 and the edge
+// can't read who they were, so this is what the app can report to the owner.
+// ReasonVoid means the sequence was spent but the message was never stored, and the
+// sender was told to retry. Either way, what would otherwise look like withheld mail
+// (a gap in the counter, §8) is accountable. Signed by the boot's mail-sign key, so
+// the broker trusts it against that boot's attestation (§9).
 type ExpiryRecord struct {
 	MailboxID  string `json:"mailbox_id"`  // hex
 	EdgeID     string `json:"edge_id"`     // hex
-	Sequence   uint64 `json:"sequence"`    // the per-mailbox number that expired
+	Sequence   uint64 `json:"sequence"`    // the per-mailbox number with no message
 	ReceivedAt int64  `json:"received_at"` // unix ms, from the message header
-	ExpiredAt  int64  `json:"expired_at"`  // unix seconds, when the sweep ran
-	BootID     string `json:"boot_id"`     // hex boot that swept it (whose key signs)
+	ExpiredAt  int64  `json:"expired_at"`  // unix seconds, when this was written
+	BootID     string `json:"boot_id"`     // hex boot that wrote this (whose key signs)
+
+	// MessageBoot is the boot that signed the message. The sweep finds that boot's
+	// key in S3, which the host could plant, so the broker must check this boot
+	// against the boot log before trusting an expiry.
+	MessageBoot string `json:"message_boot"`
+	Reason      string `json:"reason"` // ReasonExpired or ReasonVoid
 }
+
+const (
+	ReasonExpired = "expired"
+	ReasonVoid    = "void"
+)
+
+func expiryPrefix(mailboxIDHex string) string { return "edge/expiry/" + mailboxIDHex + "/" }
 
 func expiryKey(mailboxIDHex string, seq uint64) string {
-	return fmt.Sprintf("edge/expiry/%s/%d", mailboxIDHex, seq)
+	return expiryPrefix(mailboxIDHex) + strconv.FormatUint(seq, 10)
 }
 
-// Sweep expires mail past the retention window. For each too-old object it reads
-// the header to recover the mailbox id and sequence, writes the signed expiry
-// record FIRST, then deletes the message — so a message is never deleted without
-// an expiry record (which would reopen the false-withheld-mail gap). It is
-// idempotent: the expiry record key is the mailbox id + sequence, so a retried
-// sweep rewrites the same record and retries the delete.
-func (s *realStore) Sweep(ctx context.Context, now time.Time) (int, error) {
+// Gaps implements GapReader.
+func (s *realStore) Gaps(ctx context.Context, mailboxID []byte, after uint64) ([][]byte, error) {
+	prefix := expiryPrefix(hex.EncodeToString(mailboxID))
+	objs, err := s.blobs.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	var seqs []uint64
+	for _, o := range objs {
+		seq, err := strconv.ParseUint(strings.TrimPrefix(o.Key, prefix), 10, 64)
+		if err == nil && seq > after {
+			seqs = append(seqs, seq)
+		}
+	}
+	slices.Sort(seqs)
+	if len(seqs) > MaxGaps {
+		seqs = seqs[:MaxGaps]
+	}
+	out := make([][]byte, 0, len(seqs))
+	for _, seq := range seqs {
+		raw, err := s.blobs.Get(ctx, prefix+strconv.FormatUint(seq, 10))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, raw)
+	}
+	return out, nil
+}
+
+// Sweep expires mail past the retention window. For each too-old object it verifies
+// the message against the boot that signed it, writes the signed expiry record
+// FIRST, then deletes the message — so a message is never deleted without an expiry
+// record (which would reopen the false-withheld-mail gap). A message that doesn't
+// verify is skipped and counted. It is idempotent: the expiry record key is the
+// mailbox id + sequence, so a retried sweep rewrites the same record and retries the
+// delete.
+func (s *realStore) Sweep(ctx context.Context, now time.Time) (SweepResult, error) {
+	var res SweepResult
 	if s.retention <= 0 {
-		return 0, nil
+		return res, nil
 	}
 	objs, err := s.blobs.List(ctx, "edge/mail/")
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	cutoff := now.Add(-s.retention)
-	signPub := s.sign.Public().(ed25519.PublicKey)
-	expired := 0
+	signers := map[string]ed25519.PublicKey{
+		hex.EncodeToString(s.bootID): s.sign.Public().(ed25519.PublicKey),
+	}
 	for _, o := range objs {
 		// Never delete a message we can't date: a zero Modified (backend didn't
 		// report it) or one still inside the window is left alone.
@@ -447,33 +539,73 @@ func (s *realStore) Sweep(ctx context.Context, now time.Time) (int, error) {
 			if errors.Is(err, ErrNotFound) {
 				continue // already gone
 			}
-			return expired, err
+			return res, err
+		}
+		signPub, err := s.signerOf(ctx, raw, signers)
+		if err != nil {
+			return res, err
+		}
+		if signPub == nil {
+			res.Skipped++
+			continue
 		}
 		p, err := Parse(raw, signPub)
-		if err != nil {
-			continue // not a message this boot's key signed; leave it
+		if err != nil || o.Key != mailObjectKey(p.MailboxID, hex.EncodeToString(p.EdgeID)) {
+			res.Skipped++ // not what it claims to be, so it can't speak for a sequence
+			continue
 		}
 		if err := s.writeExpiry(ctx, p, now); err != nil {
-			return expired, err
+			return res, err
 		}
 		if err := s.blobs.Delete(ctx, o.Key); err != nil {
-			return expired, err
+			return res, err
 		}
-		expired++
+		res.Expired++
 	}
-	return expired, nil
+	return res, nil
+}
+
+// signerOf returns the signing key of the boot a stored message names, remembering
+// it in signers for the rest of the sweep. It's nil if that boot has no usable
+// record, which only a failed read tells apart from a real problem.
+func (s *realStore) signerOf(ctx context.Context, raw []byte, signers map[string]ed25519.PublicKey) (ed25519.PublicKey, error) {
+	id, ok := bootIDOf(raw)
+	if !ok {
+		return nil, nil
+	}
+	key := hex.EncodeToString(id)
+	if pub, ok := signers[key]; ok {
+		return pub, nil
+	}
+	b, err := s.ReadBoot(ctx, key)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		signers[key] = nil
+	case err != nil:
+		return nil, err
+	case len(b.SigningKey) != ed25519.PublicKeySize:
+		signers[key] = nil
+	default:
+		signers[key] = b.SigningKey
+	}
+	return signers[key], nil
 }
 
 // writeExpiry stores the signed expiry record for one expired message.
 func (s *realStore) writeExpiry(ctx context.Context, p *Parsed, now time.Time) error {
-	rec := ExpiryRecord{
-		MailboxID:  hex.EncodeToString(p.MailboxID),
-		EdgeID:     hex.EncodeToString(p.EdgeID),
-		Sequence:   p.Sequence,
-		ReceivedAt: p.ReceivedAt.UnixMilli(),
-		ExpiredAt:  now.UTC().Unix(),
-		BootID:     hex.EncodeToString(s.bootID),
-	}
+	return s.writeRecord(ctx, ExpiryRecord{
+		MailboxID:   hex.EncodeToString(p.MailboxID),
+		EdgeID:      hex.EncodeToString(p.EdgeID),
+		Sequence:    p.Sequence,
+		ReceivedAt:  p.ReceivedAt.UnixMilli(),
+		ExpiredAt:   now.UTC().Unix(),
+		BootID:      hex.EncodeToString(s.bootID),
+		MessageBoot: hex.EncodeToString(p.BootID),
+		Reason:      ReasonExpired,
+	})
+}
+
+func (s *realStore) writeRecord(ctx context.Context, rec ExpiryRecord) error {
 	body, err := marshalExpiry(rec, s.sign)
 	if err != nil {
 		return err

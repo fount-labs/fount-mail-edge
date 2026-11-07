@@ -134,6 +134,15 @@ type Parsed struct {
 
 var errMalformed = errors.New("store: malformed message object")
 
+// bootIDOf reads the boot a stored message names, which says whose key to verify it
+// with. It's unverified until Parse succeeds with that key.
+func bootIDOf(b []byte) ([]byte, bool) {
+	if len(b) < headerLen || string(b[:lenMagic]) != magic {
+		return nil, false
+	}
+	return b[headerLen-lenBootID : headerLen], true
+}
+
 // Parse decodes and verifies the ed25519 signature against signPub.
 func Parse(b []byte, signPub ed25519.PublicKey) (*Parsed, error) {
 	if len(b) < headerLen+2 {
