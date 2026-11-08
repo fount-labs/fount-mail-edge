@@ -24,7 +24,9 @@ attested-keys:
 
 networks:
   edge:
-    egress: allowlist # Tinfoil has no wildcards; list every host by exact name
+    # Tinfoil has no wildcards; list every host by exact name. It resolves each one
+    # when it builds the firewall, so the edge can't deploy while either vault is gone.
+    egress: allowlist
     allow:
       - vault-a.fount.containers.tinfoil.dev
       - vault-b.fount.containers.tinfoil.dev
