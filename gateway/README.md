@@ -31,9 +31,7 @@ gateway pinned to the old one can't open new tunnels, and senders retry. Update
 gateway a, wait for its `PublicIp` to answer on port 25, then update b:
 
 ```sh
-aws cloudformation deploy --template-file gateway/template.yml \
-  --stack-name fount-mail-gateway-a --profile fount-mail-prod --region us-east-1 \
-  --parameter-overrides EdgeReleaseTag=v0.1.1 --no-fail-on-empty-changeset
+gateway/deploy.sh a v0.1.1
 ```
 
 ## No access, no logs
@@ -50,19 +48,14 @@ aws cloudformation deploy --template-file gateway/template.yml \
 ## Deploy
 
 ```sh
-aws cloudformation deploy \
-  --template-file gateway/template.yml \
-  --stack-name fount-mail-gateway-a \
-  --capabilities CAPABILITY_IAM \
-  --profile fount-mail-prod --region us-east-1 \
-  --parameter-overrides \
-      Zone=us-east-1a \
-      EdgeReleaseTag=v0.1.0 \
-      ClientCertSecret=fount-mail/gateway-a-client
+gateway/deploy.sh a v0.1.0    # stack fount-mail-gateway-a, us-east-1a; prints the PublicIp
+gateway/deploy.sh b v0.1.0
 ```
 
-Gateway b is the same with `fount-mail-gateway-b`, `Zone=us-east-1b` and
-`fount-mail/gateway-b-client`.
+**First deploy parked.** A gateway starts ACME as soon as its tunnel is up, and
+HTTP-01 fails until the MX names resolve, which uses up Let's Encrypt's failed
+validation limit. So deploy both with `v0.0.0`, which no release matches, set up
+DNS, then redeploy with the live tag.
 
 `EnclaveHost` is the enclave's own name, which only the gateway and keyserver
 use. Senders see the MX names (`mx1.fountbox.com`, `mx2.fountbox.com`), which
