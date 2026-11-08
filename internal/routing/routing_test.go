@@ -551,7 +551,7 @@ func TestSetOwnersMonotonicVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com", "bob@smithcpa.com"}); err != nil {
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@example.com", "bob@example.com"}); err != nil {
 		t.Fatalf("version 1: %v", err)
 	}
 	snap, _ := s.Snapshot(id)
@@ -559,23 +559,23 @@ func TestSetOwnersMonotonicVersion(t *testing.T) {
 		t.Fatalf("after version 1: %+v", snap)
 	}
 	// Owners are stored only as keyed hashes, never the plaintext address.
-	if bytes.Contains(bytes.Join(snap.OwnerHashes, nil), []byte("jane@smithcpa.com")) {
+	if bytes.Contains(bytes.Join(snap.OwnerHashes, nil), []byte("jane@example.com")) {
 		t.Fatal("owner plaintext stored")
 	}
 
 	// Resending the same version and list changes nothing.
-	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com", "bob@smithcpa.com"}); err != nil {
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@example.com", "bob@example.com"}); err != nil {
 		t.Fatalf("resend version 1: %v", err)
 	}
 	// Only a greater version can change the list.
-	if err := s.SetOwners(ctx, id, 1, []string{"jane@smithcpa.com"}); !errors.Is(err, routing.ErrStaleVersion) {
+	if err := s.SetOwners(ctx, id, 1, []string{"jane@example.com"}); !errors.Is(err, routing.ErrStaleVersion) {
 		t.Fatalf("new list at version 1: err = %v, want ErrStaleVersion", err)
 	}
 	if snap, _ := s.Snapshot(id); len(snap.OwnerHashes) != 2 {
 		t.Fatalf("list changed without a new version: %+v", snap)
 	}
 	// Advancing is accepted.
-	if err := s.SetOwners(ctx, id, 2, []string{"jane@smithcpa.com"}); err != nil {
+	if err := s.SetOwners(ctx, id, 2, []string{"jane@example.com"}); err != nil {
 		t.Fatalf("version 2: %v", err)
 	}
 	// Going backwards is refused.

@@ -8,10 +8,10 @@ rebuilt and verified. Two rules follow from that:
    `tinfoil-config.yml` carries only public values.
 2. **Keep the build reproducible.** Prefer the standard library; pin any new
    dependency and base image by digest; don't introduce non-determinism into the
-   image (timestamps, build IDs, embedded paths). CI builds on two runners and
-   fails if the image digests differ.
+   image (timestamps, build IDs, embedded paths). CI builds on an x86 and an Arm
+   runner and fails if the image digests differ.
 
 Before opening a PR: `go vet ./... && go build ./... && go test ./...`.
 
-Security issues: do not open a public issue — follow the disclosure process in
-Fount's `/security`.
+Security issues: do not open a public issue. Report them privately, as
+[`SECURITY.md`](SECURITY.md) describes.

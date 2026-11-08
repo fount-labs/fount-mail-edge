@@ -9,6 +9,7 @@ package smtp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -563,6 +566,53 @@ func TestStoreFailureDoesNotAck(t *testing.T) {
 	c.expect("354")
 	fmt.Fprint(c.conn, "body\r\n.\r\n")
 	c.expect("452")
+}
+
+// A failed store logs only its class. Its text can hold the recipient and the
+// mailbox's S3 key, and a sender can trigger it by filling a mailbox (§4).
+func TestStoreFailureLogsNoAddress(t *testing.T) {
+	buf := &lockedBuffer{}
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	cause := fmt.Errorf("blob put: s3: PUT \"edge/mail/0a1b2c/ff\" for worker@fountbox.com: %w", store.ErrMailboxFull)
+	addr := newTestServer(t, &captureStore{err: cause}, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+	c := dial(t, addr)
+	c.startTLS()
+	c.send("EHLO client.example")
+	c.expect("250")
+	if got := c.deliver("sender@elsewhere.com", "worker@fountbox.com", "body"); !strings.HasPrefix(got, "452") {
+		t.Fatalf("reply = %q, want 452", got)
+	}
+	c.send("QUIT")
+	c.expect("221")
+
+	out := buf.String()
+	for _, leak := range []string{"worker", "fountbox.com", "elsewhere.com", "0a1b2c", "edge/mail"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log carries %q: %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "smtp: store failed: mailbox-full") {
+		t.Errorf("log lacks the error class: %q", out)
+	}
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // A routing write that lost a race with another edge asks for a retry, with 451.

@@ -467,12 +467,32 @@ func (se *session) command(ctx context.Context, verb, rest string) bool {
 		if err != nil {
 			// S3 not confirmed: do NOT 250. 452 asks the sender to retry.
 			se.reply("452 4.3.0 temporary storage failure")
-			log.Printf("smtp: store failed for %s: %v", recipient, err)
+			log.Printf("smtp: store failed: %s", storeErrClass(err))
 			return true
 		}
 		se.reply("250 2.0.0 stored %s", id)
 	}
 	return true
+}
+
+// storeErrClass names a store failure without its text, because the text can carry
+// the recipient or an S3 key with the mailbox ID, and a sender can cause failures
+// on purpose by filling a mailbox.
+func storeErrClass(err error) string {
+	switch {
+	case errors.Is(err, store.ErrMailboxFull):
+		return "mailbox-full"
+	case errors.Is(err, store.ErrNoRecipient):
+		return "no-recipient"
+	case errors.Is(err, store.ErrNotFound):
+		return "not-found"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "other"
+	}
 }
 
 // readProxyHeader consumes the single PROXY v1 line and records the source, as the

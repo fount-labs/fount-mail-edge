@@ -1,6 +1,6 @@
 module github.com/fount-labs/fount-mail-edge
 
-// Pinned for reproducible builds (see docs/BUILD.md and §17 of the design doc).
+// Pinned for reproducible builds (see docs/BUILD.md).
 // The toolchain line pins the exact Go version CI and the Docker build use.
 go 1.27.3
 
@@ -10,6 +10,7 @@ go 1.27.3
 // network and no go.sum.
 require github.com/fount-labs/fount-mail-vault/wire v0.0.0
 
-// Until fount-mail-vault is published, this points at the sibling checkout.
-// Replace it with a tagged version (wire/vX.Y.Z) when it is.
+// The wire module has no tag yet, so this points at a sibling checkout of
+// github.com/fount-labs/fount-mail-vault, used only by `go mod vendor`. The build
+// reads vendor/. Once wire/vX.Y.Z is tagged, require that and drop the replace.
 replace github.com/fount-labs/fount-mail-vault/wire => ../fount-mail-vault/wire

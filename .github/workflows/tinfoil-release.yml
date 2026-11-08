@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write       # create the GitHub release
-      packages: write       # attach the attestation to the image
+      packages: read        # read the image it measures
       id-token: write       # keyless attestation signing
       attestations: write   # publish the attestation
 
