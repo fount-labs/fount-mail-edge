@@ -20,6 +20,7 @@ import (
 )
 
 const usage = `usage:
+  edgectl role-keygen -role abuse|postmaster -out DIR
   edgectl status    -edge HOST
   edgectl init      -edge HOST -operator-key FILE
   edgectl provision -edge HOST -operator-key FILE -role abuse|postmaster -keys FILE
@@ -42,7 +43,12 @@ func main() {
 	skip := fs.Uint64("skip-sequences", 0, "move every sequence counter forward by this much")
 	write := fs.Bool("write", false, "install the backup; without this, only verify it")
 	replace := fs.Bool("replace", false, "allow replacing an existing routing object")
+	outDir := fs.String("out", "", "directory for a role's key files, outside any repo")
 	fs.Parse(os.Args[2:])
+	if os.Args[1] == "role-keygen" {
+		roleKeygen(*role, *outDir)
+		return
+	}
 	if *host == "" {
 		fail("-edge is required")
 	}
@@ -89,6 +95,19 @@ func main() {
 	}
 	pretty, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(pretty))
+}
+
+// roleKeygen writes a role mailbox's keys. It prints only paths and public keys.
+func roleKeygen(role, dir string) {
+	if role == "" || dir == "" {
+		fail("-role and -out are required")
+	}
+	privPath, pubPath, err := operator.WriteRoleKeys(dir, role)
+	if err != nil {
+		fail(err.Error())
+	}
+	fmt.Printf("private keys: %s (mode 0600; keep it off any repo and backed up)\n", privPath)
+	fmt.Printf("public keys:  %s (pass to edgectl provision -keys)\n", pubPath)
 }
 
 func do(ctx context.Context, c *operator.Client, op string, payload any) (any, error) {
