@@ -62,7 +62,8 @@ The running edge adds it at once.
    workflows.
 4. **Nothing to approve.** A vault hands the keyset to any release of this repo at
    or above its `EDGE_MIN_TAG`, as soon as it's published. Publication is the
-   control: it's public, and an alert fires on it. To retire an old release, raise
+   control: it's public, and `fount-infra`'s `MailWatchStack` emails on every release of
+   this repo and the vault's. To retire an old release, raise
    `EDGE_MIN_TAG` in a vault release.
 
 ## Verify
@@ -72,10 +73,12 @@ scripts/verify-release.sh vX.Y.Z
 ```
 
 Rebuilds at the tag, compares to the pinned digest, and checks the live
-attestation. A scheduled job in a separate account runs this per release and
-alerts on a mismatch.
+attestation. Run it for every release. A scheduled job that runs it from a separate
+account isn't built yet.
 
 ## Accounts
 
-Protect tags and the default branch; require hardware keys on GitHub, AWS,
-Tinfoil, and DNS.
+The repo is public. A ruleset makes `v*` tags creatable only by org admins and
+permanent once pushed. A release of this repo can get the keyset from the vaults, so
+the accounts that can make one need hardware keys: the vault's `docs/KEYS.md` lists
+them (GitHub, the email behind it, DNS, AWS, Tinfoil).
