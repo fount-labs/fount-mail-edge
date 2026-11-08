@@ -382,10 +382,10 @@ func TestPutRouting(t *testing.T) {
 		api.ServeHTTP(rec, req)
 		return rec.Code
 	}
-	if code := put(1, []string{"jane@smithcpa.com"}, "r1"); code != http.StatusOK {
+	if code := put(1, []string{"jane@example.com"}, "r1"); code != http.StatusOK {
 		t.Fatalf("version 1: want 200, got %d", code)
 	}
-	if code := put(2, []string{"jane@smithcpa.com", "bob@smithcpa.com"}, "r2"); code != http.StatusOK {
+	if code := put(2, []string{"jane@example.com", "bob@example.com"}, "r2"); code != http.StatusOK {
 		t.Fatalf("version 2: want 200, got %d", code)
 	}
 	if code := put(1, nil, "r3"); code != http.StatusConflict {

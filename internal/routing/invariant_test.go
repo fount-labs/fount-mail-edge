@@ -116,7 +116,7 @@ func TestRoutingVersionMonotonicProperty(t *testing.T) {
 			v := uint64(rng.IntN(12)) // spans below, at, and above cur
 			owners := make([]string, rng.IntN(4))
 			for i := range owners {
-				owners[i] = fmt.Sprintf("owner%d@smithcpa.com", rng.IntN(100))
+				owners[i] = fmt.Sprintf("owner%d@example.com", rng.IntN(100))
 			}
 
 			err := s.SetOwners(ctx, id, v, owners)
