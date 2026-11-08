@@ -46,8 +46,9 @@ EDGE_DEV=1 ATTESTED_KEY_DIR=/tmp/devkeys \
 **Never set it in a release.** In dev, ACME is disabled (the placeholder account
 key isn't a real PEM key), so `/ready` stays 503 and SMTP answers `421` — that's
 correct for a boot with no CA. Other ACME knobs: `ACME_DIRECTORY` (defaults to
-Let's Encrypt **staging**; set the production URL at deploy) and `CERT_CACHE_DIR`
-(disk cert cache; production uses S3 instead). Probes:
+Let's Encrypt **staging**, which only dev accepts; a release sets production in
+`tinfoil-config.yml`) and `CERT_CACHE_DIR` (disk cert cache; production uses S3
+instead). Probes:
 
 ```sh
 curl -s localhost:18080/health                         # ok
@@ -57,11 +58,13 @@ curl -sk -X POST https://localhost:18443/mailbox       # 401 (needs a signature)
 printf 'PROXY TCP4 203.0.113.9 10.0.0.1 1 25\r\n' | nc -w1 localhost 12525   # 421 (no cert)
 ```
 
-## TODO markers to resolve before a real release
+## Release config
 
-- `tinfoil-config.yml`: `GATEWAY_CLIENT_PINS`, `KEYSET_COMMITMENT`, `ENTITLEMENT_VERIFY_KEY`
-  (the edge refuses to boot on the placeholder), and the image digest (set by the
-  release workflow).
-- The GitHub org (`fount-labs`) and the pinned deployment domain
-  (`mail-edge.fount.containers.tinfoil.dev`). The vault pins the repo, so a fork can't get
-  the keys. Senders never see this name; they use the MX names.
+`tinfoil-config.yml` holds the release's public values: the image digest (pinned by hand
+from *Build Image*, see `docs/BUILD.md`), `GATEWAY_CLIENT_PINS`, `KEYSET_COMMITMENT`, and
+`ENTITLEMENT_VERIFY_KEY`, which is still the dev key. The release workflow refuses a config
+with a `PLACEHOLDER` left in it.
+
+The vaults pin this repo (`fount-labs/fount-mail-edge`), so a fork can't get the keys. The
+live edge runs at `edge.fount.containers.tinfoil.dev`. Senders never see that name; they
+use the MX names.

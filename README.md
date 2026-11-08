@@ -5,14 +5,16 @@ a [Tinfoil](https://tinfoil.sh) confidential enclave, terminates inbound SMTP
 with an attested key, stores each message encrypted to the recipient, and serves
 the **Device API** to Fount's broker over the attested tunnel.
 
-This repository is **public by design** — reproducible builds mean an outside
-party can rebuild a release and confirm the running enclave matches this source.
+This repository is **public by design**. The build is reproducible, so an outside
+party can rebuild a release and check the running enclave runs it, with
+`scripts/verify-release.sh`. `v0.1.0` passed that check on 2026-11-08.
 It holds **no secrets**. The edge pulls its keys after boot from a Fount Mail
 vault, another enclave, which verifies this release first
-(see [`fount-mail-vault`](../fount-mail-vault)). No AWS account holds them.
+(see [`fount-mail-vault`](https://github.com/fount-labs/fount-mail-vault)). No AWS
+account holds them.
 
-Design doc: `fount/docs/features/fount-fleet/fount-mail-design.md` (§6 edge, §8
-Device API, §17 build/release). This repo realises M2 build steps 2–3.
+[`docs/DESIGN.md`](docs/DESIGN.md) is the trust model: who sees what, which keys
+exist, and how a release gets them. Code comments cite its section numbers.
 
 ## What the edge does
 
@@ -36,8 +38,12 @@ Device API, §17 build/release). This repo realises M2 build steps 2–3.
   after the store confirms the write.
 - **Signed Device API.** Every request is signed by the key that call's row
   requires (`POST /mailbox` by new keys, `GET /mail` by the address key, …), over
-  `method · path · sha256(body) · timestamp · nonce`, so a captured request can't
-  be replayed.
+  `method · path · sha256(body) · timestamp · nonce`. A captured request can't be
+  replayed, except once across a restart: the nonce cache is in memory, and the
+  timestamp window is 5 minutes.
+- **No addresses at rest or in logs.** Routing data holds keyed hashes, and a
+  failed store logs only the error class. The edge does see addresses in memory:
+  each SMTP recipient, and the addresses on `POST /address` and `PUT /routing`.
 
 ## Status — M2 edge
 
@@ -53,15 +59,19 @@ Real and exercised now:
   covering both MX names. The vault's CAA-pinned account key signs the order,
   the attested `mail-tls` key is the cert key, and the certificate is cached (disk
   in dev, chain-only S3 in prod). Exercised end-to-end against a mock ACME server;
-- **HPKE-to-address storage over S3**, the per-mailbox quota, the 30-day retention
-  sweep with signed expiry records, routing data with signed backups, and the boot
-  and key logs in their own Object Lock bucket;
+- **HPKE-to-address storage over S3**, the per-mailbox quota, routing data with
+  signed backups, and the boot and key logs in their own Object Lock bucket;
+- the **30-day retention sweep**, which writes a signed expiry record for each
+  message it can verify against its boot's key. One it can't verify stays until
+  the bucket's 45-day lifecycle rule deletes it with no record, and that rule isn't
+  deployed yet;
 - **gateway mutual TLS** on the SMTP and ACME ports, with client keys pinned in
   the attested config, tested against a local HAProxy 2.8;
 - the **gateway** CloudFormation stack (`gateway/`) adapted from the proven
   port-25 probe;
-- reproducible `FROM scratch` build + the two Tinfoil release workflows + a
-  two-runner digest-comparison CI, present from the first commit.
+- the reproducible `FROM scratch` build, with BuildKit pinned by digest, the two
+  release workflows, and CI that builds on an x86 and an Arm runner and requires
+  the same digest.
 
 Not yet built or tested:
 
@@ -69,7 +79,11 @@ Not yet built or tested:
 - **A real upload to the Object Lock bucket.** The first boot is that test.
 - **Full Tinfoil attestation under `GET /boots`**, which today publishes the boot's
   signing key.
-- **The broker side of the contract**, in `fount-broker`.
+- **Key-swap detection.** The edge doesn't store key chains or check them when it
+  seals, and the key and boot logs have no read path. Until both exist and the
+  broker checks them, a swapped key isn't detectable.
+- **The broker side of the contract**, in [`fount-broker`](https://github.com/fount-labs/fount-broker).
+- **A scheduled job** that runs `scripts/verify-release.sh` on every release.
 
 ## Develop
 
@@ -86,11 +100,16 @@ EDGE_DEV=1 ATTESTED_KEY_DIR=/path/to/devkeys ./edge
 
 ## Build & release
 
-Reproducible image: `scripts/build-image.sh /tmp/edge.oci` (needs the
-`docker-container` buildx driver). Release: run **Build Image**, pin the digest, then
-push a `v*` tag, which publishes the measured release. A vault serves any release at
-or above its `EDGE_MIN_TAG`. Verify any release with `scripts/verify-release.sh vX.Y.Z`. Full
+Reproducible image: `scripts/build-image.sh /tmp/edge.oci` (needs Docker with
+buildx). Release: run **Build Image**, pin the digest, then push a `v*` tag, which
+publishes the measured release. A vault serves any release at or above its
+`EDGE_MIN_TAG`. Verify any release with `scripts/verify-release.sh vX.Y.Z`, which
+needs Docker, `jq`, and the Tinfoil CLI, and fails if any check can't run. Full
 recipe in `docs/BUILD.md`.
+
+## Security
+
+Report vulnerabilities privately, as [`SECURITY.md`](SECURITY.md) describes.
 
 ## License
 

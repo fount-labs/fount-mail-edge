@@ -19,8 +19,10 @@ builder). Determinism levers, which must match across machines:
 - `SOURCE_DATE_EPOCH=0`, `--provenance=false`, `--sbom=false`, fixed `--platform`,
   `--output type=oci,...,rewrite-timestamp=true`
 
-Pin the dockerfile frontend and the golang base **by digest** in the `Dockerfile`
-before the first release, and keep the Go version equal to `go.mod`.
+The Dockerfile frontend and the golang base are pinned by digest in the `Dockerfile`, and
+BuildKit by digest in `scripts/build-image.sh`. Keep the Go version equal to `go.mod`, and
+bump any of them on purpose. CI builds on an x86 and an Arm runner and fails if the digests
+differ.
 
 ## New deployment
 
@@ -53,8 +55,7 @@ The running edge adds it at once.
 
 1. **Build** with the *Build Image* workflow, run from `main` with the version. It runs
    `scripts/build-image.sh`, pushes that exact image to GHCR with `crane`, and fails if
-   the pushed digest differs from the build's. CI's `reproducible-build` matrix builds
-   on two runners and fails if their digests differ.
+   the pushed digest differs from the build's.
 2. **Pin the digest** it reports into both containers in `tinfoil-config.yml` (the
    forwarder runs the same image as the edge), and commit to `main`.
 3. **Tag**: `git tag vX.Y.Z && git push origin vX.Y.Z`. Only org admins can create `v*`
@@ -62,9 +63,9 @@ The running edge adds it at once.
    the tag is on `main` and the config has no placeholders, then measures, attests,
    publishes the GitHub release, and marks it latest so its witness renews.
 4. **The tag push is the approval.** A vault hands the keyset to any release of this repo at
-   or above its `EDGE_MIN_TAG`, as soon as it's published. Publication is the
-   control: it's public, and `fount-infra`'s `MailWatchStack` emails on every release of
-   this repo and the vault's. To retire an old release, raise
+   or above its `EDGE_MIN_TAG`, as soon as it's published. Publication is the control,
+   because it's public. Fount's watcher will email on every release of this repo and the
+   vault's, once it's deployed, which it isn't yet. To retire an old release, raise
    `EDGE_MIN_TAG` in a vault release.
 
 ## Verify
@@ -73,13 +74,14 @@ The running edge adds it at once.
 scripts/verify-release.sh vX.Y.Z
 ```
 
-Rebuilds at the tag, compares to the pinned digest, and checks the live
-attestation. Run it for every release. A scheduled job that runs it from a separate
-account isn't built yet.
+Rebuilds at the tag, compares with every digest pinned in the config, and checks the live
+attestation against that tag. It needs Docker, `jq`, and the Tinfoil CLI, and fails if any
+check can't run. Set `ENCLAVE` to check a host other than the live edge. Run it for every
+release. A scheduled job that runs it from a separate account isn't built yet.
 
 ## Accounts
 
-The repo is public. A ruleset makes `v*` tags creatable only by org admins and
-permanent once pushed. A release of this repo can get the keyset from the vaults, so
+The repo is public. A ruleset makes `v*` tags creatable only by org admins. Org admins can
+also bypass it to move or delete one. A release of this repo can get the keyset from the vaults, so
 the accounts that can make one need hardware keys: the vault's `docs/KEYS.md` lists
 them (GitHub, the email behind it, DNS, AWS, Tinfoil).
