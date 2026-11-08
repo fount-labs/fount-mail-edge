@@ -81,7 +81,7 @@ release. A scheduled job that runs it from a separate account isn't built yet.
 
 ## Accounts
 
-The repo is public. A ruleset makes `v*` tags creatable only by org admins. Org admins can
-also bypass it to move or delete one. A release of this repo can get the keyset from the vaults, so
+The repo is public. A ruleset makes `v*` tags creatable only by org admins, and a second one
+with no bypass makes them permanent once pushed. A release of this repo can get the keyset from the vaults, so
 the accounts that can make one need hardware keys: the vault's `docs/KEYS.md` lists
 them (GitHub, the email behind it, DNS, AWS, Tinfoil).
