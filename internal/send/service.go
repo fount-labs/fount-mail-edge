@@ -17,6 +17,10 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/dkim"
 )
 
+// sendBudget keeps a send inside the Device API's 2-minute write timeout, so the
+// device always hears how it went.
+const sendBudget = 90 * time.Second
+
 // ErrBadMessage wraps every reason Parse refuses a message.
 var ErrBadMessage = errors.New("bad message")
 
@@ -58,6 +62,8 @@ func (s *Service) Send(ctx context.Context, mailboxID, raw []byte) ([]Result, er
 		signed = append(signed, field...)
 	}
 	signed = append(signed, m.Raw...)
+	ctx, cancel := context.WithTimeout(ctx, sendBudget)
+	defer cancel()
 	res := s.Deliverer.Deliver(ctx, m.From, m.Recipients, signed)
 	sent := 0
 	for _, r := range res {

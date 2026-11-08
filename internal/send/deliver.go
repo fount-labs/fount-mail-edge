@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,7 +32,7 @@ type Result struct {
 }
 
 const (
-	defaultSessionTimeout = 2 * time.Minute
+	defaultSessionTimeout = time.Minute
 	maxMXTried            = 5
 )
 
@@ -47,7 +48,8 @@ type Deliverer struct {
 	Timeout  time.Duration  // per SMTP session; 0 is the default
 }
 
-// Deliver sends data from `from` to every recipient, one session per domain.
+// Deliver sends data from `from` to every recipient, one session per domain, with
+// the domains in parallel.
 func (d *Deliverer) Deliver(ctx context.Context, from string, recipients []string, data []byte) []Result {
 	byDomain := map[string][]string{}
 	var order []string
@@ -58,9 +60,15 @@ func (d *Deliverer) Deliver(ctx context.Context, from string, recipients []strin
 		}
 		byDomain[dom] = append(byDomain[dom], r)
 	}
+	perDomain := make([][]Result, len(order))
+	var wg sync.WaitGroup
+	for i, dom := range order {
+		wg.Go(func() { perDomain[i] = d.deliverDomain(ctx, dom, from, byDomain[dom], data) })
+	}
+	wg.Wait()
 	var out []Result
-	for _, dom := range order {
-		out = append(out, d.deliverDomain(ctx, dom, from, byDomain[dom], data)...)
+	for _, r := range perDomain {
+		out = append(out, r...)
 	}
 	return out
 }
@@ -99,7 +107,7 @@ func (d *Deliverer) deliverDomain(ctx context.Context, domain, from string, rcpt
 			lastErr = "MX not in the domain's MTA-STS policy"
 			continue
 		}
-		if tried++; tried > maxMXTried {
+		if tried++; tried > maxMXTried || ctx.Err() != nil {
 			break
 		}
 		res, err := d.session(ctx, mx.Host, from, rcpts, data)

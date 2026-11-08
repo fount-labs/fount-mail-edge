@@ -216,3 +216,21 @@ func TestServiceSend(t *testing.T) {
 		t.Fatal("refused message reached the MX")
 	}
 }
+
+func TestDeliverSeveralDomains(t *testing.T) {
+	r := newRig(t)
+	r.resolve.mx["other.example"] = []MX{{10, "mx.smithcpa.com"}}
+	res := r.deliverer().Deliver(context.Background(), worker,
+		[]string{"pat@smithcpa.com", "jo@other.example", "al@smithcpa.com"}, []byte(signedMsg))
+	if len(res) != 3 {
+		t.Fatalf("%+v", res)
+	}
+	for _, x := range res {
+		if x.Status != Sent {
+			t.Fatalf("%+v", res)
+		}
+	}
+	if len(r.mx.received) != 2 {
+		t.Fatalf("%d sessions, want one per domain", len(r.mx.received))
+	}
+}
