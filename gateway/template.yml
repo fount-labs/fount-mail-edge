@@ -1,28 +1,56 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Fount Fleet mail gateway. Accepts public port 25 and ACME HTTP-01 on port 80,
-  and pipes both through an attested Tinfoil tunnel to the edge enclave. It
-  filters connections only (§7) and never sees mail content or addresses: TLS 1.3
-  terminates inside the enclave, and HAProxy adds the real sender IP with a PROXY
-  header. No SSH, no connection logs. Deploy TWO of these in separate AZs, each
-  with its own MX record, so one VM failing doesn't stop mail.
+  and pipes both through an attested Tinfoil tunnel to one pinned edge release.
+  It filters connections only (§7). If it runs this template, the gateway can't
+  read TLS-protected mail. Senders can't verify that. HAProxy adds the real sender
+  IP with a PROXY header. No SSH, no SSM, no connection logs. Deploy TWO of these
+  in separate AZs, each with its own MX record, so one VM failing doesn't stop mail.
 
 Parameters:
   Ami:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Type: AWS::EC2::Image::Id
+    # al2023-ami-2023.12.20261102.0-kernel-6.18-arm64, us-east-1. AMI IDs are
+    # per region; DnfRelease must match the AMI's release.
+    Default: ami-0951c836c26e34fc8
+  DnfRelease:
+    Type: String
+    Default: "2023.12.20261102"
+  HaproxyPackage:
+    Type: String
+    Default: haproxy-3.0.30-1.amzn2023.0.1
+  Zone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: One AZ per gateway, for example us-east-1a for a and us-east-1b for b.
   EnclaveHost:
     Type: String
-    Default: mail-edge.fount.containers.tinfoil.dev # the enclave's own name; mail uses the MX names
+    Default: edge.fount.containers.tinfoil.dev # the enclave's own name; mail uses the MX names
   EnclaveRepo:
     Type: String
     Default: fount-labs/fount-mail-edge # targets the enclave by repo, so no admin key on the VM
+  EdgeReleaseTag:
+    Type: String
+    AllowedPattern: "v[0-9]+\\.[0-9]+\\.[0-9]+"
+    Description: >
+      The only edge release this gateway tunnels to. Changing it replaces the
+      instance, so update both stacks right after each edge release.
   ClientCertSecret:
     Type: String
     Description: Secrets Manager name of this gateway's client certificate + key PEM. Its SPKI pin is in the edge's attested GATEWAY_CLIENT_PINS.
+  TunnelKeySecret:
+    Type: String
+    Default: ""
+    Description: Secrets Manager name of a tk_ tunnel key, needed once the edge sets shim.authenticated. Empty means no key.
   TinfoilCliVersion:
     Type: String
-    Default: "0.19.19"
+    Default: "0.19.20"
+  TinfoilCliSha256:
+    Type: String
+    # tinfoil-cli_0.19.20_linux_arm64.tar.gz, matching the release's checksums.txt.
+    Default: 22f0595cce22f0e34985e28331bfe9cc360567c7c01f4ecb63380ec5605517ce
+
+Conditions:
+  HasTunnelKey: !Not [!Equals [!Ref TunnelKeySecret, ""]]
 
 Resources:
   Role:
@@ -34,16 +62,20 @@ Resources:
           - Effect: Allow
             Principal: { Service: ec2.amazonaws.com }
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # SSM only; no inbound SSH
+      # No managed policies: no SSM, so there's no shell on this VM at all.
       Policies:
-        - PolicyName: read-client-cert
+        - PolicyName: read-gateway-secrets
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ClientCertSecret}-*
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ClientCertSecret}-*
+                  - !If
+                    - HasTunnelKey
+                    - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TunnelKeySecret}-*
+                    - !Ref AWS::NoValue
   Profile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -55,108 +87,147 @@ Resources:
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 25, ToPort: 25, CidrIp: 0.0.0.0/0 }
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+  # User data runs only on first boot, so it lives in a launch template: any
+  # change makes a new version, and a new version replaces the instance.
+  Launch:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: t4g.micro
+        ImageId: !Ref Ami
+        IamInstanceProfile: { Arn: !GetAtt Profile.Arn }
+        SecurityGroupIds: [!GetAtt Group.GroupId]
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "fount-mail-gateway-${Zone}" }
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            # No way in: no SSM agent, no sshd, and no key pair on the instance.
+            systemctl disable --now amazon-ssm-agent sshd.service sshd.socket || true
+            systemctl mask amazon-ssm-agent sshd.service sshd.socket
+            # Journald keeps nothing on disk.
+            mkdir -p /etc/systemd/journald.conf.d
+            printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' > /etc/systemd/journald.conf.d/fount.conf
+            systemctl restart systemd-journald
+            dnf install -y --releasever=${DnfRelease} ${HaproxyPackage}
+            cd /tmp
+            V=${TinfoilCliVersion}
+            T="tinfoil-cli_${!V}_linux_arm64.tar.gz"
+            curl -fsSLO "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v$V/$T"
+            echo "${TinfoilCliSha256}  $T" | sha256sum -c
+            tar -xzf "$T" tinfoil
+            install -m 755 tinfoil /usr/local/bin/tinfoil
+            # A missing client certificate stops the boot: without it the edge
+            # refuses every tunnelled connection anyway.
+            aws secretsmanager get-secret-value --region ${AWS::Region} \
+              --secret-id ${ClientCertSecret} --query SecretString --output text \
+              > /etc/haproxy/gateway-client.pem
+            chown haproxy:haproxy /etc/haproxy/gateway-client.pem
+            chmod 600 /etc/haproxy/gateway-client.pem
+            install -d -m 700 /etc/fount-tunnel
+            : > /etc/fount-tunnel/env
+            chmod 600 /etc/fount-tunnel/env
+            if [ -n "${TunnelKeySecret}" ]; then
+              set +x
+              printf 'TINFOIL_TUNNEL_API_KEY=%s\n' "$(aws secretsmanager get-secret-value \
+                --region ${AWS::Region} --secret-id ${TunnelKeySecret} \
+                --query SecretString --output text)" > /etc/fount-tunnel/env
+              set -x
+            fi
+            cat > /etc/haproxy/haproxy.cfg <<'CFG'
+            # No `log` lines anywhere: HAProxy writes nothing about connections.
+            # The per-IP table below lives only in memory, for limiting.
+            #
+            # The 128-tunnel limit is per enclave and shared by both gateways, so
+            # each one holds 56 SMTP + 4 ACME and leaves room for health checks.
+            global
+              maxconn 140
+            defaults
+              mode tcp
+              timeout connect 5s
+              timeout client 4m
+              timeout server 4m
+            # SMTP takes two hops because the PROXY header must travel INSIDE mutual
+            # TLS (§7). A single `server ... ssl send-proxy` line writes the header in
+            # the clear, ahead of the handshake, so the first hop adds it and the
+            # second wraps those bytes as ordinary payload.
+            frontend smtp
+              bind :25
+              maxconn 56
+              stick-table type ipv6 size 100k expire 10m store conn_cur,conn_rate(1m)
+              tcp-request connection track-sc0 src
+              tcp-request connection reject if { sc0_conn_cur gt 4 } || { sc0_conn_rate gt 30 }
+              default_backend smtp-framed
+            backend smtp-framed
+              server wrap 127.0.0.1:2527 send-proxy track edge/tunnel
+            frontend smtp-wrap
+              bind 127.0.0.1:2527
+              maxconn 56
+              default_backend edge
+            # Open the backend only after the edge's /ready passes twice (design §6:
+            # the edge waits 15s so its certificate loads first). /ready is on the
+            # shim's port, outside mutual TLS, so its check is plain.
+            backend edge
+              option httpchk GET /ready
+              http-check expect status 200
+              server tunnel 127.0.0.1:2526 ssl ssl-min-ver TLSv1.3 crt /etc/haproxy/gateway-client.pem verify none check port 2508 no-check-ssl inter 5s rise 2
+            # ACME HTTP-01: plain port 80, then mutual TLS to the challenge responder.
+            # This check is the edge's reachable signal: the first request over mutual
+            # TLS starts issuance, so outsiders can't start it. `verify none` is safe on
+            # both servers because the attested tunnel already proves the enclave.
+            frontend acme
+              bind :80
+              maxconn 4
+              default_backend challenge
+            backend challenge
+              option httpchk GET /
+              http-check expect status 200
+              server tunnel 127.0.0.1:2580 ssl ssl-min-ver TLSv1.3 crt /etc/haproxy/gateway-client.pem verify none check inter 30s
+            CFG
+            # tinfoil forward re-verifies the enclave by itself, and only accepts the
+            # release at ${EnclaveRepo}@${EdgeReleaseTag}. -L maps:
+            #   2526 -> edge :2525  (SMTP)        2580 -> edge :8088 (ACME HTTP-01)
+            #   2508 -> edge :8080  (shim /ready health check)
+            cat > /usr/local/bin/fount-tunnel <<'SH'
+            #!/bin/sh
+            exec /usr/local/bin/tinfoil forward ${EnclaveHost} --repo ${EnclaveRepo}@${EdgeReleaseTag} \
+              -L 127.0.0.1:2526:2525 \
+              -L 127.0.0.1:2580:8088 \
+              -L 127.0.0.1:2508:8080
+            SH
+            chmod 755 /usr/local/bin/fount-tunnel
+            cat > /etc/systemd/system/fount-tunnel.service <<'UNIT'
+            [Unit]
+            After=network-online.target
+            Wants=network-online.target
+            StartLimitIntervalSec=0
+            [Service]
+            ExecStart=/usr/local/bin/fount-tunnel
+            EnvironmentFile=/etc/fount-tunnel/env
+            Restart=always
+            RestartSec=5
+            DynamicUser=yes
+            StateDirectory=fount-tunnel
+            Environment=HOME=/var/lib/fount-tunnel
+            StandardOutput=null
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            systemctl daemon-reload
+            # Start the enclave FIRST (design §7: a gateway that looks up the host
+            # early can cache "no such host" for up to 30 minutes).
+            systemctl enable --now fount-tunnel haproxy
   Instance:
     Type: AWS::EC2::Instance
     Properties:
-      InstanceType: t4g.micro
-      ImageId: !Ref Ami
-      IamInstanceProfile: !Ref Profile
-      SecurityGroupIds: [!GetAtt Group.GroupId]
-      MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
-      Tags:
-        - { Key: Name, Value: fount-mail-gateway }
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euxo pipefail
-          dnf install -y haproxy
-          cd /tmp
-          V=${TinfoilCliVersion}
-          curl -fsSLO "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v$V/tinfoil-cli_${!V}_linux_arm64.tar.gz"
-          # TODO(before deploy): pin and verify the CLI tarball sha256 (as the probe did).
-          tar -xzf "tinfoil-cli_${!V}_linux_arm64.tar.gz" tinfoil
-          install -m 755 tinfoil /usr/local/bin/tinfoil
-          # A missing client certificate stops the boot: without it the edge
-          # refuses every tunnelled connection anyway.
-          aws secretsmanager get-secret-value --region ${AWS::Region} \
-            --secret-id ${ClientCertSecret} --query SecretString --output text \
-            > /etc/haproxy/gateway-client.pem
-          chown haproxy:haproxy /etc/haproxy/gateway-client.pem
-          chmod 600 /etc/haproxy/gateway-client.pem
-          cat > /etc/haproxy/haproxy.cfg <<'CFG'
-          global
-            log /dev/log local0
-            maxconn 120
-          defaults
-            mode tcp
-            log global
-            option tcplog
-            timeout connect 5s
-            timeout client 5m
-            timeout server 5m
-          # SMTP takes two hops because the PROXY header must travel INSIDE mutual
-          # TLS (§7). A single `server ... ssl send-proxy` line writes the header in
-          # the clear, ahead of the handshake, so the first hop adds it and the
-          # second wraps those bytes as ordinary payload.
-          frontend smtp
-            bind :25
-            default_backend smtp-framed
-          backend smtp-framed
-            server wrap 127.0.0.1:2527 send-proxy track edge/tunnel
-          frontend smtp-wrap
-            bind 127.0.0.1:2527
-            default_backend edge
-          # Open the backend only after the edge's /ready passes twice (design §6:
-          # the edge waits 15s so its certificate loads first). /ready is on the
-          # shim's port, outside mutual TLS, so its check is plain.
-          backend edge
-            option httpchk GET /ready
-            http-check expect status 200
-            server tunnel 127.0.0.1:2526 ssl crt /etc/haproxy/gateway-client.pem verify none check port 2508 no-check-ssl inter 5s rise 2
-          # ACME HTTP-01: plain port 80, then mutual TLS to the challenge responder.
-          # This check is the edge's reachable signal: the first request over mutual
-          # TLS starts issuance, so outsiders can't start it. `verify none` is safe on
-          # both servers because the attested tunnel already proves the enclave.
-          frontend acme
-            bind :80
-            default_backend challenge
-          backend challenge
-            option httpchk GET /
-            http-check expect status 200
-            server tunnel 127.0.0.1:2580 ssl crt /etc/haproxy/gateway-client.pem verify none check inter 30s
-          CFG
-          # tinfoil forward re-verifies the enclave by itself. -L maps:
-          #   2526 -> edge :2525  (SMTP)        2580 -> edge :8088 (ACME HTTP-01)
-          #   2508 -> edge :8080  (shim /ready health check)
-          # TODO(§7): shim.authenticated must be on so a keyless CONNECT gets 401
-          # before it counts. Needs a tk_ key delivered at boot.
-          cat > /usr/local/bin/fount-tunnel <<'SH'
-          #!/bin/sh
-          exec /usr/local/bin/tinfoil forward ${EnclaveHost} --repo ${EnclaveRepo} \
-            -L 127.0.0.1:2526:2525 \
-            -L 127.0.0.1:2580:8088 \
-            -L 127.0.0.1:2508:8080
-          SH
-          chmod 755 /usr/local/bin/fount-tunnel
-          cat > /etc/systemd/system/fount-tunnel.service <<'UNIT'
-          [Unit]
-          After=network-online.target
-          Wants=network-online.target
-          StartLimitIntervalSec=0
-          [Service]
-          ExecStart=/usr/local/bin/fount-tunnel
-          Restart=always
-          RestartSec=5
-          DynamicUser=yes
-          StateDirectory=fount-tunnel
-          Environment=HOME=/var/lib/fount-tunnel
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-          systemctl daemon-reload
-          # Start the enclave FIRST (design §7: a gateway that looks up the host
-          # early can cache "no such host" for up to 30 minutes).
-          systemctl enable --now fount-tunnel haproxy
+      AvailabilityZone: !Ref Zone
+      LaunchTemplate:
+        LaunchTemplateId: !Ref Launch
+        Version: !GetAtt Launch.LatestVersionNumber
   Ip:
     Type: AWS::EC2::EIP
     Properties:
