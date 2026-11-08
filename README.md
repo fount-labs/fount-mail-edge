@@ -25,6 +25,11 @@ Device API, §17 build/release). This repo realises M2 build steps 2–3.
   the S3 credentials, arrive from a vault after boot. The edge accepts only the
   keyset `KEYSET_COMMITMENT` names, and starts nothing else until it has one.
   There is deliberately no fallback to a Tinfoil-managed secret.
+- **Operator changes are signed, and the edge makes them.** No person holds the
+  routing keys, so `cmd/edgectl` signs a request with the operator key, and the
+  edge does the work: the first routing object, the `abuse@` and `postmaster@`
+  mailboxes, and restores from backup. An edge with no routing object waits for
+  one instead of exiting.
 - **Strict inbound SMTP.** Arrives through the gateway's attested tunnel with a
   PROXY header; STARTTLS is mandatory; unknown recipients are rejected; bare
   LF/CR are rejected; size-limited; stored whole, never MIME-parsed; `250` only

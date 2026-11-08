@@ -20,6 +20,7 @@ func setSecrets(t *testing.T) {
 	t.Setenv("VAULT_HOSTS", "vault-a.example,vault-b.example")
 	t.Setenv("KEYSET_COMMITMENT", strings.Repeat("ab", 32))
 	t.Setenv("ENTITLEMENT_VERIFY_KEY", base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)))
+	t.Setenv("OPERATOR_KEY", strings.Repeat("cd", 32))
 	t.Setenv("ACME_DIRECTORY", acmeProduction)
 	t.Setenv("EGRESS_FORWARDER", "forwarder")
 	t.Setenv("EGRESS_ROUTES", "9001=mail.s3.us-east-1.amazonaws.com,9002=log.s3.us-east-1.amazonaws.com")
@@ -267,6 +268,9 @@ func TestReleaseNeedsAVaultAndCommitment(t *testing.T) {
 		"no commitment":     {"KEYSET_COMMITMENT", "", "KEYSET_COMMITMENT"},
 		"bad commitment":    {"KEYSET_COMMITMENT", strings.Repeat("AB", 32), "KEYSET_COMMITMENT"},
 		"no entitlement":    {"ENTITLEMENT_VERIFY_KEY", "", "ENTITLEMENT_VERIFY_KEY"},
+		"no operator":       {"OPERATOR_KEY", "", "OPERATOR_KEY"},
+		"short operator":    {"OPERATOR_KEY", strings.Repeat("cd", 31), "OPERATOR_KEY"},
+		"base64 operator":   {"OPERATOR_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)), "OPERATOR_KEY"},
 		"placeholder vault": {"VAULT_HOSTS", "PLACEHOLDER vault", "bare hostname"},
 	}
 	for name, c := range cases {

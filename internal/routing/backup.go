@@ -69,7 +69,7 @@ func BackupBootID(framed []byte) ([]byte, error) {
 }
 
 // OpenBackup verifies a backup against the signing boot's public key and returns
-// the routing object to restore. It's for cmd/routing-restore, not the running edge.
+// the routing object to restore. Only a restore uses it.
 func OpenBackup(framed []byte, signPub ed25519.PublicKey) ([]byte, error) {
 	bootID, err := BackupBootID(framed)
 	if err != nil {
@@ -90,7 +90,7 @@ type Summary struct {
 	Sequences  uint64 // the sum of every mailbox's counter, to compare two objects
 }
 
-// Restore holds what cmd/routing-restore needs to install a backup.
+// Restore holds what the edge needs to install a backup.
 type Restore struct {
 	Object         []byte // from OpenBackup
 	RoutingDataKey []byte
@@ -135,7 +135,7 @@ func (s *Store) summary() Summary {
 }
 
 // Apply writes the backup as the live object, conditional on what's there now, and
-// reads it back. The edges must be stopped first (docs/RESTORE.md). The generation
+// reads it back. The edge stops serving first (docs/RESTORE.md). The generation
 // stays near the backup's, so an edge left running refuses the object, rather than
 // carrying on with what it holds in memory.
 func (r Restore) Apply(ctx context.Context, blobs Blobs) (Summary, error) {

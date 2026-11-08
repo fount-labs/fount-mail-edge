@@ -139,7 +139,11 @@ type Option func(*Store)
 // a lost object as empty would answer 550 for every address, free every handle,
 // restart the sequences, and overwrite the object on the first write. A new
 // deployment creates it once with Initialize.
-var ErrNoObject = errors.New("routing: no routing object; run cmd/routing-init once for a new deployment, or restore a backup")
+var ErrNoObject = errors.New("routing: no routing object; initialize it with edgectl init for a new deployment, or restore a backup")
+
+// ErrCorrupt means the routing object exists but won't decrypt or parse. Only a
+// restore that replaces it can recover.
+var ErrCorrupt = errors.New("routing: routing object unreadable")
 
 // ErrObjectExists means Initialize found a routing object and left it alone.
 var ErrObjectExists = errors.New("routing: routing object already exists")
@@ -150,7 +154,7 @@ var ErrObjectExists = errors.New("routing: routing object already exists")
 var ErrRolledBack = errors.New("routing: routing object went backwards")
 
 // Initialize writes the empty routing object for a new deployment. It runs once,
-// before the first release, and refuses to replace an object. Any read failure
+// when the first edge boots and finds no object, and refuses to replace an object. Any read failure
 // other than a clean miss also stops it, because that can't show the object is
 // absent.
 func Initialize(ctx context.Context, blobs Blobs, routingDataKey []byte) error {
@@ -228,7 +232,7 @@ func (s *Store) load(ctx context.Context) error {
 	}
 	data, err := s.decrypt(raw)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
 	if s.data != nil && data.Version < s.data.Version {
 		return fmt.Errorf("%w: generation %d after %d", ErrRolledBack, data.Version, s.data.Version)

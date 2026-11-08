@@ -6,10 +6,13 @@
 //  1. Load the measured config (fail fast).
 //  2. Load the per-boot attested keys (TLS ecdsa-p256, signing ed25519,
 //     transfer x25519).
-//  3. Start the health listener, then pull the keyset from a vault, checked
-//     against KEYSET_COMMITMENT. Nothing else starts until that succeeds.
-//  4. Start the SMTP and Device API listeners.
-//  5. Run ACME for the attested TLS key once the gateway's first health check
+//  3. Start the health listener, which also serves the signed operator routes,
+//     then pull the keyset from a vault, checked against KEYSET_COMMITMENT.
+//     Nothing else starts until that succeeds.
+//  4. Load the routing object. If it's missing or unreadable, wait for a signed
+//     edgectl init or restore instead of exiting.
+//  5. Start the SMTP and Device API listeners.
+//  6. Run ACME for the attested TLS key once the gateway's first health check
 //     lands; answer 421 until the certificate loads.
 package main
 
@@ -24,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +38,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 	"github.com/fount-labs/fount-mail-edge/internal/keys"
+	"github.com/fount-labs/fount-mail-edge/internal/operator"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/s3"
 	"github.com/fount-labs/fount-mail-edge/internal/smtp"
@@ -81,11 +86,16 @@ func run() error {
 	defer stop()
 
 	// The health listener comes first, so the container stays healthy while it
-	// waits for a vault. /ready stays 503 until the certificate loads.
+	// waits for a vault or an operator. /ready stays 503 until the certificate loads.
 	certMgr := certs.NewManager()
+	ops := operator.NewRouting()
+	var opHandler http.Handler
+	if !cfg.Dev {
+		opHandler = operator.NewHandler(cfg.OperatorKey, ops)
+	}
 	healthSrv := &http.Server{
 		Addr:              cfg.HealthAddr,
-		Handler:           health(certMgr),
+		Handler:           health(certMgr, opHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 4)
@@ -96,7 +106,7 @@ func run() error {
 		}
 	}
 
-	st, rt, err := storage(cfg, k)
+	st, rt, err := storage(ctx, cfg, k, ops)
 	if err != nil {
 		return err
 	}
@@ -151,6 +161,18 @@ func run() error {
 		return err
 	}
 
+	// A restore that replaces the object this edge serves from stops mail first,
+	// then the edge restarts against the restored object.
+	var draining atomic.Bool
+	if rt != nil {
+		keylog, _ := st.(store.KeyLog)
+		ops.Serve(rt, keylog, func(ctx context.Context) {
+			draining.Store(true)
+			_ = apiSrv.Shutdown(ctx)
+			_ = smtpSrv.Shutdown(ctx)
+		})
+	}
+
 	go func() { errc <- smtpSrv.Serve(ctx, smtpLn) }()
 	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
 	go func() { errc <- ignoreClosed(acmeSrv.Serve(acmeLn)) }()
@@ -159,12 +181,23 @@ func run() error {
 	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
 		cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
 
-	select {
-	case <-ctx.Done():
-		log.Printf("edge: shutdown signal")
-	case err := <-errc:
-		if err != nil {
-			return err
+wait:
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("edge: shutdown signal")
+			break wait
+		case <-ops.Restart():
+			log.Printf("edge: restarting to load the restored routing object")
+			break wait
+		case err := <-errc:
+			if draining.Load() {
+				continue // the restore stopped these, and will restart the edge
+			}
+			if err != nil {
+				return err
+			}
+			break wait
 		}
 	}
 
@@ -247,7 +280,7 @@ func tunnelListener(cfg *config.Config, k *keys.Keys, addr string) (net.Listener
 // uses the domain suffix), and no provisioner (creation routes stay 501) —
 // enough to smoke-test the listeners. Until a mailbox is created, a production
 // edge has none, so every RCPT is correctly refused.
-func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, error) {
+func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operator.Routing) (store.Store, *routing.Store, error) {
 	if cfg.Dev {
 		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
 		return store.NewDiscard(), nil, nil
@@ -268,8 +301,11 @@ func storage(cfg *config.Config, k *keys.Keys) (store.Store, *routing.Store, err
 	if _, err := rand.Read(bootID); err != nil {
 		return nil, nil, err
 	}
-	rt, err := routing.New(context.Background(), blobs, cfg.Secrets.RoutingDataKey, cfg.Secrets.AddressMACKey,
-		routing.WithBackup(backupBlobs, k.Sign, bootID))
+	rt, err := ops.Load(ctx, operator.Backend{Blobs: blobs, RoutingDataKey: cfg.Secrets.RoutingDataKey, MailDomain: cfg.MailDomain},
+		func(ctx context.Context) (*routing.Store, error) {
+			return routing.New(ctx, blobs, cfg.Secrets.RoutingDataKey, cfg.Secrets.AddressMACKey,
+				routing.WithBackup(backupBlobs, k.Sign, bootID))
+		})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -389,8 +425,13 @@ func startRetentionSweep(ctx context.Context, st store.Store) {
 
 // health serves the shim's /health and /ready probes. /ready is not-ready until
 // the SMTP certificate loads, which is what gates the gateway opening the backend.
-func health(c *certs.Manager) http.Handler {
+// The signed operator routes share the listener, because it's the one the shim
+// exposes and the only one up before routing loads.
+func health(c *certs.Manager, op http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	if op != nil {
+		mux.Handle("/operator/", op)
+	}
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})

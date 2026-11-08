@@ -18,6 +18,7 @@ package config
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/url"
@@ -96,8 +97,11 @@ type Config struct {
 	// EntitlementVerifyKey is the Ed25519 public key that verifies device
 	// entitlements (§4/§8). It's public, so it's measured config, not a secret.
 	EntitlementVerifyKey []byte
-	Dev                  bool
-	Secrets              Secrets
+	// OperatorKey is the Ed25519 public key that signs edgectl requests: routing
+	// init, role mailboxes, and restores. The same key signs vault imports.
+	OperatorKey ed25519.PublicKey
+	Dev         bool
+	Secrets     Secrets
 }
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
@@ -204,6 +208,13 @@ func (c *Config) loadVault() error {
 		return fmt.Errorf("ENTITLEMENT_VERIFY_KEY is %d bytes, want %d raw Ed25519 bytes", len(verify), ed25519.PublicKeySize)
 	}
 	c.EntitlementVerifyKey = verify
+	// Without it nobody could initialize routing or restore a backup, so a release
+	// that can't parse it must not boot.
+	operator, err := hex.DecodeString(os.Getenv("OPERATOR_KEY"))
+	if err != nil || len(operator) != ed25519.PublicKeySize {
+		return fmt.Errorf("OPERATOR_KEY must be a hex Ed25519 public key, from vaultctl operator-keygen")
+	}
+	c.OperatorKey = operator
 	return nil
 }
 

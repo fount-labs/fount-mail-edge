@@ -24,18 +24,30 @@ before the first release, and keep the Go version equal to `go.mod`.
 
 ## New deployment
 
-The edge refuses to boot without its routing object, so a lost object can't be
-mistaken for a new deployment. Before the first release, run `cmd/routing-init`
-once with `ROUTING_DATA_KEY` and S3 credentials. It never replaces an object that
-exists. To put a lost object back, follow `docs/RESTORE.md`.
+Only the vault and the edge hold `ROUTING_DATA_KEY` and `ADDRESS_MAC_KEY`, so the edge
+changes routing data itself, on requests from `cmd/edgectl` signed with the operator
+key. `OPERATOR_KEY` in `tinfoil-config.yml` is its public half, the same key the vault
+checks S3 imports against.
 
-**Open (2026-11-07):** `routing-init`, `routing-provision`, and `routing-restore`
-read the routing and MAC keys on an operator's machine. With the keys held only in
-the vault and the edge, no operator has them, so these need to move into the edge.
+The first edge boots, pulls its keys, finds no routing object, and waits. It doesn't
+exit, and `/operator/status` reports `no-routing-object`. A missing object is never
+treated as a new deployment, so run this once:
+
+```sh
+go run ./cmd/edgectl init -edge <edge host> -operator-key operator.key
+```
+
+The edge then finishes booting. `init` never replaces an object. To put a lost object
+back, follow `docs/RESTORE.md`.
 
 `abuse@` and `postmaster@` must exist before real mail, and the Device API refuses
-those names. Run `cmd/routing-provision` once for each, with the public keys of the
-device that reads them.
+those names. Add each one with the public keys of the device that reads it:
+
+```sh
+go run ./cmd/edgectl provision -edge <edge host> -operator-key operator.key -role abuse -keys abuse.keys.json
+```
+
+The running edge adds it at once.
 
 ## Release (two-phase, matches the proven workflow)
 
