@@ -70,14 +70,14 @@ func Parse(raw []byte) (*Message, error) {
 
 	from, err := parseMailboxList(header.Get(fields, "from")[0].Value())
 	if err != nil || len(from) != 1 {
-		return nil, errors.New("From must hold exactly one plain address")
+		return nil, errors.New("the From field must hold exactly one plain address")
 	}
 	m := &Message{Raw: raw, From: from[0]}
 
 	if rt := header.Get(fields, "reply-to"); len(rt) == 1 {
 		addrs, err := parseMailboxList(rt[0].Value())
 		if err != nil || len(addrs) != 1 || withoutTag(addrs[0]) != m.From {
-			return nil, errors.New("Reply-To must be the worker's own address")
+			return nil, errors.New("the Reply-To field must be the worker's own address")
 		}
 	}
 

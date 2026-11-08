@@ -20,7 +20,7 @@ const (
 var (
 	ErrNoMailbox   = errors.New("no such mailbox")
 	ErrLapsed      = errors.New("mailbox entitlement has lapsed")
-	ErrNotWorker   = errors.New("From is not this worker's address")
+	ErrNotWorker   = errors.New("the From address is not this worker's")
 	ErrNotOwner    = errors.New("recipient is not an owner of this worker")
 	ErrNotProven   = errors.New("owner has not proved they read this address")
 	ErrRateLimited = errors.New("sending limit reached")
