@@ -65,7 +65,7 @@ containers:
       - VAULT_HOSTS: "vault-a.fount.containers.tinfoil.dev,vault-b.fount.containers.tinfoil.dev"
       - KEYSET_COMMITMENT: "PLACEHOLDER_COMMITMENT" # from the vault's /status after it generates
       - ENTITLEMENT_VERIFY_KEY: "PLACEHOLDER_ENTITLEMENT_VERIFY_KEY" # public, base64 raw Ed25519
-      - OPERATOR_KEY: "PLACEHOLDER_OPERATOR_KEY" # public, hex Ed25519; signs edgectl requests, same as the vault's
+      - OPERATOR_KEY: "6b8cebf9ea0a064955b8673b49d715d70be2265b89c025b483a8e8ceec4ae986" # public, hex Ed25519; signs edgectl requests, same as the vault's
       - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
 
 # The gateway's HAProxy opens the backend only after /ready passes twice, which
