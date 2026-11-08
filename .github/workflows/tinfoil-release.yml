@@ -1,51 +1,59 @@
+# Publishes a release when an admin pushes a v* tag. A ruleset lets only org
+# admins create those tags, and nothing else here can make one: whoever can release
+# can get the keys from the vaults, so the tag push is the approval.
+
 name: Tinfoil Release
 
-run-name: Release ${{ inputs.version }}
+run-name: Publish release ${{ github.ref_name }}
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to release (e.g. v1.0.0)'
-        required: true
-        type: string
+  push:
+    tags: ["v*"]
 
 concurrency:
-  group: tinfoil-container-release-${{ inputs.version }}
+  group: tinfoil-container-release-${{ github.ref_name }}
 
 jobs:
-  prepare-release:
+  check:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # push the release tag
-      actions: write        # dispatch tinfoil-release-publish.yml on the new tag
-
+      contents: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: true  # needed to push the release tag below
-
-      - name: Check if version tag already exists
-        env:
-          VERSION: ${{ inputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag is on main
         run: |
-          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q .; then
-            echo "::error::Tag $VERSION already exists"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
+            { echo "::error::$GITHUB_REF_NAME isn't on main"; exit 1; }
+      - name: The config is filled in
+        run: |
+          if grep -n PLACEHOLDER tinfoil-config.yml; then
+            echo "::error::tinfoil-config.yml still has placeholders"
             exit 1
           fi
 
-      - name: Create and push the release tag
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          git tag "$VERSION" "$GITHUB_SHA"
-          git push origin "refs/tags/$VERSION"
+  measure-and-release:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the GitHub release
+      packages: write       # attach the attestation to the image
+      id-token: write       # keyless attestation signing
+      attestations: write   # publish the attestation
 
-      - name: Dispatch the publish workflow on the new tag
+    steps:
+      - name: Measure image, attest, and publish the release
+        uses: tinfoilsh/measure-image-action@beba4296251f7a9bc44b481ebafe4863509e4380 # v0.14.1
+        with:
+          config-file: ${{ github.workspace }}/tinfoil-config.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # An enclave can only attest while its release has a freshness witness, and
+      # Tinfoil witnesses a repo's latest release. Without this, a new release can
+      # come up unable to send or receive keys.
+      - name: Mark the release latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          gh workflow run tinfoil-release-publish.yml --ref "$VERSION"
+        run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --latest

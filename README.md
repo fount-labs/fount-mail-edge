@@ -87,8 +87,8 @@ EDGE_DEV=1 ATTESTED_KEY_DIR=/path/to/devkeys ./edge
 ## Build & release
 
 Reproducible image: `scripts/build-image.sh /tmp/edge.oci` (needs the
-`docker-container` buildx driver). Release via the GitHub **Tinfoil Release**
-workflow (tag → measured publish on two runners). A vault serves any release at
+`docker-container` buildx driver). Release: run **Build Image**, pin the digest, then
+push a `v*` tag, which publishes the measured release. A vault serves any release at
 or above its `EDGE_MIN_TAG`. Verify any release with `scripts/verify-release.sh vX.Y.Z`. Full
 recipe in `docs/BUILD.md`.
 

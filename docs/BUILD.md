@@ -49,18 +49,19 @@ go run ./cmd/edgectl provision -edge <edge host> -operator-key operator.key -rol
 
 The running edge adds it at once.
 
-## Release (two-phase, matches the proven workflow)
+## Release
 
-1. **Tag** via the GitHub *Tinfoil Release* workflow. It pushes the tag and
-   dispatches the publish workflow against it.
-2. **Measure & publish**: `tinfoil-release-publish.yml` runs
-   `measure-image-action`, which builds, measures, attests (keyless), and creates
-   the GitHub release. CI's `reproducible-build` matrix builds on two runners and
-   fails if the digests differ.
-3. **Pin the digest** into both containers in `tinfoil-config.yml` (the forwarder
-   runs the same image as the edge) and run Tinfoil's measured-release
-   workflows.
-4. **Nothing to approve.** A vault hands the keyset to any release of this repo at
+1. **Build** with the *Build Image* workflow, run from `main` with the version. It runs
+   `scripts/build-image.sh`, pushes that exact image to GHCR with `crane`, and fails if
+   the pushed digest differs from the build's. CI's `reproducible-build` matrix builds
+   on two runners and fails if their digests differ.
+2. **Pin the digest** it reports into both containers in `tinfoil-config.yml` (the
+   forwarder runs the same image as the edge), and commit to `main`.
+3. **Tag**: `git tag vX.Y.Z && git push origin vX.Y.Z`. Only org admins can create `v*`
+   tags, and nothing in the workflows can. The push runs *Tinfoil Release*, which checks
+   the tag is on `main` and the config has no placeholders, then measures, attests,
+   publishes the GitHub release, and marks it latest so its witness renews.
+4. **The tag push is the approval.** A vault hands the keyset to any release of this repo at
    or above its `EDGE_MIN_TAG`, as soon as it's published. Publication is the
    control: it's public, and `fount-infra`'s `MailWatchStack` emails on every release of
    this repo and the vault's. To retire an old release, raise

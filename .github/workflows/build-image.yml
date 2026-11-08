@@ -1,0 +1,61 @@
+# Builds the image with scripts/build-image.sh, the same reproducible build CI
+# checks on two runners, and pushes exactly that image to GHCR. So the digest it
+# reports is one anyone can rebuild and match.
+#
+# Run it from main, pin the digest it reports in tinfoil-config.yml, commit, then
+# push the release tag.
+
+name: Build Image
+
+run-name: Build image ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version (e.g. v0.1.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: fount-mail-edge-image-${{ inputs.version }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      packages: write # push the image
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Deterministic build
+        run: ./scripts/build-image.sh /tmp/image.oci
+
+      - name: Push the built image unchanged
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          crane auth login ghcr.io -u "$ACTOR" -p "$TOKEN"
+          built=$(jq -r '.manifests[0].digest' /tmp/image.oci/index.json)
+          crane push /tmp/image.oci "$IMAGE:$VERSION"
+          pushed=$(crane digest "$IMAGE:$VERSION")
+          if [ "$built" != "$pushed" ]; then
+            echo "::error::pushed $pushed, but the reproducible build is $built"
+            exit 1
+          fi
+          printf 'Image: `%s@%s`\n\nPin this digest in tinfoil-config.yml.\n' "$IMAGE" "$pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "$IMAGE@$pushed"
