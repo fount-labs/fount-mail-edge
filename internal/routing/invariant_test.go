@@ -104,7 +104,8 @@ func TestRoutingVersionMonotonicProperty(t *testing.T) {
 		rng := rand.New(rand.NewPCG(seed, 0xA11CE))
 		routingKey, macKey := keys(t)
 		blobs := newMemBlobs()
-		s := newStore(t, blobs, routingKey, macKey)
+		// No new-owner cap: this checks the version alone.
+		s := newStore(t, blobs, routingKey, macKey, routing.WithNewOwnerLimit(0))
 		id := s.MailboxID("worker@fountbox.com")
 		if err := s.Upsert(ctx, newKeyset(t).record(id)); err != nil {
 			t.Fatal(err)
@@ -138,7 +139,7 @@ func TestRoutingVersionMonotonicProperty(t *testing.T) {
 			}
 
 			if rng.IntN(6) == 0 { // the version must survive a crash + reload
-				s = newStore(t, blobs, routingKey, macKey)
+				s = newStore(t, blobs, routingKey, macKey, routing.WithNewOwnerLimit(0))
 				if snap, _ := s.Snapshot(id); snap.RoutingVersion != cur {
 					t.Fatalf("seed %d step %d: version regressed across reload: %d, want %d", seed, step, snap.RoutingVersion, cur)
 				}

@@ -93,6 +93,18 @@ type Mailbox struct {
 	RoutingVersion uint64   `json:"routing_version,omitempty"` // device-held owner-list version; monotonic, the §4 rollback defense
 
 	Root []byte `json:"root,omitempty"` // a worker address's handle record; empty on the handle itself
+
+	// Paused stops the worker's jobs and sends, set by POST /pause with the passkey
+	// (§12). Mail still arrives and can still be fetched. PausedAt is the last change.
+	Paused   bool  `json:"paused,omitempty"`
+	PausedAt int64 `json:"paused_at,omitempty"`
+
+	// The license's owner state (M3, §10), kept on the handle's record only, because
+	// an owner is the license's and a new worker copies its owners. See owners.go.
+	OwnersSeen bool     `json:"owners_seen,omitempty"` // the license has had owners, so the next one isn't its first
+	OwnerState []Owner  `json:"owner_state,omitempty"`
+	OwnerAdds  []int64  `json:"owner_adds,omitempty"` // when each new owner of the last day was added, for the daily cap
+	Notices    []Notice `json:"notices,omitempty"`    // owner mail waiting for the send path
 }
 
 // root is the id shared by a handle and its workers.
@@ -125,6 +137,11 @@ type Store struct {
 	macKey []byte
 	aead   cipher.AEAD
 	backup *backup
+
+	ownerAEAD     cipher.AEAD // seals owner addresses (§4 "encrypted owner addresses")
+	proofKey      []byte      // keys owner-proof tokens
+	newOwnerLimit int         // new owners per license per day; <= 0 is no cap
+	now           func() time.Time
 
 	mu    sync.Mutex
 	data  *Data
@@ -193,7 +210,16 @@ func New(ctx context.Context, blobs Blobs, routingDataKey, addressMACKey []byte,
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead}
+	ownerAEAD, err := deriveAEAD(routingDataKey, ownerAddressInfo)
+	if err != nil {
+		return nil, err
+	}
+	proofKey, err := deriveKey(addressMACKey, ownerProofInfo)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead, ownerAEAD: ownerAEAD, proofKey: proofKey,
+		newOwnerLimit: DefaultNewOwnersPerDay, now: time.Now}
 	for _, o := range opts {
 		o(s)
 	}
@@ -207,13 +233,29 @@ func newAEAD(routingDataKey []byte) (cipher.AEAD, error) {
 	if len(routingDataKey) == 0 {
 		return nil, errors.New("routing: empty ROUTING_DATA_KEY")
 	}
-	prk, err := hkdf.Extract(sha256.New, routingDataKey, nil)
+	return deriveAEAD(routingDataKey, hkdfInfo)
+}
+
+// deriveKey derives a 32-byte key for one purpose from a configured secret.
+func deriveKey(secret []byte, info string) ([]byte, error) {
+	if len(secret) == 0 {
+		return nil, errors.New("routing: empty secret")
+	}
+	prk, err := hkdf.Extract(sha256.New, secret, nil)
 	if err != nil {
 		return nil, fmt.Errorf("routing: extract: %w", err)
 	}
-	key, err := hkdf.Expand(sha256.New, prk, hkdfInfo, keyLen)
+	key, err := hkdf.Expand(sha256.New, prk, info, keyLen)
 	if err != nil {
 		return nil, fmt.Errorf("routing: derive key: %w", err)
+	}
+	return key, nil
+}
+
+func deriveAEAD(secret []byte, info string) (cipher.AEAD, error) {
+	key, err := deriveKey(secret, info)
+	if err != nil {
+		return nil, err
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -388,6 +430,15 @@ func (m *Mailbox) clone() Mailbox {
 			c.OwnerHashes[i] = append([]byte(nil), h...)
 		}
 	}
+	c.OwnerState = slices.Clone(m.OwnerState)
+	for i := range c.OwnerState {
+		c.OwnerState[i] = c.OwnerState[i].clone()
+	}
+	c.OwnerAdds = slices.Clone(m.OwnerAdds)
+	c.Notices = slices.Clone(m.Notices)
+	for i := range c.Notices {
+		c.Notices[i] = c.Notices[i].clone()
+	}
 	return c
 }
 
@@ -467,8 +518,12 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 // means no entitlement has been recorded — dev/smoke, or a record that predates
 // enforcement — and is treated as accepting, never as expired; the app keeps
 // EntitlementExp ahead of now while a license is current or in grace, so a
-// lapsed value is the signal that even the grace is over.
+// lapsed value is the signal that even the grace is over. A "fount+<token>"
+// reply to an owner-proof mail is accepting while its token matches an owner.
 func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatus, error) {
+	if tag, ok := proofTag(recipient); ok {
+		return s.proofStatus(tag), nil
+	}
 	m, ok := s.lookup(hex.EncodeToString(s.MailboxID(recipient)))
 	if !ok {
 		return smtp.RecipientUnknown, nil
@@ -727,41 +782,6 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 		return nil, err
 	}
 	return id, nil
-}
-
-// SetOwners writes the versioned owner list (design §8 PUT /routing). Owners are
-// stored only as keyed hashes (§4; the encrypted owner addresses are M3). The
-// version must not go backwards: the device re-asserts its current version on
-// each sync, which overwrites a rolled-back object, and only a strictly greater
-// version changes the list. Resending the stored version with the same list is a
-// no-op. A lower version, or the stored version with a different list, is
-// ErrStaleVersion.
-func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refresh(ctx); err != nil {
-		return err
-	}
-	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
-	if !ok {
-		return ErrNoMailbox
-	}
-	if version < m.RoutingVersion {
-		return ErrStaleVersion
-	}
-	hashes := make([][]byte, 0, len(owners))
-	for _, o := range owners {
-		hashes = append(hashes, s.keyedHash(o))
-	}
-	if version == m.RoutingVersion {
-		if !slices.EqualFunc(hashes, m.OwnerHashes, hmac.Equal) {
-			return ErrStaleVersion
-		}
-		return nil
-	}
-	return s.update(ctx, []*Mailbox{m}, func(m *Mailbox) {
-		m.OwnerHashes, m.RoutingVersion = hashes, version
-	})
 }
 
 // RotatedKeys is the new key set a recovery (or move) installs on an existing

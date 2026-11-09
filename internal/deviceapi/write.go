@@ -120,7 +120,8 @@ type routingRequest struct {
 }
 
 // putRouting handles PUT /routing: the owner-change key (guard verified) writes
-// the versioned owner list. The edge stores owners as keyed hashes only (§4).
+// the versioned owner list. The edge keeps each owner as a keyed hash, plus a
+// sealed copy for owner mail (§4), and queues the M3 owner notices (§10).
 // The version must not go backwards, which is how a rolled-back routing object
 // gets corrected on the next sync and an old owner set can't be replayed.
 func (a *API) putRouting() http.Handler {
@@ -153,6 +154,10 @@ func (a *API) putRouting() http.Handler {
 		switch {
 		case errors.Is(err, routing.ErrStaleVersion):
 			writeErr(w, http.StatusConflict, "routing version did not advance")
+			return
+		case errors.Is(err, routing.ErrOwnerLimit):
+			w.Header().Set("Retry-After", "3600")
+			writeErr(w, http.StatusTooManyRequests, "new-owner limit reached, retry later")
 			return
 		case errors.Is(err, routing.ErrNoMailbox):
 			writeErr(w, http.StatusNotFound, "no such mailbox")
