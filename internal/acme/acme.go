@@ -92,9 +92,9 @@ type Issuer struct {
 	challenges *Challenges
 	http       *http.Client
 
-	dirCache map[string]string
-	kid      string
-	nonce    string
+	dir   directoryURLs
+	kid   string
+	nonce string
 }
 
 // NewIssuer builds an Issuer from the PEM account key delivered by the keyserver.
@@ -139,7 +139,7 @@ func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.P
 	for n, h := range hostnames {
 		identifiers[n] = map[string]string{"type": "dns", "value": h}
 	}
-	orderHdr, orderBody, err := i.post(ctx, i.dirCache["newOrder"], map[string]any{"identifiers": identifiers})
+	orderHdr, orderBody, err := i.post(ctx, i.dir.NewOrder, map[string]any{"identifiers": identifiers})
 	if err != nil {
 		return nil, fmt.Errorf("newOrder: %w", err)
 	}
@@ -252,8 +252,26 @@ func (i *Issuer) loadDirectory(ctx context.Context) error {
 		return err
 	}
 	defer res.Body.Close()
-	i.dirCache = map[string]string{}
-	return json.NewDecoder(res.Body).Decode(&i.dirCache)
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("directory answered %s", res.Status)
+	}
+	var d directoryURLs
+	if err := json.NewDecoder(res.Body).Decode(&d); err != nil {
+		return err
+	}
+	if d.NewNonce == "" || d.NewAccount == "" {
+		return fmt.Errorf("directory lacks newNonce or newAccount")
+	}
+	i.dir = d
+	return nil
+}
+
+// directoryURLs holds the directory entries the issuer uses. A real directory also
+// has a "meta" object and random keys (RFC 8555 §7.1.1), which are ignored.
+type directoryURLs struct {
+	NewNonce   string `json:"newNonce"`
+	NewAccount string `json:"newAccount"`
+	NewOrder   string `json:"newOrder"`
 }
 
 // register finds or creates the account. It can run again after a failed Issue,
@@ -261,7 +279,7 @@ func (i *Issuer) loadDirectory(ctx context.Context) error {
 // any kid left by the earlier attempt.
 func (i *Issuer) register(ctx context.Context) error {
 	i.kid = ""
-	hdr, _, err := i.post(ctx, i.dirCache["newAccount"], map[string]any{"termsOfServiceAgreed": true})
+	hdr, _, err := i.post(ctx, i.dir.NewAccount, map[string]any{"termsOfServiceAgreed": true})
 	if err != nil {
 		return err
 	}
@@ -275,7 +293,7 @@ func (i *Issuer) register(ctx context.Context) error {
 }
 
 func (i *Issuer) freshNonce(ctx context.Context) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodHead, i.dirCache["newNonce"], nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodHead, i.dir.NewNonce, nil)
 	res, err := i.http.Do(req)
 	if err != nil {
 		return "", err
