@@ -38,7 +38,7 @@ networks:
 
 containers:
   - name: mail-edge
-    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:4b19e6a72aeb4578d69d95cdc44df979bf7cf067563fe6631116e4af74cfbc9e" # set by release
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:c955989c41e8c3e374b0e3952b31186a8de675f9967072bef36b5949a85b1f4a" # set by release
     networks: [edge, internal]
     keys: [mail-tls, mail-sign, transfer]
     attestation: true # the socket the edge attests to the vault through
@@ -76,7 +76,7 @@ containers:
   # Copies S3 traffic along fixed routes. The edge keeps TLS and the S3 credentials,
   # so this holds no secrets and no keys, and the binary exits if it can see one.
   - name: forwarder
-    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:4b19e6a72aeb4578d69d95cdc44df979bf7cf067563fe6631116e4af74cfbc9e" # set by release, same digest as mail-edge
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:c955989c41e8c3e374b0e3952b31186a8de675f9967072bef36b5949a85b1f4a" # set by release, same digest as mail-edge
     networks: [internal, storage]
     command: ["egress-forward"]
     restart: always
