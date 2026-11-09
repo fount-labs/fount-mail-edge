@@ -89,6 +89,33 @@ func TestPolicyLapsedAndProof(t *testing.T) {
 	}
 }
 
+// A paused worker can't send, and the refusal costs nothing from its budget.
+func TestPolicyPaused(t *testing.T) {
+	dir, id := newDir("pat@smithcpa.com")
+	key := hex.EncodeToString(id)
+	m := dir.boxes[key]
+	m.Paused = true
+	dir.boxes[key] = m
+	p := NewPolicy(PolicyOptions{Directory: dir, MailDomain: "@fountbox.com", PerWorker: 1})
+	for i := 0; i < 3; i++ {
+		if err := p.Check(id, parsed(t, good())); !errors.Is(err, ErrPaused) {
+			t.Fatalf("paused: %v", err)
+		}
+	}
+	m.Paused = false
+	dir.boxes[key] = m
+	if err := p.Check(id, parsed(t, good())); err != nil {
+		t.Fatalf("resumed: %v", err)
+	}
+}
+
+// The release wiring: routing data is the Directory, and its edge-proved owners
+// are the ProofChecker.
+var (
+	_ Directory    = (*routing.Store)(nil)
+	_ ProofChecker = (*routing.Store)(nil).OwnerProven
+)
+
 func TestPolicyLimits(t *testing.T) {
 	dir, id := newDir("pat@smithcpa.com")
 	p := NewPolicy(PolicyOptions{Directory: dir, MailDomain: "@fountbox.com", PerWorker: 3, PerLicense: 100})

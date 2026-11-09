@@ -101,7 +101,7 @@ type Config struct {
 	// init, role mailboxes, and restores. The same key signs vault imports.
 	OperatorKey ed25519.PublicKey
 	// SendEnabled turns on POST /send (M3). It launches dark: a release refuses
-	// it until the send keyset and edge-proved owners exist.
+	// it until the send keyset exists.
 	SendEnabled bool
 	Dev         bool
 	Secrets     Secrets
@@ -179,7 +179,7 @@ func Load() (*Config, error) {
 		// The live edge mustn't send until M2 is proven with real senders, and it
 		// has no DKIM or relay key yet (fount-mail-send-keys.md in the Fount repo).
 		if !dev {
-			return nil, fmt.Errorf("SEND_ENABLED is dev-only until the send keyset and edge-proved owners exist")
+			return nil, fmt.Errorf("SEND_ENABLED is dev-only until the send keyset exists")
 		}
 		c.SendEnabled = true
 	}

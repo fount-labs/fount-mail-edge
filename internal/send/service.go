@@ -3,7 +3,7 @@
 // validated TLS through the gateway's relay.
 //
 // It launches dark. The live release leaves SEND_ENABLED unset, and config.Load
-// refuses it outside dev until the send keyset and edge-proved owners exist
+// refuses it outside dev until the send keyset exists
 // (docs/features/fount-fleet/fount-mail-send-keys.md in the Fount repo).
 package send
 

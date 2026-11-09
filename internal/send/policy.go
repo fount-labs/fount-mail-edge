@@ -20,6 +20,7 @@ const (
 var (
 	ErrNoMailbox   = errors.New("no such mailbox")
 	ErrLapsed      = errors.New("mailbox entitlement has lapsed")
+	ErrPaused      = errors.New("this worker is paused")
 	ErrNotWorker   = errors.New("the From address is not this worker's")
 	ErrNotOwner    = errors.New("recipient is not an owner of this worker")
 	ErrNotProven   = errors.New("owner has not proved they read this address")
@@ -33,7 +34,8 @@ type Directory interface {
 }
 
 // ProofChecker reports whether the edge itself has seen an owner answer the
-// "Reply to turn on email updates" mail (§10). Group G builds it.
+// "Reply to turn on email updates" mail (§10), and the new-owner wait is over.
+// routing.Store.OwnerProven implements it.
 type ProofChecker func(mailboxID, ownerHash []byte) bool
 
 // Policy decides whether a worker may send a message (§14). Every rule is the
@@ -80,6 +82,11 @@ func (p *Policy) Check(mailboxID []byte, m *Message) error {
 	mb, ok := p.dir.Snapshot(mailboxID)
 	if !ok {
 		return ErrNoMailbox
+	}
+	// POST /pause stops sends as well as jobs (§12). It's read from the same
+	// snapshot as the owner list, so no hook can be left unset.
+	if mb.Paused {
+		return ErrPaused
 	}
 	if mb.EntitlementExp != 0 && p.now().Unix() >= mb.EntitlementExp {
 		return ErrLapsed

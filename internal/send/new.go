@@ -21,7 +21,7 @@ type Options struct {
 	Hostname   string // EHLO name
 	Relay      *Relay
 	Signers    []*dkim.Signer
-	Proven     ProofChecker
+	Proven     ProofChecker   // required: routing.Store.OwnerProven
 	DoH        []string       // nil is DefaultDoH
 	Roots      *x509.CertPool // nil is the system roots; tests set their own
 }
@@ -32,6 +32,10 @@ func New(o Options) (*Service, error) {
 	switch {
 	case o.Directory == nil:
 		return nil, errors.New("send: no routing data")
+	case o.Proven == nil:
+		// The owner list is only what the licensee's device wrote, so sending
+		// needs the edge's own proof that each owner reads the address (§10).
+		return nil, errors.New("send: no owner proof check")
 	case o.Relay == nil || o.Relay.Addr == "" || len(o.Relay.Pins) == 0 || len(o.Relay.ClientCert.Certificate) == 0:
 		return nil, errors.New("send: the relay needs an address, pins, and a client key")
 	case len(o.Signers) == 0:

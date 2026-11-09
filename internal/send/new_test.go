@@ -48,6 +48,7 @@ func TestNewEndToEnd(t *testing.T) {
 		Hostname:   "mx1.fountbox.com",
 		Relay:      &Relay{Addr: r.dialer.Addr, ClientCert: clientCert, Pins: r.dialer.Pins},
 		Signers:    []*dkim.Signer{{Domain: "fountbox.com", Selector: "f1e", Key: dk}},
+		Proven:     func(_, _ []byte) bool { return true },
 		DoH:        []string{"https://dns-a.test/resolve", "https://dns-b.test/resolve"},
 		Roots:      r.ca.pool,
 	})
@@ -72,12 +73,14 @@ func TestNewRefusesIncompleteConfig(t *testing.T) {
 	cert, _ := RelayClientCert(dk)
 	relay := &Relay{Addr: "relay:1", ClientCert: cert, Pins: []gatewaytls.Pin{{1}}}
 	signers := []*dkim.Signer{{Domain: "fountbox.com", Selector: "s", Key: dk}}
-	full := Options{Directory: dir, MailDomain: "@fountbox.com", Hostname: "mx1", Relay: relay, Signers: signers}
+	full := Options{Directory: dir, MailDomain: "@fountbox.com", Hostname: "mx1", Relay: relay, Signers: signers,
+		Proven: func(_, _ []byte) bool { return true }}
 	if _, err := New(full); err != nil {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*Options){
 		"no directory": func(o *Options) { o.Directory = nil },
+		"no proof":     func(o *Options) { o.Proven = nil },
 		"no relay":     func(o *Options) { o.Relay = nil },
 		"no pins":      func(o *Options) { o.Relay = &Relay{Addr: "relay:1", ClientCert: cert} },
 		"no signers":   func(o *Options) { o.Signers = nil },

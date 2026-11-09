@@ -47,7 +47,7 @@ func (a *API) sendMail() http.Handler {
 			w.Header().Set("Retry-After", "3600")
 			writeErr(w, http.StatusTooManyRequests, err.Error())
 			return
-		case errors.Is(err, send.ErrLapsed), errors.Is(err, send.ErrNotWorker),
+		case errors.Is(err, send.ErrLapsed), errors.Is(err, send.ErrPaused), errors.Is(err, send.ErrNotWorker),
 			errors.Is(err, send.ErrNotOwner), errors.Is(err, send.ErrNotProven):
 			writeErr(w, http.StatusForbidden, err.Error())
 			return
