@@ -66,7 +66,8 @@ containers:
       - EGRESS_ROUTES: "9001=fount-mail-063207099341.s3.us-east-1.amazonaws.com,9002=fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com,9003=fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com" # same value on the forwarder
       - VAULT_HOSTS: "vault-a.fount.containers.tinfoil.dev,vault-b.fount.containers.tinfoil.dev"
       - KEYSET_COMMITMENT: "db2d1d4e7a8e474c78d48b89e93ccac6d9810776cda72ca8955000f9987dcb95" # from the vault's /status after it generates
-      - ENTITLEMENT_VERIFY_KEY: "diIUQFmqkiwGhaPK2i54yOAMwLOiSLvLXoEoE9f0LdM=" # public, base64 raw Ed25519; DEV key (alias/fount-mail-entitlement-signing-dev), swap for prod before launch
+      - ENTITLEMENT_VERIFY_KEY: "SFGtxHgwCfhpp7R03IDEcJy2RuX0a/KH9oGTDOXy6/4=" # public, base64 raw Ed25519; PROD key (alias/fount-mail-entitlement-signing-prod)
+      - RECOVERY_RP_ID: "fount.sh" # WebAuthn RP id for /recover and /pause; fount.sh serves the passkey AASA. RECOVERY_ORIGIN stays unset until a signed build shows the origin
       - OPERATOR_KEY: "6b8cebf9ea0a064955b8673b49d715d70be2265b89c025b483a8e8ceec4ae986" # public, hex Ed25519; signs edgectl requests, same as the vault's
       - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
 

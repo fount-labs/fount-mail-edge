@@ -63,7 +63,8 @@ printf 'PROXY TCP4 203.0.113.9 10.0.0.1 1 25\r\n' | nc -w1 localhost 12525   # 4
 
 `tinfoil-config.yml` holds the release's public values: the image digest (pinned by hand
 from *Build Image*, see `docs/BUILD.md`), `GATEWAY_CLIENT_PINS`, `KEYSET_COMMITMENT`, and
-`ENTITLEMENT_VERIFY_KEY`, which is still the dev key. The release workflow refuses a config
+`ENTITLEMENT_VERIFY_KEY` (the prod key since v0.2.1, so dev entitlements no longer work on the
+live edge), and `RECOVERY_RP_ID`. The release workflow refuses a config
 with a `PLACEHOLDER` left in it.
 
 The vaults pin this repo (`fount-labs/fount-mail-edge`), so a fork can't get the keys. The

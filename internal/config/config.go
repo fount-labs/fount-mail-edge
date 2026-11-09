@@ -91,7 +91,7 @@ type Config struct {
 	EgressForwarder   string           // the forwarder container's name
 	EgressRoutes      []egress.Route   // one per bucket hostname; measured with the config
 	RecoveryRPID      string           // WebAuthn RP id POST /recover verifies passkey assertions against; "" leaves recovery 501
-	RecoveryOrigin    string           // optional: pins the assertion's clientDataJSON origin (e.g. https://mail.fount.sh)
+	RecoveryOrigin    string           // optional: pins the assertion's clientDataJSON origin (e.g. https://fount.sh)
 	VaultHosts        []string         // vaults to pull the keyset from, tried in order
 	KeysetCommitment  string           // the only keyset this release accepts
 	// EntitlementVerifyKey is the Ed25519 public key that verifies device
@@ -142,7 +142,7 @@ func Load() (*Config, error) {
 		S3BackupBucket:    os.Getenv("S3_BACKUP_BUCKET"),
 		S3Region:          os.Getenv("S3_REGION"),
 		S3Endpoint:        os.Getenv("S3_ENDPOINT"),
-		RecoveryRPID:      os.Getenv("RECOVERY_RP_ID"), // PLACEHOLDER: the Fount RP domain serving the passkey AASA; confirm before deploy
+		RecoveryRPID:      os.Getenv("RECOVERY_RP_ID"), // the Fount RP domain serving the passkey AASA: fount.sh in tinfoil-config.yml
 		RecoveryOrigin:    os.Getenv("RECOVERY_ORIGIN"),
 		Dev:               dev,
 	}
