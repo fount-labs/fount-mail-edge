@@ -26,7 +26,12 @@ func TestRegisterAccountRetriesUntilTheCAAnswers(t *testing.T) {
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dir", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{"newNonce": base + "/nonce", "newAccount": base + "/acct"})
+		// Shaped like Let's Encrypt's: a meta object and a random key beside the URLs.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"newNonce": base + "/nonce", "newAccount": base + "/acct", "newOrder": base + "/order",
+			"meta":        map[string]any{"caaIdentities": []string{"letsencrypt.org"}, "termsOfService": base + "/tos"},
+			"aVYtl8q3Bk8": "https://community.letsencrypt.org/t/adding-random-entries-to-the-directory/33417",
+		})
 	})
 	mux.HandleFunc("HEAD /nonce", func(w http.ResponseWriter, _ *http.Request) { w.Header().Set("Replay-Nonce", "n") })
 	mux.HandleFunc("POST /acct", func(w http.ResponseWriter, _ *http.Request) {
