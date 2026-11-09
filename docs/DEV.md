@@ -55,6 +55,7 @@ curl -s localhost:18080/health                         # ok
 curl -s -o /dev/null -w '%{http_code}\n' localhost:18080/ready   # 503 until a cert loads
 curl -sk https://localhost:18443/boots/x               # 501 (open route)
 curl -sk -X POST https://localhost:18443/mailbox       # 401 (needs a signature)
+curl -s localhost:18080/boots/x                        # 501, the same API on the shim's port
 printf 'PROXY TCP4 203.0.113.9 10.0.0.1 1 25\r\n' | nc -w1 localhost 12525   # 421 (no cert)
 ```
 

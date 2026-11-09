@@ -30,7 +30,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,6 +137,22 @@ var routes = map[string]route{
 	"POST /pause":        {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
 	"POST /send":         {sigAddress, "M3", "Sends to owners"},
 	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
+}
+
+// Route is one row of the route table, for callers that mount or expose the API.
+type Route struct {
+	Pattern string // a net/http ServeMux pattern, e.g. "GET /mail/{id}"
+	Phase   string // the milestone the route belongs to, e.g. "M2"
+}
+
+// Routes lists the route table, sorted by pattern.
+func Routes() []Route {
+	out := make([]Route, 0, len(routes))
+	for p, r := range routes {
+		out = append(out, Route{Pattern: p, Phase: r.phase})
+	}
+	slices.SortFunc(out, func(a, b Route) int { return strings.Compare(a.Pattern, b.Pattern) })
+	return out
 }
 
 // Provisioner creates mailboxes and checks handle availability (design §8
