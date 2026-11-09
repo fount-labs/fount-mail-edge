@@ -93,6 +93,19 @@ func run() error {
 	if !cfg.Dev {
 		opHandler = operator.NewHandler(cfg.OperatorKey, ops)
 	}
+	// ACME: get a CA cert for the attested TLS key via the gateway HTTP-01 path.
+	// The issuer is built after the vault pull, which delivers its account key;
+	// /operator/status reads the account URL through this pointer until then.
+	challenges := acme.NewChallenges()
+	var issuer atomic.Pointer[acme.Issuer]
+	if h, ok := opHandler.(*operator.Handler); ok {
+		h.SetACMEAccount(func() string {
+			if i := issuer.Load(); i != nil {
+				return i.AccountURL()
+			}
+			return ""
+		})
+	}
 	// The shim forwards one port, so the Device API is served here too, once
 	// storage loads. Until then its routes answer 503.
 	late := &lateHandler{}
@@ -123,8 +136,6 @@ func run() error {
 		provisioner = rt
 		mutator = rt
 	}
-	// ACME: get a CA cert for the attested TLS key via the gateway HTTP-01 path.
-	challenges := acme.NewChallenges()
 	acmeSrv := &http.Server{
 		Addr:              cfg.ACMEChallengeAddr,
 		Handler:           challenges.Handler(),
@@ -179,7 +190,13 @@ func run() error {
 	go func() { errc <- smtpSrv.Serve(ctx, smtpLn) }()
 	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
 	go func() { errc <- ignoreClosed(acmeSrv.Serve(acmeLn)) }()
-	go startCertLoop(ctx, cfg, k, certMgr, challenges)
+	if i, err := acme.NewIssuer(cfg.Secrets.ACMEAccountKeyPEM, cfg.ACMEDirectory, challenges); err != nil {
+		log.Printf("edge: ACME disabled (%v); SMTP will answer 421 until a cert loads", err)
+	} else {
+		issuer.Store(i)
+		go registerAccount(ctx, i, accountRetries)
+		go startCertLoop(ctx, cfg, k, certMgr, challenges, i)
+	}
 	go startRetentionSweep(ctx, st)
 	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
 		cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
@@ -376,15 +393,34 @@ func certCache(cfg *config.Config, k *keys.Keys) certs.Cache {
 	return certs.NewS3Cache(blobs, k.TLS)
 }
 
-// startCertLoop builds the ACME issuer and drives certificate acquisition. If the
-// account key can't be parsed (EDGE_DEV placeholder), it logs and skips — the
-// edge then serves 421 forever, which is correct for a dev boot with no CA.
-func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *certs.Manager, challenges *acme.Challenges) {
-	issuer, err := acme.NewIssuer(cfg.Secrets.ACMEAccountKeyPEM, cfg.ACMEDirectory, challenges)
-	if err != nil {
-		log.Printf("edge: ACME disabled (%v); SMTP will answer 421 until a cert loads", err)
-		return
+// accountRetries are the waits between tries at the ACME account; the last repeats.
+var accountRetries = []time.Duration{30 * time.Second, time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour}
+
+// registerAccount looks up (or creates) the ACME account so /operator/status can
+// publish its URL for CAA `accounturi`. Issuance also registers, but a boot that
+// reloads a cached certificate never issues, and CAA should be pinnable before the
+// first order. newAccount reaches only the CA, not the gateways, so it runs at once.
+func registerAccount(ctx context.Context, issuer *acme.Issuer, retries []time.Duration) {
+	for n := 0; ; n++ {
+		err := issuer.Register(ctx)
+		if err == nil {
+			log.Printf("edge: ACME account %s", issuer.AccountURL())
+			return
+		}
+		wait := retries[min(n, len(retries)-1)]
+		log.Printf("edge: ACME account lookup failed, retrying in %s: %v", wait, err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
 	}
+}
+
+// startCertLoop drives certificate acquisition. With no issuer (an EDGE_DEV
+// placeholder account key) it never runs, and the edge serves 421 forever, which is
+// correct for a dev boot with no CA.
+func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *certs.Manager, challenges *acme.Challenges, issuer *acme.Issuer) {
 	cache := certCache(cfg, k)
 	log.Printf("edge: ACME via %s for %v", cfg.ACMEDirectory, cfg.MailHostnames)
 	certs.RunLoop(ctx, mgr, cache, challenges.Reachable(), cfg.MailHostnames[0],

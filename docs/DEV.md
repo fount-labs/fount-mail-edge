@@ -59,6 +59,41 @@ curl -s localhost:18080/boots/x                        # 501, the same API on th
 printf 'PROXY TCP4 203.0.113.9 10.0.0.1 1 25\r\n' | nc -w1 localhost 12525   # 421 (no cert)
 ```
 
+## ACME account and CAA
+
+The edge validates over **HTTP-01 only** (`internal/acme`), on the ACME port the gateways
+forward from public port 80. Its account key is `ACME_ACCOUNT_KEY` from the vault keyset,
+which `KEYSET_COMMITMENT` pins, so every boot and every release signs with the same key and
+Let's Encrypt answers `newAccount` with the same account URL. The URL changes only if the
+keyset is regenerated (a new commitment) or `ACME_DIRECTORY` points at another CA.
+
+Tinfoil has no container logs, so the edge publishes the URL on `GET /operator/status`. That
+route is unauthenticated, like the rest of the status answer, and the URL is public anyway (it
+goes into DNS). The edge looks the account up at boot, retrying until the CA answers, so the
+URL appears even on a boot that reloads a cached certificate, and before the first order.
+`acme_account` is absent until then:
+
+```sh
+go run ./cmd/edgectl status -edge <edge host>
+# {
+#   "routing": "serving",
+#   "acme_account": "https://acme-v02.api.letsencrypt.org/acme/acct/<id>"
+# }
+```
+
+Pin it with CAA, restricted to HTTP-01:
+
+```
+fountbox.com. CAA 0 issue "letsencrypt.org; accounturi=<URL>; validationmethods=http-01"
+```
+
+The record at the apex covers `mx1` and `mx2`, which have no CAA of their own. It also covers
+every other name under `fountbox.com`, so any other certificate there (for example the
+MTA-STS policy host) needs its own `issue` line, or the pin goes on the MX names instead.
+Pin the production URL (`acme-v02`), not a staging one. Until the record is published, any
+Let's Encrypt account can get a certificate for the MX names over HTTP-01, which is the
+attack the pin closes: a taken-over gateway answering the challenge itself.
+
 ## Release config
 
 `tinfoil-config.yml` holds the release's public values: the image digest (pinned by hand

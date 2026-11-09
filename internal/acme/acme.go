@@ -4,9 +4,10 @@
 //
 // Two keys, deliberately distinct:
 //
-//   - The ACME *account* key comes from the keyserver (ACME_ACCOUNT_KEY). CAA
-//     pins the account with `accounturi`, so a taken-over gateway can't get a
-//     certificate for the mail hostname on its own.
+//   - The ACME *account* key comes from the vault keyset (ACME_ACCOUNT_KEY), which
+//     KEYSET_COMMITMENT pins, so the account and its URL are the same every boot.
+//     CAA pins the account with `accounturi`, so a taken-over gateway can't get a
+//     certificate for the mail hostname on its own. AccountURL publishes the URL.
 //   - The *certificate* key is the per-boot attested `mail-tls` key. Its public
 //     half is in the attestation, so the issued cert provably binds the enclave.
 //
@@ -37,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -78,7 +80,11 @@ func (c *Challenges) Handler() http.Handler {
 	})
 }
 
+// Issuer is safe for concurrent use: Register and Issue take turns.
 type Issuer struct {
+	mu         sync.Mutex // one ACME conversation at a time: the nonce and kid are shared
+	accountURL atomic.Pointer[string]
+
 	directory  string
 	account    *ecdsa.PrivateKey
 	jwk        map[string]string
@@ -120,6 +126,8 @@ func NewIssuer(accountKeyPEM []byte, directory string, ch *Challenges) (*Issuer,
 // backed by certKey (the attested mail-tls key). Each name is validated, so every
 // gateway must be up for the order to pass.
 func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.PrivateKey) (*tls.Certificate, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if err := i.loadDirectory(ctx); err != nil {
 		return nil, err
 	}
@@ -175,6 +183,30 @@ func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.P
 		return nil, fmt.Errorf("download cert: %w", err)
 	}
 	return buildCert(chainPEM, certKey)
+}
+
+// Register finds or creates the account without ordering a certificate, so the
+// account URL is known on a boot that reloads a cached certificate, and before the
+// first issuance (CAA can then pin it before the edge ever orders).
+func (i *Issuer) Register(ctx context.Context) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.loadDirectory(ctx); err != nil {
+		return fmt.Errorf("directory: %w", err)
+	}
+	if err := i.register(ctx); err != nil {
+		return fmt.Errorf("newAccount: %w", err)
+	}
+	return nil
+}
+
+// AccountURL is the CA's URL for this account (the `kid`), which CAA `accounturi`
+// pins. It's public, and "" until a newAccount call has answered.
+func (i *Issuer) AccountURL() string {
+	if u := i.accountURL.Load(); u != nil {
+		return *u
+	}
+	return ""
 }
 
 func (i *Issuer) solveHTTP01(ctx context.Context, authzURL string) error {
@@ -234,6 +266,11 @@ func (i *Issuer) register(ctx context.Context) error {
 		return err
 	}
 	i.kid = hdr.Get("Location")
+	if i.kid == "" {
+		return fmt.Errorf("newAccount answered with no Location")
+	}
+	url := i.kid
+	i.accountURL.Store(&url)
 	return nil
 }
 

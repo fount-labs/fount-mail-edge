@@ -32,29 +32,28 @@ func (c *Client) Do(ctx context.Context, op string, payload, out any) error {
 	return wire.PostJSON(ctx, c.HTTP, c.Base+"/operator/"+op, req, out)
 }
 
-// Status reports where the edge is in its boot.
-func (c *Client) Status(ctx context.Context) (State, error) {
+// Status reports where the edge is in its boot, and its ACME account URL once known.
+// It needs no operator key.
+func (c *Client) Status(ctx context.Context) (StatusResponse, error) {
+	var out StatusResponse
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Base+"/operator/status", nil)
 	if err != nil {
-		return "", err
+		return out, err
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return out, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
 	if err != nil {
-		return "", err
+		return out, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("edge answered %d: %.400s", resp.StatusCode, raw)
-	}
-	var out struct {
-		Routing State `json:"routing"`
+		return out, fmt.Errorf("edge answered %d: %.400s", resp.StatusCode, raw)
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", err
+		return out, err
 	}
-	return out.Routing, nil
+	return out, nil
 }
