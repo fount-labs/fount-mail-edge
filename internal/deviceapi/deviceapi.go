@@ -137,19 +137,27 @@ var routes = map[string]route{
 	"POST /pause":        {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
 	"POST /send":         {sigAddress, "M3", "Sends to owners"},
 	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
+	"GET /pause/{id}":    {sigNone, "M3", "Issues a pause challenge bound to a worker and a state (§12)"},
+}
+
+// builtM3 are the M3 routes that are built, so the shim forwards them.
+var builtM3 = map[string]bool{
+	"GET /pause/{id}": true,
+	"POST /pause":     true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
 type Route struct {
 	Pattern string // a net/http ServeMux pattern, e.g. "GET /mail/{id}"
 	Phase   string // the milestone the route belongs to, e.g. "M2"
+	Public  bool   // built, so tinfoil-config.yml's shim forwards it
 }
 
 // Routes lists the route table, sorted by pattern.
 func Routes() []Route {
 	out := make([]Route, 0, len(routes))
 	for p, r := range routes {
-		out = append(out, Route{Pattern: p, Phase: r.phase})
+		out = append(out, Route{Pattern: p, Phase: r.phase, Public: r.phase == "M2" || builtM3[p]})
 	}
 	slices.SortFunc(out, func(a, b Route) int { return strings.Compare(a.Pattern, b.Pattern) })
 	return out
@@ -190,8 +198,9 @@ type Options struct {
 
 	// RecoveryRPID is the WebAuthn Relying Party id (the Fount domain serving
 	// the passkey's associated-domain file) that POST /recover verifies passkey
-	// assertions against. Empty leaves recovery as a 501 stub. RecoveryOrigin,
-	// when set, additionally pins the assertion's clientDataJSON origin.
+	// assertions against; POST /pause uses it too. Empty leaves recovery and
+	// pause as 501 stubs. RecoveryOrigin, when set, additionally pins the
+	// assertion's clientDataJSON origin.
 	RecoveryRPID   string
 	RecoveryOrigin string
 
@@ -214,6 +223,7 @@ type API struct {
 	recoverKey    []byte // per-boot HMAC key for stateless recovery challenges
 	keylog        store.KeyLog
 	gaps          store.GapReader
+	pauser        Pauser // from the Mutator; nil leaves POST /pause 501
 	nonces        *nonceCache
 	handleLimiter *limit.Limiter
 }
@@ -243,6 +253,7 @@ func New(o Options) *API {
 	boots, _ := o.Store.(store.BootStore) // same
 	a.keylog, _ = o.Store.(store.KeyLog)  // same; nil leaves POST /recover 501
 	a.gaps, _ = o.Store.(store.GapReader) // same
+	a.pauser, _ = o.Mutator.(Pauser)
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail, boots)))
 	}
@@ -279,6 +290,9 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.issueRecoveryChallenge()
 	case a.recoveryLive() && pattern == "POST /recover":
 		return a.recover()
+	}
+	if h := a.ownerControl(pattern); h != nil {
+		return h
 	}
 	return a.stub(pattern, rt)
 }

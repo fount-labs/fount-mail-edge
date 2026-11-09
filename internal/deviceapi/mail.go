@@ -35,8 +35,10 @@ func (a *API) listMail(mail store.MailReader) http.Handler {
 			writeErr(w, http.StatusInternalServerError, "list failed")
 			return
 		}
+		// The broker starts no job for a paused worker (§12); it still fetches.
+		paused := a.pauser != nil && a.pauser.Paused(mailboxID)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs})
+		_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "paused": paused})
 	})
 }
 

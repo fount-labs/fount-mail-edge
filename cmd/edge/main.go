@@ -114,9 +114,11 @@ func run() error {
 		recipients  smtp.RecipientChecker
 		provisioner deviceapi.Provisioner
 		mutator     deviceapi.Mutator
+		smtpStore   smtp.Storer = st
 	)
 	if rt != nil { // nil in dev (discard store, no routing)
 		resolver = deviceapi.NewKeyResolver(rt)
+		smtpStore = rt.ProofIntake(st) // owner-proof replies record the proof and aren't stored (§10)
 		recipients = rt
 		provisioner = rt
 		mutator = rt
@@ -147,7 +149,7 @@ func run() error {
 		Hostname:   cfg.MailHostnames[0],
 		Domain:     cfg.MailDomain,
 		Certs:      certMgr,
-		Store:      st,
+		Store:      smtpStore,
 		Recipients: recipients,
 		MaxBytes:   cfg.MaxMessageBytes,
 	})

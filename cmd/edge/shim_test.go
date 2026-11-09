@@ -76,16 +76,16 @@ func samplePath(pattern string) string {
 	return wildcardSegment.ReplaceAllString(path, "x")
 }
 
-// The shim is the Device API's only way in from outside, so every M2 route must be
-// on it, and the routes still to come must not be until they're built.
+// The shim is the Device API's only way in from outside, so every built route must
+// be on it, and the routes still to come must not be until they're built.
 func TestShimPathsMatchDeviceAPI(t *testing.T) {
 	paths := shimPaths(t)
 	for _, r := range deviceapi.Routes() {
 		allowed := shimAllows(paths, samplePath(r.Pattern))
 		switch {
-		case r.Phase == "M2" && !allowed:
-			t.Errorf("%s is an M2 route the shim doesn't forward", r.Pattern)
-		case r.Phase != "M2" && allowed:
+		case r.Public && !allowed:
+			t.Errorf("%s is a built %s route the shim doesn't forward", r.Pattern, r.Phase)
+		case !r.Public && allowed:
 			t.Errorf("%s is a %s route the shim forwards before it's built", r.Pattern, r.Phase)
 		}
 	}

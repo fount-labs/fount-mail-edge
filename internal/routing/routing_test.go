@@ -144,10 +144,10 @@ func keys(t *testing.T) (routingKey, macKey []byte) {
 	return
 }
 
-func newStore(t *testing.T, blobs routing.Blobs, routingKey, macKey []byte) *routing.Store {
+func newStore(t *testing.T, blobs routing.Blobs, routingKey, macKey []byte, opts ...routing.Option) *routing.Store {
 	t.Helper()
 	initialize(t, blobs, routingKey)
-	s, err := routing.New(context.Background(), blobs, routingKey, macKey)
+	s, err := routing.New(context.Background(), blobs, routingKey, macKey, opts...)
 	if err != nil {
 		t.Fatalf("routing.New: %v", err)
 	}

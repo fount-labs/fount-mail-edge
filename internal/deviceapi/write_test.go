@@ -532,3 +532,24 @@ func TestGetBoot(t *testing.T) {
 		}
 	}
 }
+
+func TestPutRoutingNewOwnerLimit(t *testing.T) {
+	rt, _ := newRoutingStore(t)
+	api, _ := mutatorAPI(t, rt)
+	mb := createMbox(t, rt, "worker@fountbox.com", "lic-1")
+
+	owners := []string{"jane@example.com"}
+	for v := uint64(1); v <= routing.DefaultNewOwnersPerDay+2; v++ {
+		raw, _ := json.Marshal(routingRequest{Version: v, Owners: owners})
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, mb.owner, mb.idHex, "PUT", "/routing", raw, time.Now(), fmt.Sprintf("cap%d", v)))
+		want := http.StatusOK
+		if v == routing.DefaultNewOwnersPerDay+2 { // the first write's owner doesn't count
+			want = http.StatusTooManyRequests
+		}
+		if rec.Code != want {
+			t.Fatalf("version %d: %d, want %d: %s", v, rec.Code, want, rec.Body.String())
+		}
+		owners = append(owners, fmt.Sprintf("o%d@example.com", v))
+	}
+}
