@@ -62,7 +62,9 @@ Real and exercised now:
 - **ACME (RFC 8555, HTTP-01)** for the attested TLS key, with one certificate
   covering both MX names. The vault's CAA-pinned account key signs the order,
   the attested `mail-tls` key is the cert key, and the certificate is cached (disk
-  in dev, chain-only S3 in prod). Exercised end-to-end against a mock ACME server;
+  in dev, chain-only S3 in prod). The account URL, which CAA `accounturi` pins, is
+  published on `/operator/status` and shown by `edgectl status`. Exercised
+  end-to-end against a mock ACME server;
 - **HPKE-to-address storage over S3**, the per-mailbox quota, routing data with
   signed backups, and the boot and key logs in their own Object Lock bucket;
 - the **30-day retention sweep**, which writes a signed expiry record for each

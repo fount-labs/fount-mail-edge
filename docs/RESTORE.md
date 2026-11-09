@@ -46,7 +46,7 @@ nothing.
      -backup /tmp/routing-backup -write -replace -skip-sequences <n>
    ```
 
-   What the edge does depends on its state, which `edgectl status` shows:
+   What the edge does depends on its state, which `edgectl status` shows as `routing`:
 
    - `no-routing-object`: it writes the backup and finishes booting. Leave off `-replace`.
    - `routing-unreadable`: the object won't decrypt. It needs `-replace`, then finishes

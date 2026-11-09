@@ -248,4 +248,127 @@ func TestIssueEndToEndAgainstMockACME(t *testing.T) {
 	if cert.PrivateKey.(*ecdsa.PrivateKey) != certKey {
 		t.Fatal("returned cert is not backed by the attested key")
 	}
+	if got := issuer.AccountURL(); got != base+"/acct/1" {
+		t.Fatalf("AccountURL after Issue = %q, want %s/acct/1", got, base)
+	}
+}
+
+// accountCA is a CA that only knows accounts: it hands each distinct jwk one URL,
+// as Let's Encrypt does, and answers a known key with the same URL again.
+func accountCA(t *testing.T) (*httptest.Server, *int) {
+	t.Helper()
+	var (
+		base  string
+		mu    sync.Mutex
+		calls int
+		urls  = map[string]string{}
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dir", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"newNonce": base + "/nonce", "newAccount": base + "/acct"})
+	})
+	mux.HandleFunc("HEAD /nonce", func(w http.ResponseWriter, _ *http.Request) { w.Header().Set("Replay-Nonce", "n") })
+	mux.HandleFunc("POST /acct", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Replay-Nonce", "n")
+		if !requireJWK(t, w, r) {
+			return
+		}
+		var jws struct{ Protected string }
+		_ = json.NewDecoder(r.Body).Decode(&jws)
+		raw, _ := base64.RawURLEncoding.DecodeString(jws.Protected)
+		var p struct{ JWK map[string]string }
+		_ = json.Unmarshal(raw, &p)
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		id := p.JWK["x"] + p.JWK["y"]
+		u, ok := urls[id]
+		if !ok {
+			u = fmt.Sprintf("%s/acct/%d", base, len(urls)+1)
+			urls[id] = u
+		}
+		w.Header().Set("Location", u)
+		if ok {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusCreated)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	base = srv.URL
+	return srv, &calls
+}
+
+// The URL CAA pins comes from newAccount alone, so a boot that reloads a cached
+// certificate still publishes it; and the same account key, as the vault delivers
+// every boot, gets the same URL, so the pin survives restarts.
+func TestRegisterPublishesAStableAccountURL(t *testing.T) {
+	srv, calls := accountCA(t)
+	accountPEM, _ := testAccountPEM(t)
+
+	first, err := NewIssuer(accountPEM, srv.URL+"/dir", NewChallenges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first.AccountURL(); got != "" {
+		t.Fatalf("AccountURL before registering = %q, want empty", got)
+	}
+	if err := first.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := srv.URL + "/acct/1"
+	if got := first.AccountURL(); got != want {
+		t.Fatalf("AccountURL = %q, want %q", got, want)
+	}
+
+	restarted, err := NewIssuer(accountPEM, srv.URL+"/dir", NewChallenges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.AccountURL(); got != want {
+		t.Fatalf("after a restart AccountURL = %q, want %q", got, want)
+	}
+
+	otherPEM, _ := testAccountPEM(t)
+	other, _ := NewIssuer(otherPEM, srv.URL+"/dir", NewChallenges())
+	if err := other.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if other.AccountURL() == want {
+		t.Fatal("a different account key got the pinned URL")
+	}
+	if *calls != 3 {
+		t.Fatalf("newAccount calls = %d, want 3", *calls)
+	}
+}
+
+// A failed lookup leaves the URL empty rather than publishing something CAA
+// can't use, and a CA that answers with no Location is an error.
+func TestRegisterFailureLeavesAccountURLEmpty(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dir", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"newNonce": base + "/nonce", "newAccount": base + "/acct"})
+	})
+	mux.HandleFunc("HEAD /nonce", func(w http.ResponseWriter, _ *http.Request) { w.Header().Set("Replay-Nonce", "n") })
+	mux.HandleFunc("POST /acct", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Replay-Nonce", "n")
+		w.WriteHeader(http.StatusOK) // no Location
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+
+	accountPEM, _ := testAccountPEM(t)
+	issuer, _ := NewIssuer(accountPEM, base+"/dir", NewChallenges())
+	if err := issuer.Register(context.Background()); err == nil || !strings.Contains(err.Error(), "Location") {
+		t.Fatalf("err = %v, want a missing-Location error", err)
+	}
+	if got := issuer.AccountURL(); got != "" {
+		t.Fatalf("AccountURL = %q, want empty", got)
+	}
 }

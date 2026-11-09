@@ -573,7 +573,44 @@ func TestStatusNeedsNoSignature(t *testing.T) {
 	f := newFixture(t)
 	f.boot(StateNoObject)
 	got, err := f.client.Status(context.Background())
-	if err != nil || got != StateNoObject {
-		t.Fatalf("status = %q, %v", got, err)
+	if err != nil || got.Routing != StateNoObject {
+		t.Fatalf("status = %+v, %v", got, err)
+	}
+}
+
+// CAA `accounturi` pins the ACME account, and Tinfoil has no container logs, so
+// the URL is published on the unauthenticated status route once it's known.
+func TestStatusPublishesACMEAccountOnceKnown(t *testing.T) {
+	f := newFixture(t)
+	var url atomic.Pointer[string]
+	f.handler.SetACMEAccount(func() string {
+		if u := url.Load(); u != nil {
+			return *u
+		}
+		return ""
+	})
+	f.boot(StateNoObject)
+
+	resp, err := http.Get(f.srv.URL + "/operator/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if _, ok := raw["acme_account"]; ok {
+		t.Fatalf("acme_account present before registration: %v", raw)
+	}
+
+	want := "https://acme-v02.api.letsencrypt.org/acme/acct/123456"
+	url.Store(&want)
+	got, err := (&Client{HTTP: f.srv.Client(), Base: f.srv.URL}).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ACMEAccount != want || got.Routing != StateNoObject {
+		t.Fatalf("status = %+v, want account %s", got, want)
 	}
 }

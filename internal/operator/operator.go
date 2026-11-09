@@ -59,11 +59,21 @@ func Message(op, nonce string, payload []byte) []byte {
 	return append(msg, payload...)
 }
 
+// StatusResponse is GET /operator/status. Like the route, it's unauthenticated
+// and holds nothing secret.
+type StatusResponse struct {
+	Routing State `json:"routing"`
+	// ACMEAccount is the Let's Encrypt account URL, which CAA `accounturi` pins.
+	// Absent until the edge's newAccount call has answered.
+	ACMEAccount string `json:"acme_account,omitempty"`
+}
+
 // Handler serves the operator routes on the edge's shim listener.
 type Handler struct {
-	key     ed25519.PublicKey
-	routing *Routing
-	now     func() time.Time
+	key         ed25519.PublicKey
+	routing     *Routing
+	acmeAccount func() string
+	now         func() time.Time
 
 	mu     sync.Mutex
 	nonces map[string]time.Time
@@ -73,10 +83,22 @@ func NewHandler(key ed25519.PublicKey, r *Routing) *Handler {
 	return &Handler{key: key, routing: r, now: time.Now, nonces: map[string]time.Time{}}
 }
 
+// SetACMEAccount names where /operator/status reads the ACME account URL from.
+// Call it before serving.
+func (h *Handler) SetACMEAccount(f func() string) { h.acmeAccount = f }
+
+func (h *Handler) status(w http.ResponseWriter) {
+	out := StatusResponse{Routing: h.routing.State()}
+	if h.acmeAccount != nil {
+		out.ACMEAccount = h.acmeAccount()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/operator/status":
-		writeJSON(w, http.StatusOK, map[string]State{"routing": h.routing.State()})
+		h.status(w)
 	case r.Method == http.MethodPost && r.URL.Path == "/operator/begin":
 		h.begin(w)
 	case r.Method == http.MethodPost && r.URL.Path == "/operator/"+OpInit:

@@ -21,7 +21,7 @@ import (
 
 const usage = `usage:
   edgectl role-keygen -role abuse|postmaster -out DIR
-  edgectl status    -edge HOST
+  edgectl status    -edge HOST   (routing state and ACME account URL; no key needed)
   edgectl init      -edge HOST -operator-key FILE
   edgectl provision -edge HOST -operator-key FILE -role abuse|postmaster -keys FILE
   edgectl restore   -edge HOST -operator-key FILE -backup FILE [-boot-record FILE]

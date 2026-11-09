@@ -113,4 +113,6 @@ config has no log lines.
   SMTP and ACME through a real tunnel still need a deployed gateway.
 - DNS for the mail domain: strict SPF, DMARC `p=reject`, TLS-RPT, strict
   MTA-STS, CAA (pinning the ACME account via `accounturi`), low-TTL MX. These
-  live in fount-infra.
+  live in fount-infra. The CAA record is
+  `fountbox.com. CAA 0 issue "letsencrypt.org; accounturi=<URL>; validationmethods=http-01"`,
+  with the URL from `edgectl status` (`acme_account`); `docs/DEV.md` covers it.
