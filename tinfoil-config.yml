@@ -99,7 +99,7 @@ shim:
     - /operator/init
     - /operator/provision
     - /operator/restore
-    # Device API (design §8), M2 routes only. Each is signed per its row in
+    # Device API (design §8), built routes only. Each is signed per its row in
     # internal/deviceapi; cmd/edge's TestShimPathsMatchDeviceAPI keeps this in sync.
     # The shim matches exactly, or by segment prefix where a path ends in /*.
     - /mailbox
@@ -113,3 +113,5 @@ shim:
     - /boots/*
     - /recover
     - /recover/*
+    - /pause
+    - /pause/*
