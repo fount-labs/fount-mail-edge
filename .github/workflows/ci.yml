@@ -50,6 +50,10 @@ jobs:
           internal/store:FuzzParse
           internal/routing:FuzzDecrypt
           internal/webauthn:FuzzVerify
+          internal/header:FuzzSplit
+          internal/send:FuzzParse
+          internal/send:FuzzParseMailbox
+          internal/send:FuzzParseSTSPolicy
           "
           for spec in $targets; do
             pkg="${spec%%:*}"; name="${spec##*:}"

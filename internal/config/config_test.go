@@ -311,3 +311,33 @@ func TestReleaseHoldsNoSecretsUntilTheVault(t *testing.T) {
 		t.Fatal("installed the wrong keys")
 	}
 }
+
+func TestReleaseRefusesSending(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	if c, err := Load(); err != nil || c.SendEnabled {
+		t.Fatalf("unset: enabled=%v err=%v", c != nil && c.SendEnabled, err)
+	}
+	for _, v := range []string{"1", "true", "0"} {
+		t.Setenv("SEND_ENABLED", v)
+		if _, err := Load(); err == nil {
+			t.Errorf("SEND_ENABLED=%q booted a release", v)
+		}
+	}
+	t.Setenv("EDGE_DEV", "1")
+	t.Setenv("SEND_ENABLED", "1")
+	if c, err := Load(); err != nil || !c.SendEnabled {
+		t.Fatalf("dev: %v", err)
+	}
+}
+
+func TestReleaseConfigLeavesSendingOff(t *testing.T) {
+	raw, err := os.ReadFile("../../tinfoil-config.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "SEND_ENABLED") {
+		t.Fatal("tinfoil-config.yml must not set SEND_ENABLED until sending is proven")
+	}
+}

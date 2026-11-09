@@ -100,6 +100,9 @@ type Config struct {
 	// OperatorKey is the Ed25519 public key that signs edgectl requests: routing
 	// init, role mailboxes, and restores. The same key signs vault imports.
 	OperatorKey ed25519.PublicKey
+	// SendEnabled turns on POST /send (M3). It launches dark: a release refuses
+	// it until the send keyset exists.
+	SendEnabled bool
 	Dev         bool
 	Secrets     Secrets
 }
@@ -168,6 +171,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("GATEWAY_CLIENT_PINS: %w", err)
 		}
 		c.GatewayPins = pins
+	}
+	if v := os.Getenv("SEND_ENABLED"); v != "" {
+		if v != "1" {
+			return nil, fmt.Errorf("SEND_ENABLED must be 1 or unset, got %q", v)
+		}
+		// The live edge mustn't send until M2 is proven with real senders, and it
+		// has no DKIM or relay key yet (fount-mail-send-keys.md in the Fount repo).
+		if !dev {
+			return nil, fmt.Errorf("SEND_ENABLED is dev-only until the send keyset exists")
+		}
+		c.SendEnabled = true
 	}
 	if dev {
 		devSecrets(c)

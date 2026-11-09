@@ -204,6 +204,9 @@ type Options struct {
 	RecoveryRPID   string
 	RecoveryOrigin string
 
+	// Sender backs POST /send (M3). nil leaves it 501.
+	Sender Sender
+
 	// HandleLimiter throttles every route that shows whether an address is taken
 	// (§8), keyed by the caller's license so one subscription can't enumerate the
 	// namespace. nil builds a per-enclave default.
@@ -226,6 +229,7 @@ type API struct {
 	pauser        Pauser // from the Mutator; nil leaves POST /pause 501
 	nonces        *nonceCache
 	handleLimiter *limit.Limiter
+	sender        Sender
 }
 
 func New(o Options) *API {
@@ -242,6 +246,7 @@ func New(o Options) *API {
 		recoverKey:    make([]byte, 32),
 		nonces:        newNonceCache(),
 		handleLimiter: o.HandleLimiter,
+		sender:        o.Sender,
 	}
 	if a.handleLimiter == nil {
 		a.handleLimiter = limit.New(5, 30) // 5 checks/sec, burst 30, per license
@@ -290,6 +295,8 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.issueRecoveryChallenge()
 	case a.recoveryLive() && pattern == "POST /recover":
 		return a.recover()
+	case a.sender != nil && pattern == "POST /send":
+		return a.sendMail()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h
