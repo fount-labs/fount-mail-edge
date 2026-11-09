@@ -57,7 +57,8 @@ The running edge adds it at once.
    `scripts/build-image.sh`, pushes that exact image to GHCR with `crane`, and fails if
    the pushed digest differs from the build's.
 2. **Pin the digest** it reports into both containers in `tinfoil-config.yml` (the
-   forwarder runs the same image as the edge), and commit to `main`.
+   forwarder runs the same image as the edge), and merge that to `main` by PR (the `main`
+   ruleset blocks direct pushes).
 3. **Tag**: `git tag vX.Y.Z && git push origin vX.Y.Z`. Only org admins can create `v*`
    tags, and nothing in the workflows can. The push runs *Tinfoil Release*, which checks
    the tag is on `main` and the config has no placeholders, then measures, attests,
