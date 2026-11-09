@@ -40,7 +40,11 @@ exist, and how a release gets them. Code comments cite its section numbers.
   requires (`POST /mailbox` by new keys, `GET /mail` by the address key, …), over
   `method · path · sha256(body) · timestamp · nonce`. A captured request can't be
   replayed, except once across a restart: the nonce cache is in memory, and the
-  timestamp window is 5 minutes.
+  timestamp window is 5 minutes. The broker reaches it through the Tinfoil
+  shim, which forwards only the paths `shim.paths` in `tinfoil-config.yml` lists.
+- **SPF inputs, sealed.** Each stored message carries the sending server's IP
+  (from the gateway's PROXY header) and its HELO name inside the encryption, for
+  the broker's SPF check. The edge keeps neither anywhere readable.
 - **No addresses at rest or in logs.** Routing data holds keyed hashes, and a
   failed store logs only the error class. The edge does see addresses in memory:
   each SMTP recipient, and the addresses on `POST /address` and `PUT /routing`.

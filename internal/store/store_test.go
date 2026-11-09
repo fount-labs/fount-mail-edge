@@ -8,7 +8,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -142,7 +141,11 @@ func TestPutRoundTrip(t *testing.T) {
 
 	s := New(dir, blobs, sign, bootID)
 	raw := []byte("From: owner@example.com\r\nSubject: hi\r\n\r\nrun the thing\r\n")
-	id, err := s.Put(context.Background(), "worker@fountbox.com", "owner@example.com", raw)
+	in := Envelope{
+		Sender: "owner@example.com", Recipient: "worker@fountbox.com",
+		ClientIP: "2001:db8::25", ClientIPFrom: ClientIPProxy, HELO: "mail.example.com",
+	}
+	id, err := s.Put(context.Background(), in, raw)
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -162,6 +165,9 @@ func TestPutRoundTrip(t *testing.T) {
 	if p.Sequence != 1 {
 		t.Fatalf("sequence = %d, want 1", p.Sequence)
 	}
+	if p.Version != formatVersion {
+		t.Fatalf("version = %d, want %d", p.Version, formatVersion)
+	}
 	if !bytes.Equal(p.BootID, bootID) {
 		t.Fatal("boot id mismatch")
 	}
@@ -177,9 +183,12 @@ func TestPutRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hpke.Open: %v", err)
 	}
-	sender, recipient, body := unframe(t, plain)
-	if sender != "owner@example.com" || recipient != "worker@fountbox.com" {
-		t.Fatalf("envelope = %q/%q", sender, recipient)
+	env, body, err := unframe(p.Version, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env != in {
+		t.Fatalf("envelope = %+v, want %+v", env, in)
 	}
 	if !bytes.Equal(body, raw) {
 		t.Fatalf("raw mismatch:\n got %q\nwant %q", body, raw)
@@ -195,7 +204,7 @@ func TestParseRejectsTamper(t *testing.T) {
 	blobs := newMemBlobs()
 	sign, signPub := newSignKey(t)
 	s := New(dir, blobs, sign, make([]byte, lenBootID))
-	if _, err := s.Put(context.Background(), "a@fountbox.com", "x@y.com", []byte("body")); err != nil {
+	if _, err := s.Put(context.Background(), Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body")); err != nil {
 		t.Fatal(err)
 	}
 	var obj []byte
@@ -218,7 +227,7 @@ func TestCiphertextBoundToHeader(t *testing.T) {
 	blobs := newMemBlobs()
 	sign, signPub := newSignKey(t)
 	s := New(dir, blobs, sign, make([]byte, lenBootID))
-	if _, err := s.Put(context.Background(), "a@fountbox.com", "x@y.com", []byte("body")); err != nil {
+	if _, err := s.Put(context.Background(), Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body")); err != nil {
 		t.Fatal(err)
 	}
 	var obj []byte
@@ -239,7 +248,7 @@ func TestCiphertextBoundToHeader(t *testing.T) {
 func TestPutUnknownRecipient(t *testing.T) {
 	dir := newMemDir(make([]byte, 32))
 	s := New(dir, newMemBlobs(), mustSign(t), make([]byte, lenBootID))
-	_, err := s.Put(context.Background(), "nobody@fountbox.com", "x@y.com", []byte("body"))
+	_, err := s.Put(context.Background(), Envelope{Recipient: "nobody@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 	if !errors.Is(err, ErrNoRecipient) {
 		t.Fatalf("err = %v, want ErrNoRecipient", err)
 	}
@@ -259,11 +268,11 @@ func TestMailReaderRoundTrip(t *testing.T) {
 	mbox := dir.mailboxID("a@fountbox.com")
 	ctx := context.Background()
 
-	id1, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("one"))
+	id1, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("two"))
+	id2, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,16 +327,17 @@ func TestStoredSizeMatchesMarshal(t *testing.T) {
 	dir := newMemDir(macKey)
 	k := dir.add(t, "a@fountbox.com")
 	for _, raw := range [][]byte{nil, []byte("x"), bytes.Repeat([]byte("m"), 5000)} {
-		sender, recipient := "owner@example.com", "a@fountbox.com"
+		env := Envelope{Sender: "owner@example.com", Recipient: "a@fountbox.com", ClientIP: "192.0.2.1", ClientIPFrom: ClientIPProxy, HELO: "mx.example.com"}
+		recipient := env.Recipient
 		msg := &Message{
 			EdgeID: make([]byte, lenEdgeID), MailboxID: dir.mailboxID(recipient),
 			PubKeyHash: pubKeyHash(k.PublicKey().Bytes()), Sequence: 7, BootID: make([]byte, lenBootID),
 		}
-		if err := msg.seal(k.PublicKey().Bytes(), sender, recipient, raw); err != nil {
+		if err := msg.seal(k.PublicKey().Bytes(), env, raw); err != nil {
 			t.Fatal(err)
 		}
 		got := int64(len(msg.MarshalSigned(mustSign(t))))
-		if want := storedSize(sender, recipient, len(raw)); got != want {
+		if want := storedSize(env, len(raw)); got != want {
 			t.Fatalf("raw=%d: storedSize=%d, MarshalSigned=%d", len(raw), want, got)
 		}
 	}
@@ -346,20 +356,20 @@ func TestPutEnforcesMailboxQuota(t *testing.T) {
 
 	// Cap at exactly two messages of this shape; the third must be refused.
 	body := []byte("a short message body\r\n")
-	one := storedSize("x@y.com", "a@fountbox.com", len(body))
+	one := storedSize(Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, len(body))
 	s := New(dir, blobs, mustSign(t), make([]byte, lenBootID), WithMaxMailboxBytes(2*one))
 	mr := s.(MailReader)
 	mbox := dir.mailboxID("a@fountbox.com")
 
-	id1, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body)
+	id1, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, body)
 	if err != nil {
 		t.Fatalf("first Put: %v", err)
 	}
-	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body); err != nil {
+	if _, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, body); err != nil {
 		t.Fatalf("second Put: %v", err)
 	}
 	// Third exceeds the cap.
-	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body); !errors.Is(err, ErrMailboxFull) {
+	if _, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, body); !errors.Is(err, ErrMailboxFull) {
 		t.Fatalf("third Put err = %v, want ErrMailboxFull", err)
 	}
 	// The rejected Put consumed no sequence number: the next accepted message is
@@ -367,7 +377,7 @@ func TestPutEnforcesMailboxQuota(t *testing.T) {
 	if err := mr.Delete(ctx, mbox, id1); err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body)
+	id, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, body)
 	if err != nil {
 		t.Fatalf("Put after freeing room: %v", err)
 	}
@@ -391,7 +401,7 @@ func TestListReportsSizes(t *testing.T) {
 	s := New(dir, newMemBlobs(), mustSign(t), make([]byte, lenBootID))
 	ctx := context.Background()
 	body := []byte("hello world body\r\n")
-	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", body); err != nil {
+	if _, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, body); err != nil {
 		t.Fatal(err)
 	}
 	list, err := s.(MailReader).List(ctx, dir.mailboxID("a@fountbox.com"))
@@ -401,7 +411,7 @@ func TestListReportsSizes(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("list = %d, want 1", len(list))
 	}
-	if want := int(storedSize("x@y.com", "a@fountbox.com", len(body))); list[0].Size != want {
+	if want := int(storedSize(Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, len(body))); list[0].Size != want {
 		t.Fatalf("Size = %d, want %d", list[0].Size, want)
 	}
 }
@@ -428,7 +438,7 @@ func TestRetentionSweep(t *testing.T) {
 	// Three messages (sequences 1,2,3). Age the first two past the window.
 	ids := make([]string, 3)
 	for i := range ids {
-		id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+		id, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 		if err != nil {
 			t.Fatalf("put %d: %v", i, err)
 		}
@@ -497,7 +507,7 @@ func TestSweepSkipsUndatableAndDisabled(t *testing.T) {
 	// Undatable: object stored but no modified time -> never swept.
 	blobs := newMemBlobs()
 	s := New(dir, blobs, mustSign(t), make([]byte, lenBootID), WithRetention(time.Hour))
-	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body")); err != nil {
+	if _, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body")); err != nil {
 		t.Fatal(err)
 	}
 	if res, err := s.(Sweeper).Sweep(ctx, now); err != nil || res.Expired != 0 {
@@ -507,7 +517,7 @@ func TestSweepSkipsUndatableAndDisabled(t *testing.T) {
 	// Disabled: even a provably-old object is left alone.
 	blobs2 := newMemBlobs()
 	s2 := New(dir, blobs2, mustSign(t), make([]byte, lenBootID), WithRetention(0))
-	id, err := s2.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	id, err := s2.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,18 +537,6 @@ func mustSign(t *testing.T) ed25519.PrivateKey {
 		t.Fatal(err)
 	}
 	return priv
-}
-
-func unframe(t *testing.T, p []byte) (sender, recipient string, raw []byte) {
-	t.Helper()
-	sl := int(binary.BigEndian.Uint16(p[:2]))
-	p = p[2:]
-	sender = string(p[:sl])
-	p = p[sl:]
-	rl := int(binary.BigEndian.Uint16(p[:2]))
-	p = p[2:]
-	recipient = string(p[:rl])
-	return sender, recipient, p[rl:]
 }
 
 func hexStr(b []byte) string {
@@ -652,7 +650,7 @@ func TestSweepExpiresMailFromAnEarlierBoot(t *testing.T) {
 	if err := earlier.(BootStore).WriteBoot(ctx); err != nil {
 		t.Fatal(err)
 	}
-	id, err := earlier.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	id, err := earlier.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,7 +691,7 @@ func TestSweepSkipsWhatItCantVerify(t *testing.T) {
 	mbox := hexStr(dir.mailboxID("a@fountbox.com"))
 	put := func() string {
 		t.Helper()
-		id, err := earlier.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+		id, err := earlier.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -744,7 +742,7 @@ func TestSweepSkipsAMessageInTheWrongPlace(t *testing.T) {
 	now := time.Now()
 	blobs := newMemBlobs()
 	s, dir := sweepBox(t, blobs)
-	id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	id, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -777,7 +775,7 @@ func TestFailedWriteVoidsItsSequence(t *testing.T) {
 	ctx := context.Background()
 	blobs := newMemBlobs()
 	s, dir := sweepBox(t, mailDown{memBlobs: blobs})
-	if _, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body")); err == nil {
+	if _, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body")); err == nil {
 		t.Fatal("Put hid a failed write")
 	}
 	mbox := hexStr(dir.mailboxID("a@fountbox.com"))
@@ -793,7 +791,7 @@ func TestFailedWriteVoidsItsSequence(t *testing.T) {
 func TestFailedVoidIsReportedWithTheCause(t *testing.T) {
 	blobs := mailDown{memBlobs: newMemBlobs(), logDown: true}
 	s, _ := sweepBox(t, blobs)
-	if _, err := s.Put(context.Background(), "a@fountbox.com", "x@y.com", []byte("body")); err == nil || strings.Count(err.Error(), "s3 down") != 2 {
+	if _, err := s.Put(context.Background(), Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body")); err == nil || strings.Count(err.Error(), "s3 down") != 2 {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -829,7 +827,7 @@ func TestSessionEndingDoesntStopTheWrite(t *testing.T) {
 	d := &cancelOnSequence{Directory: dir, cancel: cancel}
 	blobs := ctxCheckingBlobs{newMemBlobs()}
 	s := New(d, blobs, mustSign(t), make([]byte, lenBootID))
-	id, err := s.Put(ctx, "a@fountbox.com", "x@y.com", []byte("body"))
+	id, err := s.Put(ctx, Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("body"))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -899,5 +897,118 @@ func TestCraftedIDsStayInTheirPrefix(t *testing.T) {
 	}
 	if _, err := s.(BootStore).ReadBoot(ctx, crafted); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ReadBoot err = %v", err)
+	}
+}
+
+// The version 2 framing, byte for byte. The broker decodes this layout by hand, so
+// a change here must be a new version.
+func TestPlaintextV2Layout(t *testing.T) {
+	got, err := messagePlaintext(Envelope{
+		Sender: "a@b.c", Recipient: "w@f.co",
+		ClientIP: "192.0.2.1", ClientIPFrom: ClientIPProxy, HELO: "mx.b.c",
+	}, []byte("RAW"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "\x00\x05a@b.c" + "\x00\x06w@f.co" + "\x01" + "\x09192.0.2.1" + "\x06mx.b.c" + "RAW"
+	if string(got) != want {
+		t.Fatalf("framing = %q\n    want %q", got, want)
+	}
+	none, err := messagePlaintext(Envelope{Sender: "", Recipient: "w@f.co"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "\x00\x00" + "\x00\x06w@f.co" + "\x00" + "\x00" + "\x00"; string(none) != want {
+		t.Fatalf("empty framing = %q, want %q", none, want)
+	}
+}
+
+// Mail stored before version 2 still verifies and opens, with no client IP.
+func TestVersion1ObjectStillReads(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	k := dir.add(t, "a@fountbox.com")
+	sign, signPub := newSignKey(t)
+	msg := &Message{
+		Version: formatV1,
+		EdgeID:  make([]byte, lenEdgeID), MailboxID: dir.mailboxID("a@fountbox.com"),
+		PubKeyHash: pubKeyHash(k.PublicKey().Bytes()), Sequence: 3, BootID: make([]byte, lenBootID),
+		ReceivedAt: time.UnixMilli(1_700_000_000_000),
+	}
+	v1 := "\x00\x07x@y.com" + "\x00\x0ea@fountbox.com" + "body"
+	enc, ct, err := hpke.Seal(k.PublicKey().Bytes(), []byte(hpkeInfo), msg.header(), []byte(v1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg.Enc, msg.Ct = enc, ct
+	obj := msg.MarshalSigned(sign)
+	if obj[lenMagic] != formatV1 {
+		t.Fatalf("version byte = %d", obj[lenMagic])
+	}
+
+	p, err := Parse(obj, signPub)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	plain, err := hpke.Open(k.Bytes(), p.Enc, []byte(hpkeInfo), p.header(), p.Ct)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	env, raw, err := unframe(p.Version, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Envelope{Sender: "x@y.com", Recipient: "a@fountbox.com"}); env != want || string(raw) != "body" {
+		t.Fatalf("v1 = %+v %q", env, raw)
+	}
+}
+
+func TestParseRejectsUnknownVersion(t *testing.T) {
+	sign, signPub := newSignKey(t)
+	msg := &Message{Version: 3, EdgeID: make([]byte, lenEdgeID), MailboxID: make([]byte, lenMailboxID),
+		PubKeyHash: make([]byte, lenPubKeyHash), BootID: make([]byte, lenBootID), Enc: make([]byte, 32)}
+	if _, err := Parse(msg.MarshalSigned(sign), signPub); err == nil {
+		t.Fatal("Parse accepted version 3")
+	}
+}
+
+// Put stores nothing, and spends no sequence number, for an envelope it can't frame.
+func TestPutRefusesUnframeableEnvelope(t *testing.T) {
+	macKey := make([]byte, 32)
+	rand.Read(macKey)
+	dir := newMemDir(macKey)
+	dir.add(t, "a@fountbox.com")
+	blobs := newMemBlobs()
+	sign, _ := newSignKey(t)
+	s := New(dir, blobs, sign, make([]byte, lenBootID))
+	for name, env := range map[string]Envelope{
+		"long helo":    {Recipient: "a@fountbox.com", HELO: strings.Repeat("h", maxHELOBytes+1)},
+		"long ip":      {Recipient: "a@fountbox.com", ClientIP: strings.Repeat("1", maxClientIPBytes+1), ClientIPFrom: ClientIPProxy},
+		"ip no source": {Recipient: "a@fountbox.com", ClientIP: "192.0.2.1"},
+		"source no ip": {Recipient: "a@fountbox.com", ClientIPFrom: ClientIPProxy},
+	} {
+		if _, err := s.Put(context.Background(), env, []byte("body")); err == nil {
+			t.Errorf("%s: Put accepted it", name)
+		}
+	}
+	if len(blobs.objs) != 0 {
+		t.Fatalf("stored %d objects", len(blobs.objs))
+	}
+}
+
+// unframe must reject truncations rather than panic or invent fields.
+func TestUnframeRejectsTruncation(t *testing.T) {
+	full, err := messagePlaintext(Envelope{Sender: "a@b.c", Recipient: "w@f.co", ClientIP: "192.0.2.1", ClientIPFrom: ClientIPProxy, HELO: "mx.b.c"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < len(full); n++ {
+		if _, _, err := unframe(formatVersion, full[:n]); err == nil {
+			t.Fatalf("accepted %d of %d bytes", n, len(full))
+		}
+	}
+	if _, _, err := unframe(formatVersion, full); err != nil {
+		t.Fatal(err)
 	}
 }

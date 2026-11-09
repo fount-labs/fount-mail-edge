@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/store"
 	"github.com/fount-labs/fount-mail-edge/internal/webauthn"
 )
 
@@ -36,7 +37,7 @@ type recoverStore struct {
 
 func newRecoverStore() *recoverStore { return &recoverStore{appends: map[string][][]byte{}} }
 
-func (s *recoverStore) Put(context.Context, string, string, []byte) (string, error) {
+func (s *recoverStore) Put(context.Context, store.Envelope, []byte) (string, error) {
 	return "x", nil
 }
 

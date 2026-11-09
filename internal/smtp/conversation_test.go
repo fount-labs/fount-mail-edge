@@ -69,6 +69,7 @@ func testCertSource(t *testing.T) CertSource {
 type putRecord struct {
 	recipient, sender string
 	raw               []byte
+	env               store.Envelope
 }
 
 type captureStore struct {
@@ -77,13 +78,13 @@ type captureStore struct {
 	err  error // when set, Put fails (the store-not-confirmed path)
 }
 
-func (c *captureStore) Put(_ context.Context, recipient, sender string, raw []byte) (string, error) {
+func (c *captureStore) Put(_ context.Context, env store.Envelope, raw []byte) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err != nil {
 		return "", c.err
 	}
-	c.puts = append(c.puts, putRecord{recipient, sender, append([]byte(nil), raw...)})
+	c.puts = append(c.puts, putRecord{env.Recipient, env.Sender, append([]byte(nil), raw...), env})
 	return "msg-" + strconv.Itoa(len(c.puts)), nil
 }
 
@@ -261,6 +262,56 @@ func TestConversationStoresMessage(t *testing.T) {
 	if string(rec.raw) != want {
 		t.Fatalf("stored body = %q, want %q", rec.raw, want)
 	}
+}
+
+// The sealed envelope carries what SPF needs: the full source address from the
+// PROXY header (not the /64 the limits use) and the last EHLO name.
+func TestEnvelopeCarriesClientIPAndHELO(t *testing.T) {
+	for _, tc := range []struct{ proto, ip, want string }{
+		{"TCP4", "198.51.100.7", "198.51.100.7"},
+		{"TCP6", "2001:db8:1:2:3:4:5:6", "2001:db8:1:2:3:4:5:6"},
+		{"TCP6", "::ffff:198.51.100.8", "198.51.100.8"},
+	} {
+		t.Run(tc.ip, func(t *testing.T) {
+			st := &captureStore{}
+			addr := newTestServer(t, st, mapRecipients{"worker@fountbox.com": RecipientAccepting}, 4096)
+			c := dialFrom(t, addr, tc.proto, tc.ip)
+			c.expect("220")
+			c.startTLS()
+			c.send("EHLO mail.sender.example")
+			c.expect("250")
+			c.send("MAIL FROM:<a@sender.example>")
+			c.expect("250")
+			c.send("RCPT TO:<worker@fountbox.com>")
+			c.expect("250")
+			c.send("DATA")
+			c.expect("354")
+			fmt.Fprint(c.conn, "Subject: hi\r\n\r\nbody\r\n.\r\n")
+			c.expect("250")
+
+			rec, ok := st.last()
+			if !ok {
+				t.Fatal("nothing stored")
+			}
+			want := store.Envelope{
+				Sender: "a@sender.example", Recipient: "worker@fountbox.com",
+				ClientIP: tc.want, ClientIPFrom: store.ClientIPProxy, HELO: "mail.sender.example",
+			}
+			if rec.env != want {
+				t.Fatalf("envelope = %+v, want %+v", rec.env, want)
+			}
+		})
+	}
+}
+
+// A name longer than a domain can be isn't recorded, and the sender is told so.
+func TestOverlongHELORefused(t *testing.T) {
+	addr := newTestServer(t, &captureStore{}, mapRecipients{}, 4096)
+	c := dial(t, addr)
+	c.send("EHLO %s", strings.Repeat("a", maxHELOBytes+1))
+	c.expect("501")
+	c.send("EHLO client.example")
+	c.expect("250")
 }
 
 // Before TLS the server offers STARTTLS; after the upgrade it must not re-offer

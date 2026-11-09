@@ -93,11 +93,10 @@ func run() error {
 	if !cfg.Dev {
 		opHandler = operator.NewHandler(cfg.OperatorKey, ops)
 	}
-	healthSrv := &http.Server{
-		Addr:              cfg.HealthAddr,
-		Handler:           health(certMgr, opHandler),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	// The shim forwards one port, so the Device API is served here too, once
+	// storage loads. Until then its routes answer 503.
+	late := &lateHandler{}
+	healthSrv := deviceAPIServer(cfg.HealthAddr, health(certMgr, opHandler, late), nil)
 	errc := make(chan error, 4)
 	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
 	if !cfg.Dev {
@@ -141,6 +140,7 @@ func run() error {
 		RecoveryOrigin: cfg.RecoveryOrigin,
 	})
 	apiSrv := deviceAPIServer(cfg.DeviceAPIAddr, api, k.DeviceAPITLSConfig())
+	late.set(api)
 
 	smtpSrv := smtp.New(smtp.Options{
 		Addr:       cfg.SMTPAddr,
@@ -168,6 +168,7 @@ func run() error {
 		keylog, _ := st.(store.KeyLog)
 		ops.Serve(rt, keylog, func(ctx context.Context) {
 			draining.Store(true)
+			late.set(nil)
 			_ = apiSrv.Shutdown(ctx)
 			_ = smtpSrv.Shutdown(ctx)
 		})
@@ -426,11 +427,18 @@ func startRetentionSweep(ctx context.Context, st store.Store) {
 // health serves the shim's /health and /ready probes. /ready is not-ready until
 // the SMTP certificate loads, which is what gates the gateway opening the backend.
 // The signed operator routes share the listener, because it's the one the shim
-// exposes and the only one up before routing loads.
-func health(c *certs.Manager, op http.Handler) http.Handler {
+// exposes and the only one up before routing loads. So does the Device API, whose
+// routes are registered here by pattern and passed to api; shim.paths in
+// tinfoil-config.yml decides which of them the outside reaches.
+func health(c *certs.Manager, op http.Handler, api http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if op != nil {
 		mux.Handle("/operator/", op)
+	}
+	if api != nil {
+		for _, r := range deviceapi.Routes() {
+			mux.Handle(r.Pattern, api)
+		}
 	}
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
@@ -444,6 +452,27 @@ func health(c *certs.Manager, op http.Handler) http.Handler {
 		_, _ = w.Write([]byte("certificate not ready\n"))
 	})
 	return mux
+}
+
+// lateHandler serves the Device API on the shim's listener, which starts before
+// storage loads and outlives a restore's drain. With no API set it answers 503.
+type lateHandler struct{ h atomic.Pointer[http.Handler] }
+
+func (l *lateHandler) set(h http.Handler) {
+	if h == nil {
+		l.h.Store(nil)
+		return
+	}
+	l.h.Store(&h)
+}
+
+func (l *lateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h := l.h.Load(); h != nil {
+		(*h).ServeHTTP(w, r)
+		return
+	}
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, "device API not serving yet", http.StatusServiceUnavailable)
 }
 
 // healthcheck is the container's health check. The image is FROM scratch, so it

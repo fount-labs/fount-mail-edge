@@ -64,7 +64,8 @@ already stored. Detecting a swapped key on the device is planned (§9), and not 
 - STARTTLS is mandatory, and the key is the attested TLS key.
 - Unknown recipients are rejected during SMTP, with no catch-all.
 - Each message is stored whole and never parsed, sealed with HPKE to the address's key, with
-  the envelope inside the encryption. `250` comes only after S3 confirms the write.
+  the envelope inside the encryption: the sender, the recipient, the sending server's IP, and
+  its HELO name, so the broker can check SPF. `250` comes only after S3 confirms the write.
 - Unfetched mail expires after 30 days, with a signed expiry record. A message the sweep can't
   verify stays until a 45-day bucket rule deletes it with no record.
 - S3 traffic goes through a forwarder container with open egress, because Tinfoil's allowlist
@@ -77,10 +78,15 @@ Tinfoil has no public port 25, so a VM in `gateway/` accepts it and pipes it thr
 tunnel. The edge requires mutual TLS from a pinned gateway key on every tunnelled port. Nothing
 proves what a gateway runs, so no claim rests on it.
 
+The sending server's IP comes from the PROXY header the gateway writes inside that mutual TLS,
+and a connection without one is dropped. So the IP sealed with each message, and the SPF result
+the broker computes from it, are only as honest as the gateway.
+
 ## §8 Device API
 
 Every request is signed by the key its route requires, over method, path, body hash, timestamp,
-and nonce. Timestamps must be within 5 minutes. The nonce cache lives in memory, so a request
+and nonce. From outside, the API is reached through the Tinfoil shim, which forwards only the
+paths `shim.paths` in `tinfoil-config.yml` lists. Timestamps must be within 5 minutes. The nonce cache lives in memory, so a request
 captured in the 5 minutes before a restart can be replayed once after it. The route table, with
 each route's signer, is `routes` in `internal/deviceapi/deviceapi.go`.
 

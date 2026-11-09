@@ -24,7 +24,7 @@ type fakeMail struct {
 
 func newFakeMail() *fakeMail { return &fakeMail{objs: map[string]map[string][]byte{}} }
 
-func (f *fakeMail) Put(context.Context, string, string, []byte) (string, error) {
+func (f *fakeMail) Put(context.Context, store.Envelope, []byte) (string, error) {
 	return "unused", nil
 }
 
@@ -183,7 +183,7 @@ func TestGetGaps(t *testing.T) {
 	failing := failPuts{blobs}
 	_, sign, _ := ed25519.GenerateKey(rand.Reader)
 	st := store.New(rt, failing, sign, make([]byte, 16))
-	if _, err := st.Put(context.Background(), "worker@fountbox.com", "x@y.com", []byte("body")); err == nil {
+	if _, err := st.Put(context.Background(), store.Envelope{Recipient: "worker@fountbox.com", Sender: "x@y.com"}, []byte("body")); err == nil {
 		t.Fatal("want a failed write")
 	}
 	api := New(Options{Store: st, Resolver: NewKeyResolver(rt), Mutator: rt, MailDomain: "@fountbox.com"})

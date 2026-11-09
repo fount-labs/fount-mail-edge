@@ -27,7 +27,7 @@ import (
 )
 
 func TestHealthcheckFollowsHealthRoute(t *testing.T) {
-	srv := httptest.NewServer(health(certs.NewManager(), nil))
+	srv := httptest.NewServer(health(certs.NewManager(), nil, nil))
 	defer srv.Close()
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	if err := healthcheck(addr); err != nil {

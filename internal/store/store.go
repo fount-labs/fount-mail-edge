@@ -53,11 +53,11 @@ const DefaultMaxMailboxBytes int64 = 2 << 30
 const DefaultRetention = 30 * 24 * time.Hour
 
 type Store interface {
-	// Put stores one raw message for one envelope recipient and returns its
-	// edge id only once the write is durable. A non-nil error means SMTP must
-	// NOT return 250. sender is the untrusted envelope sender, kept (inside the
-	// ciphertext) for the broker and for per-sender quota accounting.
-	Put(ctx context.Context, recipient, sender string, raw []byte) (id string, err error)
+	// Put stores one raw message for env.Recipient and returns its edge id only
+	// once the write is durable. A non-nil error means SMTP must NOT return 250.
+	// The whole envelope is untrusted and is kept only inside the ciphertext,
+	// for the broker's checks.
+	Put(ctx context.Context, env Envelope, raw []byte) (id string, err error)
 }
 
 // Address is a resolved recipient. PublicKey has already been verified by the
@@ -231,8 +231,11 @@ func New(dir Directory, blobs Blobs, sign ed25519.PrivateKey, bootID []byte, opt
 	return s
 }
 
-func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byte) (string, error) {
-	addr, err := s.dir.Resolve(ctx, recipient)
+func (s *realStore) Put(ctx context.Context, env Envelope, raw []byte) (string, error) {
+	if _, err := messagePlaintext(env, nil); err != nil {
+		return "", err
+	}
+	addr, err := s.dir.Resolve(ctx, env.Recipient)
 	if err != nil {
 		return "", err // ErrNoRecipient or transient; SMTP maps each distinctly
 	}
@@ -247,7 +250,7 @@ func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byt
 		if err != nil {
 			return "", fmt.Errorf("mailbox usage: %w", err)
 		}
-		if used+storedSize(sender, recipient, len(raw)) > s.maxMailbox {
+		if used+storedSize(env, len(raw)) > s.maxMailbox {
 			return "", ErrMailboxFull
 		}
 	}
@@ -275,7 +278,7 @@ func (s *realStore) Put(ctx context.Context, recipient, sender string, raw []byt
 		Sequence:   seq,
 		BootID:     s.bootID,
 	}
-	if err := msg.seal(addr.PublicKey, sender, recipient, raw); err != nil {
+	if err := msg.seal(addr.PublicKey, env, raw); err != nil {
 		return "", s.void(ctx, msg, fmt.Errorf("seal: %w", err))
 	}
 
@@ -359,10 +362,10 @@ func (s *realStore) usage(ctx context.Context, mailboxID []byte) (int64, error) 
 // fixed-width (§9), the HPKE encapsulated key is a 32-byte X25519 point, and the
 // AEAD adds a 16-byte tag — so the on-disk size is known before sealing. A unit
 // test pins this against a real MarshalSigned so a suite change can't drift it.
-func storedSize(sender, recipient string, rawLen int) int64 {
+func storedSize(env Envelope, rawLen int) int64 {
 	const encLen = 32 // X25519 encapsulated key
 	const aeadTag = 16
-	plaintext := 2 + len(sender) + 2 + len(recipient) + rawLen
+	plaintext := envelopeLen(env) + rawLen
 	ct := plaintext + aeadTag
 	// headerLen + encLen-prefix(2) + enc + ctLen-prefix(4) + ct + signature.
 	return int64(headerLen + 2 + encLen + 4 + ct + ed25519.SignatureSize)
@@ -659,6 +662,6 @@ type discard struct{}
 // release path.
 func NewDiscard() Store { return discard{} }
 
-func (discard) Put(context.Context, string, string, []byte) (string, error) {
+func (discard) Put(context.Context, Envelope, []byte) (string, error) {
 	return "discarded", nil
 }

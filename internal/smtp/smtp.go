@@ -43,6 +43,7 @@ const (
 	drainBytes   = 1 << 20
 
 	maxDomainBytes = 253 // the longest a DNS name can be
+	maxHELOBytes   = 255 // RFC 5321's limit on a domain, which store.Envelope holds
 )
 
 var (
@@ -57,7 +58,7 @@ type CertSource interface {
 }
 
 type Storer interface {
-	Put(ctx context.Context, recipient, sender string, raw []byte) (string, error)
+	Put(ctx context.Context, env store.Envelope, raw []byte) (string, error)
 }
 
 // RecipientStatus is RCPT's verdict for one envelope recipient (§6, §4).
@@ -257,8 +258,10 @@ type session struct {
 	timer     *deadlineConn
 	r         *bufio.Reader
 	tls       bool
-	srcIP     string
-	hasMail   bool // MAIL was accepted, which the sender can't show: <> is valid
+	srcIP     string // the key for per-source limits: the IP, or its /64
+	clientIP  string // the full source address, sealed with each message
+	helo      string // the last EHLO or HELO name
+	hasMail   bool   // MAIL was accepted, which the sender can't show: <> is valid
 	recipient string
 	sender    string
 }
@@ -320,6 +323,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		verb, rest := splitVerb(line)
 		switch verb {
 		case "EHLO", "HELO":
+			name, _, _ := strings.Cut(strings.TrimSpace(rest), " ")
+			if len(name) > maxHELOBytes {
+				se.reply("501 5.5.4 name too long")
+				continue
+			}
+			se.helo = name
 			if se.tls {
 				se.reply("250-%s\r\n250 SIZE %d", s.opt.Hostname, s.opt.MaxBytes)
 			} else {
@@ -458,7 +467,7 @@ func (se *session) command(ctx context.Context, verb, rest string) bool {
 			se.reply("452 4.3.1 sender domain over rate limit, retry later")
 			return true
 		}
-		id, err := se.s.opt.Store.Put(ctx, recipient, sender, raw)
+		id, err := se.s.opt.Store.Put(ctx, se.envelope(recipient, sender), raw)
 		if errors.Is(err, store.ErrConflict) {
 			// Another edge wrote routing data first, as happens during a deploy.
 			se.reply("451 4.3.0 try again shortly")
@@ -473,6 +482,16 @@ func (se *session) command(ctx context.Context, verb, rest string) bool {
 		se.reply("250 2.0.0 stored %s", id)
 	}
 	return true
+}
+
+// envelope is what's sealed with a message besides its bytes (§9). The client IP
+// is always the PROXY header's, because a connection without one is dropped.
+func (se *session) envelope(recipient, sender string) store.Envelope {
+	env := store.Envelope{Sender: sender, Recipient: recipient, HELO: se.helo}
+	if se.clientIP != "" {
+		env.ClientIP, env.ClientIPFrom = se.clientIP, store.ClientIPProxy
+	}
+	return env
 }
 
 // storeErrClass names a store failure without its text, because the text can carry
@@ -512,7 +531,8 @@ func (se *session) readProxyHeader() bool {
 	if err != nil {
 		return false
 	}
-	ip = ip.Unmap()
+	ip = ip.Unmap().WithZone("")
+	se.clientIP = ip.String()
 	if ip.Is6() {
 		ip = netip.PrefixFrom(ip, 64).Masked().Addr()
 	}
