@@ -78,6 +78,8 @@ func (r *Relay) handle(c net.Conn) {
 		return
 	}
 	up, status := r.open(ctx, authority)
+	// The lookup and dials can outlast the request deadline; the answer still goes out.
+	_ = c.SetWriteDeadline(time.Now().Add(requestTimeout))
 	if up == nil {
 		reply(c, status)
 		return
