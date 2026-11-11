@@ -81,17 +81,71 @@ SMTP and 4 ACME connections, which leaves 8 for health checks. One IP gets 4 ope
 connections and 30 a minute. Timeouts are 4 minutes, under the tunnel's 5-minute
 idle limit.
 
+## Outbound relay (design §14)
+
+Tinfoil's port 25 is dead, so the edge sends through a gateway too. `relay/` is a
+small Go listener (standard library plus the edge's `gatewaytls`, about 450
+lines) that the gateway builds from the same edge tag its tunnel pins, with a
+sha256-pinned Go (`GoVersion`, `GoSha256`) it deletes afterwards. It only runs
+when `RelayClientPins` is set, and then the security group opens `RelayPort`.
+
+The contract is the edge's `internal/send/relay.go`, and the relay's tests dial
+it with that client:
+
+- Mutual TLS 1.3. The edge's client key must match `RelayClientPins`, which is
+  `relay_client_pin` from a vault's `/status` `send_public`. The server key is
+  the gateway's client key, so the edge's `SEND_RELAY_PINS` is the same value as
+  `GATEWAY_CLIENT_PINS`, and `check-pins.sh` already checks it.
+- One `CONNECT host:port HTTP/1.1`, then raw TCP. Port 25 goes to any public
+  address. Port 443 goes only to `dns.google`, `cloudflare-dns.com` and
+  `mta-sts.*`. Anything else gets `403`, a bad request `400`, and a lookup or
+  dial failure `502`.
+- The relay resolves a name once, refuses it if **any** answer isn't public
+  (loopback, private, link-local, which holds the metadata service, CGNAT,
+  multicast, documentation, NAT64, 6to4, Teredo, `fd00:ec2::254`), and dials only
+  the addresses it checked, so a rebinding answer has nothing to change. A
+  socket-level check refuses a non-public address or another port again on the
+  address actually dialed, and systemd's `IPAddressDeny` walls off the metadata
+  service a third time.
+- No logs: a destination names a recipient's mail provider. At most 32 open
+  streams; 10 seconds for the handshake and request, 5 minutes idle, 30 minutes
+  per stream. It runs as a systemd `DynamicUser` with only `CAP_NET_BIND_SERVICE`,
+  and gets the key through `LoadCredential`.
+
+The relay doesn't use the tunnel: the edge dials it through Tinfoil's egress
+allowlist, so it doesn't count against the 128-tunnel limit. TLS to the
+destination runs from the enclave through the relay, so after the CONNECT line
+the gateway sees only ciphertext. The gateway does see which host the edge
+connects to, and resolves MX names through the VPC resolver.
+
+`SEND_RELAY_ADDR` takes one `host:port`, so one gateway relays at a time. Using
+`mx1.fountbox.com:443` needs no new DNS; the host must also be on the edge
+network's `allow` list in `tinfoil-config.yml`. Both gateways run the relay, so
+moving to b is an edge release that changes the name.
+
+Sending needs EC2's port 25 limit lifted for both Elastic IPs (AWS's "remove
+email sending limitations" request), and reverse DNS for each IP naming its MX
+host, before any mail leaves.
+
 ## Test
 
 ```sh
 gateway/test-haproxy.sh
+gateway/test-relay.sh    # needs network: drives the relay with the edge's client
+go test ./gateway/relay/
 ```
 
-Runs the config from `template.yml` with the pinned release and HAProxy, in
+`test-haproxy.sh` runs the config from `template.yml` with the pinned release and HAProxy, in
 Docker, against `testdata/edgestub`, which uses the edge's own `gatewaytls`
 listener. It checks that the PROXY header reaches the edge inside mutual TLS 1.3,
 that ACME reaches the challenge port, that the per-IP rate limit holds, and that the
 config has no log lines.
+
+`test-relay.sh` renders the template's user data, runs its relay build script on
+this checkout in AL2023 with 1 GiB, checks the unit with `systemd-analyze verify`,
+then runs the unit's command and checks that DoH, MTA-STS and port 25 get
+through, that loopback, private, metadata and other hosts get `403`, that an
+unpinned key is refused, and that the relay wrote nothing.
 
 ## Security layers (design §7)
 
@@ -104,6 +158,10 @@ config has no log lines.
 | Edge checks (unknown recipients, size, quotas) | Most spam |
 
 ## Untested / before production
+
+- **The relay from a real edge.** That Tinfoil's egress allowlist lets the edge
+  reach `mx1.fountbox.com:443`, and that EC2 lets port 25 out once the limit is
+  lifted. `test-relay.sh` covers the relay itself, from Docker.
 
 - **`shim.authenticated`** (undocumented): a keyless CONNECT should get `401`
   before it counts against the tunnel cap. The template takes a `tk_` key from

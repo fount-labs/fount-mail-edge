@@ -6,6 +6,9 @@ Description: >
   read TLS-protected mail. Senders can't verify that. HAProxy adds the real sender
   IP with a PROXY header. No SSH, no SSM, no connection logs. Deploy TWO of these
   in separate AZs, each with its own MX record, so one VM failing doesn't stop mail.
+  With RelayClientPins set, it also runs the edge's outbound relay (§14): mutual
+  TLS 1.3 from the pinned edge key, then CONNECT to port 25 on public addresses,
+  or 443 on the DoH and mta-sts.* hosts only.
 
 Parameters:
   Ami:
@@ -48,9 +51,30 @@ Parameters:
     Type: String
     # tinfoil-cli_0.19.20_linux_arm64.tar.gz, matching the release's checksums.txt.
     Default: 22f0595cce22f0e34985e28331bfe9cc360567c7c01f4ecb63380ec5605517ce
+  RelayClientPins:
+    Type: String
+    # The vault's /status send_public.relay_client_pin. Public, so commit it here.
+    Default: ""
+    AllowedPattern: "([0-9a-f]{64}(,[0-9a-f]{64})*)?"
+    Description: >
+      Hex SPKI pins of the edge's relay client key. Empty means no outbound relay
+      (design §14): nothing is built and the relay port stays closed.
+  RelayPort:
+    Type: Number
+    Default: 443
+    Description: The relay's public port. SEND_RELAY_ADDR in the edge's tinfoil-config.yml names it.
+  GoVersion:
+    Type: String
+    # Must satisfy the go line in go.mod at EdgeReleaseTag: the build uses no other toolchain.
+    Default: "1.27.3"
+  GoSha256:
+    Type: String
+    # go1.27.3.linux-arm64.tar.gz, from https://go.dev/dl/?mode=json.
+    Default: a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
 
 Conditions:
   HasTunnelKey: !Not [!Equals [!Ref TunnelKeySecret, ""]]
+  HasRelay: !Not [!Equals [!Ref RelayClientPins, ""]]
 
 Resources:
   Role:
@@ -87,6 +111,17 @@ Resources:
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 25, ToPort: 25, CidrIp: 0.0.0.0/0 }
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+  # The edge's egress IPs aren't fixed, so the relay is open to all and admits
+  # only the pinned client key.
+  RelayIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasRelay
+    Properties:
+      GroupId: !GetAtt Group.GroupId
+      IpProtocol: tcp
+      FromPort: !Ref RelayPort
+      ToPort: !Ref RelayPort
+      CidrIp: 0.0.0.0/0
   # User data runs only on first boot, so it lives in a launch template: any
   # change makes a new version, and a new version replaces the instance.
   Launch:
@@ -221,6 +256,72 @@ Resources:
             # Start the enclave FIRST (design §7: a gateway that looks up the host
             # early can cache "no such host" for up to 30 minutes).
             systemctl enable --now fount-tunnel haproxy
+            # Outbound relay (design §14), last so a failure here leaves inbound
+            # mail running. gateway/relay is built from the same edge tag the
+            # tunnel pins, with a pinned Go that is deleted afterwards. A tag
+            # without gateway/relay (or the parked v0.0.0) fails here, so set
+            # RelayClientPins only with a tag that has it.
+            if [ -n "${RelayClientPins}" ]; then
+              cat > /tmp/fount-relay-build <<'RELAYBUILD'
+            #!/bin/bash
+            # fount-relay-build SRC: builds SRC/gateway/relay into /usr/local/bin/fount-relay.
+            set -euo pipefail
+            src=$1
+            work=$(mktemp -d)
+            trap 'rm -rf "$work"' EXIT
+            cd "$work"
+            curl -fsSLO "https://go.dev/dl/go${GoVersion}.linux-arm64.tar.gz"
+            echo "${GoSha256}  go${GoVersion}.linux-arm64.tar.gz" | sha256sum -c
+            tar -xzf "go${GoVersion}.linux-arm64.tar.gz"
+            cd "$src"
+            env -i PATH=/usr/bin:/bin HOME="$work" GOCACHE="$work/cache" GOPATH="$work/gopath" \
+              GOTOOLCHAIN=local GOFLAGS=-mod=vendor CGO_ENABLED=0 \
+              "$work/go/bin/go" build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o /usr/local/bin/fount-relay ./gateway/relay
+            RELAYBUILD
+              mkdir /tmp/relay-src
+              curl -fsSL "https://github.com/${EnclaveRepo}/archive/refs/tags/${EdgeReleaseTag}.tar.gz" \
+                | tar -xz -C /tmp/relay-src --strip-components=1
+              bash /tmp/fount-relay-build /tmp/relay-src
+              rm -rf /tmp/relay-src /tmp/fount-relay-build
+              # The server key is the gateway's client key, whose pin the edge
+              # already has (GATEWAY_CLIENT_PINS), so SEND_RELAY_PINS is the same list.
+              cat > /etc/systemd/system/fount-relay.service <<'UNIT'
+            [Unit]
+            After=network-online.target
+            Wants=network-online.target
+            StartLimitIntervalSec=0
+            [Service]
+            ExecStart=/usr/local/bin/fount-relay -listen :${RelayPort} -client-pins ${RelayClientPins}
+            LoadCredential=server.pem:/etc/haproxy/gateway-client.pem
+            Restart=always
+            RestartSec=5
+            DynamicUser=yes
+            AmbientCapabilities=CAP_NET_BIND_SERVICE
+            CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+            NoNewPrivileges=yes
+            ProtectSystem=strict
+            ProtectHome=yes
+            PrivateTmp=yes
+            PrivateDevices=yes
+            ProtectKernelTunables=yes
+            ProtectKernelModules=yes
+            ProtectControlGroups=yes
+            RestrictNamespaces=yes
+            RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+            LockPersonality=yes
+            MemoryDenyWriteExecute=yes
+            SystemCallArchitectures=native
+            # The relay already refuses these; this is a second wall around the
+            # instance metadata service.
+            IPAddressDeny=169.254.169.254 fd00:ec2::254
+            LimitNOFILE=4096
+            StandardOutput=null
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+              systemctl daemon-reload
+              systemctl enable --now fount-relay
+            fi
   Instance:
     Type: AWS::EC2::Instance
     Properties:
