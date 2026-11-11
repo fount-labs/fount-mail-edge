@@ -66,6 +66,10 @@ type StatusResponse struct {
 	// ACMEAccount is the Let's Encrypt account URL, which CAA `accounturi` pins.
 	// Absent until the edge's newAccount call has answered.
 	ACMEAccount string `json:"acme_account,omitempty"`
+	// Send is "on", or "off: <why>". Absent until the vault pull is done.
+	Send string `json:"send,omitempty"`
+	// SendKeysetCommitment is the held send keyset's, absent if it has none.
+	SendKeysetCommitment string `json:"send_keyset_commitment,omitempty"`
 }
 
 // Handler serves the operator routes on the edge's shim listener.
@@ -73,6 +77,7 @@ type Handler struct {
 	key         ed25519.PublicKey
 	routing     *Routing
 	acmeAccount func() string
+	send        func() (state, commitment string)
 	now         func() time.Time
 
 	mu     sync.Mutex
@@ -87,10 +92,17 @@ func NewHandler(key ed25519.PublicKey, r *Routing) *Handler {
 // Call it before serving.
 func (h *Handler) SetACMEAccount(f func() string) { h.acmeAccount = f }
 
+// SetSend names where /operator/status reads whether sending is on. Call it
+// before serving.
+func (h *Handler) SetSend(f func() (state, commitment string)) { h.send = f }
+
 func (h *Handler) status(w http.ResponseWriter) {
 	out := StatusResponse{Routing: h.routing.State()}
 	if h.acmeAccount != nil {
 		out.ACMEAccount = h.acmeAccount()
+	}
+	if h.send != nil {
+		out.Send, out.SendKeysetCommitment = h.send()
 	}
 	writeJSON(w, http.StatusOK, out)
 }

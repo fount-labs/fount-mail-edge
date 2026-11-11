@@ -614,3 +614,28 @@ func TestStatusPublishesACMEAccountOnceKnown(t *testing.T) {
 		t.Fatalf("status = %+v, want account %s", got, want)
 	}
 }
+
+// Whether sending is on, and why not, is public: the owner checks it on a held
+// release, where there are no logs to read.
+func TestStatusPublishesSendState(t *testing.T) {
+	f := newFixture(t)
+	var state atomic.Pointer[[2]string]
+	f.handler.SetSend(func() (string, string) {
+		if s := state.Load(); s != nil {
+			return s[0], s[1]
+		}
+		return "", ""
+	})
+	f.boot(StateNoObject)
+	c := &Client{HTTP: f.srv.Client(), Base: f.srv.URL}
+
+	got, err := c.Status(context.Background())
+	if err != nil || got.Send != "" || got.SendKeysetCommitment != "" {
+		t.Fatalf("before the pull: %+v %v", got, err)
+	}
+	state.Store(&[2]string{"off: SEND_ENABLED unset", strings.Repeat("ef", 32)})
+	got, err = c.Status(context.Background())
+	if err != nil || got.Send != "off: SEND_ENABLED unset" || got.SendKeysetCommitment != strings.Repeat("ef", 32) {
+		t.Fatalf("after: %+v %v", got, err)
+	}
+}

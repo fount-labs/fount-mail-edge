@@ -42,10 +42,13 @@ type FinishResponse struct {
 }
 
 // Payload is what a keyset box holds. S3 credentials ride along when the vault
-// has them; they rotate, so the commitment doesn't cover them.
+// has them; they rotate, so the commitment doesn't cover them. The send keyset
+// rides along when the vault has it and may serve it to this requester. A reader
+// that predates it ignores the field, as encoding/json does with unknown fields.
 type Payload struct {
-	Keyset []byte         `json:"keyset"`
-	S3     *S3Credentials `json:"s3,omitempty"`
+	Keyset     []byte         `json:"keyset"`
+	S3         *S3Credentials `json:"s3,omitempty"`
+	SendKeyset []byte         `json:"send_keyset,omitempty"`
 }
 
 type S3Credentials struct {
@@ -64,16 +67,38 @@ type Attester interface {
 type HolderCheck func(doc, nonce []byte) (*ecdh.PublicKey, error)
 
 type PullResult struct {
-	Keyset    *Keyset
-	S3        *S3Credentials
-	HolderKey *ecdh.PublicKey
-	Elapsed   time.Duration
+	Keyset *Keyset
+	S3     *S3Credentials
+	// SendKeyset is nil when the holder has none, or when nothing could
+	// authenticate it: no send commitment and no HolderCheck.
+	SendKeyset *SendKeyset
+	HolderKey  *ecdh.PublicKey
+	Elapsed    time.Duration
+}
+
+// Commitments are what a requester accepts. Keyset is KEYSET_COMMITMENT. Send is
+// SEND_KEYSET_COMMITMENT: when it's set, a send keyset that doesn't match fails
+// the pull, and when it's empty, only a requester with a HolderCheck keeps one.
+type Commitments struct {
+	Keyset string
+	Send   string
 }
 
 // Pull fetches the keyset from a holder at base, such as https://vault-a.example.
 // With an empty commitment it needs a HolderCheck, because nothing else would
-// authenticate the keys.
+// authenticate the keys. It never returns a send keyset; PullKeysets does.
 func Pull(ctx context.Context, client *http.Client, base string, me *ecdh.PrivateKey, a Attester, check HolderCheck, commitment string) (*PullResult, error) {
+	return pull(ctx, client, base, me, a, check, Commitments{Keyset: commitment}, false)
+}
+
+// PullKeysets is Pull, plus the send keyset. A holder with no send keyset isn't an
+// error: SendKeyset is nil, and the caller decides whether to try another holder.
+func PullKeysets(ctx context.Context, client *http.Client, base string, me *ecdh.PrivateKey, a Attester, check HolderCheck, want Commitments) (*PullResult, error) {
+	return pull(ctx, client, base, me, a, check, want, true)
+}
+
+func pull(ctx context.Context, client *http.Client, base string, me *ecdh.PrivateKey, a Attester, check HolderCheck, want Commitments, takeSend bool) (*PullResult, error) {
+	commitment := want.Keyset
 	if commitment == "" && check == nil {
 		return nil, errors.New("pulling with no commitment needs a holder check")
 	}
@@ -127,7 +152,16 @@ func Pull(ctx context.Context, client *http.Client, base string, me *ecdh.Privat
 	if commitment != "" && !keyset.Matches(commitment) {
 		return nil, fmt.Errorf("keyset %s doesn't match the commitment %s", keyset.Commitment(), commitment)
 	}
-	return &PullResult{Keyset: keyset, S3: payload.S3, HolderKey: holder, Elapsed: time.Since(start)}, nil
+	var send *SendKeyset
+	if takeSend && len(payload.SendKeyset) > 0 && (want.Send != "" || check != nil) {
+		if send, err = ParseSendKeyset(payload.SendKeyset); err != nil {
+			return nil, err
+		}
+		if want.Send != "" && !send.Matches(want.Send) {
+			return nil, fmt.Errorf("send keyset %s doesn't match the send commitment %s", send.Commitment(), want.Send)
+		}
+	}
+	return &PullResult{Keyset: keyset, S3: payload.S3, SendKeyset: send, HolderKey: holder, Elapsed: time.Since(start)}, nil
 }
 
 // PostJSON posts in (or nothing) and decodes a 200 into out. Any other status is

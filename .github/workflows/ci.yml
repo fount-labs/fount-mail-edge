@@ -54,6 +54,7 @@ jobs:
           internal/send:FuzzParse
           internal/send:FuzzParseMailbox
           internal/send:FuzzParseSTSPolicy
+          internal/config:FuzzSendKeyset
           "
           for spec in $targets; do
             pkg="${spec%%:*}"; name="${spec##*:}"

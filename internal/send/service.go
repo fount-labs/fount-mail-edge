@@ -2,9 +2,10 @@
 // device, the checks the edge makes itself, DKIM signing, and delivery with
 // validated TLS through the gateway's relay.
 //
-// It launches dark. The live release leaves SEND_ENABLED unset, and config.Load
-// refuses it outside dev until the send keyset exists
-// (docs/features/fount-fleet/fount-mail-send-keys.md in the Fount repo).
+// It launches dark. cmd/edge builds a Service only when the release sets
+// SEND_KEYSET_COMMITMENT, SEND_ENABLED, the relay and a DKIM selector, and a vault
+// hands over the committed send keyset (fount-mail-vault docs/SEND-KEYS.md). The
+// live release sets none of them, and the shim doesn't forward /send.
 package send
 
 import (

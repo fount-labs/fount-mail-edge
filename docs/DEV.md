@@ -105,3 +105,24 @@ with a `PLACEHOLDER` left in it.
 The vaults pin this repo (`fount-labs/fount-mail-edge`), so a fork can't get the keys. The
 live edge runs at `edge.fount.containers.tinfoil.dev`. Senders never see that name; they
 use the MX names.
+
+## Sending (M3)
+
+Sending launches dark. It needs four things, and `/operator/status` says which is missing as
+`send` (`on`, or `off: <why>`), with the held send keyset's `send_keyset_commitment`:
+
+| Gate | Set by | Off when |
+|---|---|---|
+| `SEND_KEYSET_COMMITMENT` | `tinfoil-config.yml`, the value vault-a's `/status` shows after `/generate-send` | Unset or empty: the edge doesn't take a send keyset, as in v0.2.3 |
+| The send keyset | A vault on a release with the same commitment (fount-mail-vault `docs/SEND-KEYS.md`) | No vault had it at boot. The edge boots anyway, so mail still arrives, and takes it on its next restart |
+| `SEND_ENABLED: "1"` | `tinfoil-config.yml` | Unset. A release that sets it must also set `SEND_KEYSET_COMMITMENT`, `SEND_RELAY_ADDR` (the gateway relay's `host:port`, also on the egress allowlist), `SEND_RELAY_PINS` (the relay's hex SPKI pins) and `DKIM_SELECTOR` (`f1`; Ed25519 signs as `f1e`), or it doesn't boot |
+| The shim | `shim.paths` | `/send` isn't listed, and `TestShimPathsMatchDeviceAPI` keeps it off until `POST /send` is in `builtM3` |
+
+At boot the edge asks each vault in turn for both keysets. A vault without the send keyset
+still gives it the keyset, and the edge asks the next vault for the send keyset before booting
+without one. Each key is checked against its commitment inside `wire.PullKeysets`, so a fake vault
+can't hand over its own DKIM or relay key.
+
+A release can set `SEND_KEYSET_COMMITMENT` alone first: the edge then holds the send keyset
+and reports its commitment, with sending still off. That's how to check the vaults serve it
+before turning anything on.
