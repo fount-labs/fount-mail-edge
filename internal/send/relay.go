@@ -25,7 +25,7 @@ import (
 // public, and port 443 to the DNS-over-HTTPS hosts and mta-sts.* names.
 type Relay struct {
 	Addr       string           // host:port of the gateway's relay listener, on the edge allowlist
-	ClientCert tls.Certificate  // the relay client key (send keyset, fount-mail-send-keys.md)
+	ClientCert tls.Certificate  // from the vault's send keyset (fount-mail-vault docs/SEND-KEYS.md)
 	Pins       []gatewaytls.Pin // the relay's server keys
 	Dialer     net.Dialer
 }

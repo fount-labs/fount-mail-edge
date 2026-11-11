@@ -5,9 +5,8 @@
 // some receivers only check RSA. There is no verifier here; checking inbound mail
 // is the broker's job, in its isolated verifier.
 //
-// Where the keys live is still open (docs/features/fount-fleet/fount-mail-send-keys.md
-// in the Fount repo). This package takes any crypto.Signer of the right type, so
-// the source can change without touching it.
+// The keys come from the vault's send keyset (fount-mail-vault docs/SEND-KEYS.md).
+// This package takes any crypto.Signer of the right type.
 package dkim
 
 import (

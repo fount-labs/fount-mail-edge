@@ -7,8 +7,9 @@
 //  2. Load the per-boot attested keys (TLS ecdsa-p256, signing ed25519,
 //     transfer x25519).
 //  3. Start the health listener, which also serves the signed operator routes,
-//     then pull the keyset from a vault, checked against KEYSET_COMMITMENT.
-//     Nothing else starts until that succeeds.
+//     then pull the keyset from a vault, checked against KEYSET_COMMITMENT, and
+//     the send keyset if SEND_KEYSET_COMMITMENT is set. Nothing else starts
+//     until the keyset arrives; a missing send keyset only leaves sending off.
 //  4. Load the routing object. If it's missing or unreadable, wait for a signed
 //     edgectl init or restore instead of exiting.
 //  5. Start the SMTP and Device API listeners.
@@ -106,6 +107,15 @@ func run() error {
 			return ""
 		})
 	}
+	var sending atomic.Pointer[sendState]
+	if h, ok := opHandler.(*operator.Handler); ok {
+		h.SetSend(func() (string, string) {
+			if s := sending.Load(); s != nil {
+				return s.State, s.Commitment
+			}
+			return "", ""
+		})
+	}
 	// The shim forwards one port, so the Device API is served here too, once
 	// storage loads. Until then its routes answer 503.
 	late := &lateHandler{}
@@ -142,6 +152,13 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	var sendRt sendRouting
+	if rt != nil {
+		sendRt = rt
+	}
+	sender, sendSt := newSender(cfg, sendRt)
+	sending.Store(&sendSt)
+	log.Printf("edge: sending %s", sendSt.State)
 	api := deviceapi.New(deviceapi.Options{
 		Store:          st,
 		Resolver:       resolver,
@@ -151,6 +168,7 @@ func run() error {
 		MailDomain:     cfg.MailDomain,
 		RecoveryRPID:   cfg.RecoveryRPID,
 		RecoveryOrigin: cfg.RecoveryOrigin,
+		Sender:         sender,
 	})
 	apiSrv := deviceAPIServer(cfg.DeviceAPIAddr, api, k.DeviceAPITLSConfig())
 	late.set(api)

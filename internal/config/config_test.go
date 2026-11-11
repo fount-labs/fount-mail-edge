@@ -27,6 +27,9 @@ func setSecrets(t *testing.T) {
 	t.Setenv("S3_BUCKET", "mail")
 	t.Setenv("S3_BOOT_LOG_BUCKET", "log")
 	t.Setenv("S3_REGION", "us-east-1")
+	for _, k := range []string{"SEND_ENABLED", "SEND_KEYSET_COMMITMENT", "SEND_RELAY_ADDR", "SEND_RELAY_PINS", "DKIM_SELECTOR"} {
+		t.Setenv(k, "")
+	}
 }
 
 func TestReleaseRefusesAnEgressGap(t *testing.T) {
@@ -312,23 +315,108 @@ func TestReleaseHoldsNoSecretsUntilTheVault(t *testing.T) {
 	}
 }
 
-func TestReleaseRefusesSending(t *testing.T) {
+func TestReleaseSendGates(t *testing.T) {
 	setSecrets(t)
 	t.Setenv("EDGE_DEV", "")
 	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
-	if c, err := Load(); err != nil || c.SendEnabled {
-		t.Fatalf("unset: enabled=%v err=%v", c != nil && c.SendEnabled, err)
+	c, err := Load()
+	if err != nil || c.SendEnabled || c.SendKeysetCommitment != "" {
+		t.Fatalf("unset: %+v %v", c, err)
 	}
-	for _, v := range []string{"1", "true", "0"} {
+	for _, v := range []string{"true", "0"} {
 		t.Setenv("SEND_ENABLED", v)
 		if _, err := Load(); err == nil {
 			t.Errorf("SEND_ENABLED=%q booted a release", v)
 		}
 	}
+	t.Setenv("SEND_ENABLED", "")
+
+	// The commitment alone takes the send keyset and leaves sending off.
+	t.Setenv("SEND_KEYSET_COMMITMENT", strings.Repeat("ef", 32))
+	if c, err := Load(); err != nil || c.SendEnabled || c.SendKeysetCommitment != strings.Repeat("ef", 32) {
+		t.Fatalf("commitment only: %v", err)
+	}
+	t.Setenv("SEND_KEYSET_COMMITMENT", "EF")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SEND_KEYSET_COMMITMENT") {
+		t.Fatalf("bad commitment: %v", err)
+	}
+
+	full := map[string]string{
+		"SEND_ENABLED":           "1",
+		"SEND_KEYSET_COMMITMENT": strings.Repeat("ef", 32),
+		"SEND_RELAY_ADDR":        "gateway-a.example:8444",
+		"SEND_RELAY_PINS":        strings.Repeat("12", 32),
+		"DKIM_SELECTOR":          "f1",
+	}
+	for k, v := range full {
+		t.Setenv(k, v)
+	}
+	if c, err := Load(); err != nil || !c.SendEnabled || len(c.SendRelayPins) != 1 || c.DKIMSelector != "f1" {
+		t.Fatalf("every send setting: %v", err)
+	}
+	for _, missing := range []string{"SEND_KEYSET_COMMITMENT", "SEND_RELAY_ADDR", "SEND_RELAY_PINS", "DKIM_SELECTOR"} {
+		t.Run("enabled without "+missing, func(t *testing.T) {
+			t.Setenv(missing, "")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("booted, or the error doesn't name %s: %v", missing, err)
+			}
+		})
+	}
+	for k, bad := range map[string]string{"SEND_RELAY_ADDR": "gateway-a.example", "SEND_RELAY_PINS": "zz", "DKIM_SELECTOR": "f1._domainkey"} {
+		t.Run("bad "+k, func(t *testing.T) {
+			t.Setenv(k, bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), k) {
+				t.Fatalf("%s=%q: %v", k, bad, err)
+			}
+		})
+	}
+}
+
+func TestDevMaySetSendEnabledAlone(t *testing.T) {
+	setSecrets(t)
 	t.Setenv("EDGE_DEV", "1")
 	t.Setenv("SEND_ENABLED", "1")
 	if c, err := Load(); err != nil || !c.SendEnabled {
 		t.Fatalf("dev: %v", err)
+	}
+}
+
+func TestInstallSendKeyset(t *testing.T) {
+	k, err := wire.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := wire.GenerateSend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s3 := &wire.S3Credentials{AccessKeyID: "A", SecretAccessKey: "B"}
+
+	c := &Config{SendKeysetCommitment: sk.Commitment()}
+	if err := c.InstallVaultKeys(&wire.PullResult{Keyset: k, S3: s3, SendKeyset: sk}); err != nil {
+		t.Fatal(err)
+	}
+	got := c.Secrets.Send
+	want, _ := sk.DKIMRSA()
+	relay, _ := sk.RelayClient()
+	if got == nil || got.Commitment != sk.Commitment() || !got.DKIMRSA.Equal(want) || !got.RelayClient.Equal(relay) {
+		t.Fatal("installed the wrong send keys")
+	}
+
+	// A vault with no send keyset installs the rest, and a later one replaces it.
+	if err := c.InstallVaultKeys(&wire.PullResult{Keyset: k, S3: s3}); err != nil || c.Secrets.Send != nil {
+		t.Fatalf("no send keyset: %v", err)
+	}
+
+	// Never installed without a commitment to check it against.
+	c = &Config{}
+	if err := c.InstallVaultKeys(&wire.PullResult{Keyset: k, S3: s3, SendKeyset: sk}); err != nil || c.Secrets.Send != nil {
+		t.Fatalf("installed an uncommitted send keyset: %v", err)
+	}
+
+	c = &Config{SendKeysetCommitment: strings.Repeat("ef", 32)}
+	if err := c.InstallVaultKeys(&wire.PullResult{Keyset: k, S3: s3, SendKeyset: sk}); err == nil {
+		t.Fatal("installed a send keyset that doesn't match the commitment")
 	}
 }
 

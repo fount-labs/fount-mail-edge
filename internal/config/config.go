@@ -17,10 +17,12 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -69,6 +71,18 @@ type Secrets struct {
 	RoutingDataKey    []byte // decrypts the versioned owner/routing list
 	S3AccessKeyID     string
 	S3SecretAccessKey string
+	// Send is the send keyset, or nil when SEND_KEYSET_COMMITMENT is unset or no
+	// vault had it. It can't read mail, so it rides apart from the keys above.
+	Send *SendKeys
+}
+
+// SendKeys are the send keyset's keys (fount-mail-vault docs/SEND-KEYS.md), which
+// wire.PullKeysets has already checked against SendKeysetCommitment.
+type SendKeys struct {
+	Commitment  string
+	DKIMRSA     *rsa.PrivateKey    // rsa-sha256, selector DKIM_SELECTOR
+	DKIMEd25519 ed25519.PrivateKey // ed25519-sha256, selector DKIM_SELECTOR + "e"
+	RelayClient ed25519.PrivateKey // the client key the gateway relay pins
 }
 
 type Config struct {
@@ -94,17 +108,25 @@ type Config struct {
 	RecoveryOrigin    string           // optional: pins the assertion's clientDataJSON origin (e.g. https://fount.sh)
 	VaultHosts        []string         // vaults to pull the keyset from, tried in order
 	KeysetCommitment  string           // the only keyset this release accepts
+	// SendKeysetCommitment is the only send keyset this release accepts. Empty
+	// means the edge takes none, so sending stays off whatever else is set.
+	SendKeysetCommitment string
 	// EntitlementVerifyKey is the Ed25519 public key that verifies device
 	// entitlements (§4/§8). It's public, so it's measured config, not a secret.
 	EntitlementVerifyKey []byte
 	// OperatorKey is the Ed25519 public key that signs edgectl requests: routing
 	// init, role mailboxes, and restores. The same key signs vault imports.
 	OperatorKey ed25519.PublicKey
-	// SendEnabled turns on POST /send (M3). It launches dark: a release refuses
-	// it until the send keyset exists.
-	SendEnabled bool
-	Dev         bool
-	Secrets     Secrets
+	// SendEnabled turns on POST /send (M3). It launches dark: a release may set it
+	// only with a send commitment, a relay and a DKIM selector, and sending still
+	// stays off unless a vault hands over the committed send keyset. The shim
+	// doesn't forward /send either, until that route is marked built.
+	SendEnabled   bool
+	SendRelayAddr string           // host:port of the gateway relay's listener
+	SendRelayPins []gatewaytls.Pin // the relay's server keys
+	DKIMSelector  string           // RSA selector, e.g. "f1"; Ed25519 signs as "f1e"
+	Dev           bool
+	Secrets       Secrets
 }
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
@@ -176,12 +198,10 @@ func Load() (*Config, error) {
 		if v != "1" {
 			return nil, fmt.Errorf("SEND_ENABLED must be 1 or unset, got %q", v)
 		}
-		// The live edge mustn't send until M2 is proven with real senders, and it
-		// has no DKIM or relay key yet (fount-mail-send-keys.md in the Fount repo).
-		if !dev {
-			return nil, fmt.Errorf("SEND_ENABLED is dev-only until the send keyset exists")
-		}
 		c.SendEnabled = true
+	}
+	if err := c.loadSend(dev); err != nil {
+		return nil, err
 	}
 	if dev {
 		devSecrets(c)
@@ -232,11 +252,73 @@ func (c *Config) loadVault() error {
 	return nil
 }
 
-// InstallVaultKeys fills Secrets from a pull, which wire.Pull has already checked
-// against KeysetCommitment.
+// loadSend reads the send settings. SEND_KEYSET_COMMITMENT alone makes the edge
+// take the send keyset; SEND_ENABLED also needs the relay and a DKIM selector, so
+// a release can't turn sending on with nowhere to send through.
+func (c *Config) loadSend(dev bool) error {
+	c.SendKeysetCommitment = os.Getenv("SEND_KEYSET_COMMITMENT")
+	if c.SendKeysetCommitment != "" {
+		if err := wire.ValidateCommitment(c.SendKeysetCommitment); err != nil {
+			return fmt.Errorf("SEND_KEYSET_COMMITMENT: %w", err)
+		}
+	}
+	c.SendRelayAddr = os.Getenv("SEND_RELAY_ADDR")
+	c.DKIMSelector = os.Getenv("DKIM_SELECTOR")
+	if v := os.Getenv("SEND_RELAY_PINS"); v != "" {
+		pins, err := gatewaytls.ParsePins(v)
+		if err != nil {
+			return fmt.Errorf("SEND_RELAY_PINS: %w", err)
+		}
+		c.SendRelayPins = pins
+	}
+	if c.DKIMSelector != "" && !validSelector(c.DKIMSelector) {
+		return fmt.Errorf("DKIM_SELECTOR %q must be letters, digits and hyphens", c.DKIMSelector)
+	}
+	if !c.SendEnabled || dev {
+		return nil
+	}
+	switch {
+	case c.SendKeysetCommitment == "":
+		return fmt.Errorf("SEND_ENABLED needs SEND_KEYSET_COMMITMENT: a release signs only with the committed send keyset")
+	case c.SendRelayAddr == "":
+		return fmt.Errorf("SEND_ENABLED needs SEND_RELAY_ADDR: outbound mail goes only through the gateway relay")
+	case len(c.SendRelayPins) == 0:
+		return fmt.Errorf("SEND_ENABLED needs SEND_RELAY_PINS: the relay is pinned, not named")
+	case c.DKIMSelector == "":
+		return fmt.Errorf("SEND_ENABLED needs DKIM_SELECTOR, the selector the send keyset's TXT records are under")
+	}
+	if _, _, err := net.SplitHostPort(c.SendRelayAddr); err != nil {
+		return fmt.Errorf("SEND_RELAY_ADDR: %w", err)
+	}
+	return nil
+}
+
+func validSelector(s string) bool {
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return s[0] != '-' && s[len(s)-1] != '-'
+}
+
+// InstallVaultKeys fills Secrets from a pull, which wire.PullKeysets has already
+// checked against KeysetCommitment and, when it's set, SendKeysetCommitment. A
+// pull with no send keyset installs the rest, and sending stays off.
 func (c *Config) InstallVaultKeys(r *wire.PullResult) error {
 	if r.S3 == nil || r.S3.AccessKeyID == "" || r.S3.SecretAccessKey == "" {
 		return fmt.Errorf("the vault holds no S3 credentials: import them with vaultctl import-s3")
+	}
+	var send *SendKeys
+	if r.SendKeyset != nil && c.SendKeysetCommitment != "" {
+		// PullKeysets checked it, but a send keyset only ever installs here.
+		if !r.SendKeyset.Matches(c.SendKeysetCommitment) {
+			return fmt.Errorf("send keyset %s doesn't match SEND_KEYSET_COMMITMENT", r.SendKeyset.Commitment())
+		}
+		var err error
+		if send, err = sendKeys(r.SendKeyset); err != nil {
+			return err
+		}
 	}
 	c.Secrets = Secrets{
 		ACMEAccountKeyPEM: r.Keyset.ACMEAccountKeyPEM(),
@@ -244,8 +326,25 @@ func (c *Config) InstallVaultKeys(r *wire.PullResult) error {
 		RoutingDataKey:    append([]byte(nil), r.Keyset.RoutingDataKey[:]...),
 		S3AccessKeyID:     r.S3.AccessKeyID,
 		S3SecretAccessKey: r.S3.SecretAccessKey,
+		Send:              send,
 	}
 	return nil
+}
+
+func sendKeys(k *wire.SendKeyset) (*SendKeys, error) {
+	rsaKey, err := k.DKIMRSA()
+	if err != nil {
+		return nil, err
+	}
+	edKey, err := k.DKIMEd25519()
+	if err != nil {
+		return nil, err
+	}
+	relay, err := k.RelayClient()
+	if err != nil {
+		return nil, err
+	}
+	return &SendKeys{Commitment: k.Commitment(), DKIMRSA: rsaKey, DKIMEd25519: edKey, RelayClient: relay}, nil
 }
 
 // loadEgress is fatal on a gap, because a bucket with no route would otherwise fail
