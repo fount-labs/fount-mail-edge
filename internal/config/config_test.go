@@ -378,6 +378,24 @@ func TestReleaseSendGates(t *testing.T) {
 	}
 }
 
+func TestSendEHLOName(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "1")
+	if c, err := Load(); err != nil || c.SendEHLOName != "" {
+		t.Fatalf("unset: %+v %v", c, err)
+	}
+	t.Setenv("SEND_EHLO_NAME", "out.fountbox.com")
+	if c, err := Load(); err != nil || c.SendEHLOName != "out.fountbox.com" {
+		t.Fatalf("set: %v", err)
+	}
+	for _, v := range []string{"out", "Out.fountbox.com", "out..fountbox.com", "-out.fountbox.com", "out.fountbox.com.", "[1.2.3.4]"} {
+		t.Setenv("SEND_EHLO_NAME", v)
+		if _, err := Load(); err == nil {
+			t.Errorf("SEND_EHLO_NAME=%q loaded", v)
+		}
+	}
+}
+
 func TestDevMaySetSendEnabledAlone(t *testing.T) {
 	setSecrets(t)
 	t.Setenv("EDGE_DEV", "1")

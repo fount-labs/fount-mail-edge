@@ -107,10 +107,17 @@ func sendOptions(cfg *config.Config) (send.Options, error) {
 	domain := strings.TrimPrefix(cfg.MailDomain, "@")
 	return send.Options{
 		MailDomain: cfg.MailDomain,
-		Hostname:   cfg.MailHostnames[0],
+		Hostname:   ehloName(cfg),
 		Relay:      &send.Relay{Addr: cfg.SendRelayAddr, ClientCert: clientCert, Pins: cfg.SendRelayPins},
 		Signers:    dkimSigners(domain, cfg.DKIMSelector, keys),
 	}, nil
+}
+
+func ehloName(cfg *config.Config) string {
+	if cfg.SendEHLOName != "" {
+		return cfg.SendEHLOName
+	}
+	return cfg.MailHostnames[0]
 }
 
 // dkimSigners signs with RSA first, then Ed25519 (RFC 8463 §4), under the

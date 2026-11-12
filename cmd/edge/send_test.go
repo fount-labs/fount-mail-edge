@@ -124,3 +124,14 @@ func TestShimDoesNotForwardSend(t *testing.T) {
 		t.Fatal("tinfoil-config.yml forwards /send")
 	}
 }
+
+func TestEHLONameDefaultsToTheFirstMailHostname(t *testing.T) {
+	cfg := &config.Config{MailHostnames: []string{"mx1.fountbox.com", "mx2.fountbox.com"}}
+	if got := ehloName(cfg); got != "mx1.fountbox.com" {
+		t.Errorf("default = %q", got)
+	}
+	cfg.SendEHLOName = "out.fountbox.com"
+	if got := ehloName(cfg); got != "out.fountbox.com" {
+		t.Errorf("set = %q", got)
+	}
+}
