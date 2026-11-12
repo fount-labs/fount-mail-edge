@@ -123,15 +123,18 @@ connects to, and resolves MX names through the VPC resolver.
 network's `allow` list in `tinfoil-config.yml`. Both gateways run the relay, so
 moving to b is an edge release that changes the name.
 
-Sending needs EC2's port 25 limit lifted for both Elastic IPs (AWS's "remove
-email sending limitations" request), and reverse DNS for each IP naming its MX
-host, before any mail leaves.
+Sending from EC2 needs AWS to lift the port 25 limit for the Elastic IPs and set
+reverse DNS for each IP naming its MX host. AWS declined both on 2026-11-11, and
+an appeal is pending. The fallback is the same relay on a host of its own at a
+provider that allows port 25, with its own key and pin: `relay/host/` (README,
+`install.sh`, `check-pin.sh`). It doesn't depend on AWS's answer.
 
 ## Test
 
 ```sh
 gateway/test-haproxy.sh
 gateway/test-relay.sh    # needs network: drives the relay with the edge's client
+gateway/test-relay-host.sh   # needs network: the standalone relay host (relay/host/)
 go test ./gateway/relay/
 ```
 
