@@ -1,9 +1,10 @@
 # Edge container split
 
 Status, 2026-11-11: the owner accepted all four decisions at the end. Stage 1 (`mail-front` and
-`mail-core`) is built; the vault's `send-transfer` box is vault PR #4; stage 2 (`mail-send`) waits
-for that vault release. The live release still runs one `mail-edge` container: the split goes
-live only when a release copies `docs/tinfoil-config.split.yml` over `tinfoil-config.yml`.
+`mail-core`) is built (edge PR #20); the vault's `send-transfer` box is vault PR #4, live in vault
+v0.2.1 on both vaults; stage 2 (`mail-send`) is built. The live release still runs one `mail-edge`
+container: the split goes live only when a release copies `docs/tinfoil-config.split.yml` over
+`tinfoil-config.yml`.
 
 The design says that from M3, TLS, the keyserver-delivered secrets, and DKIM signing run in
 separate containers, so one bug can't expose keys and mail in transit together (`fount-mail.md`,
@@ -67,7 +68,7 @@ gateway ────────────────────────
                                                      mail-send ◀────────── sendnet (closed)
                                                      keys: send-transfer
                                                      attestation: true
-                                                     net: sendnet, relay (allowlist: vaults, gateway relay)
+                                                     net: sendnet, sendout (allowlist: vaults, later the relay)
 ```
 
 - **`mail-front`** holds `mail-tls` and nothing from the vault. It terminates gateway mutual TLS
@@ -79,17 +80,19 @@ gateway ────────────────────────
   routing, sealing and storage, the Device API and `/operator` routes behind the shim, and the
   retention sweep. It pulls from the vaults and reaches S3 through the forwarder, as today.
 - **`mail-send`** holds `send-transfer` and the send keyset (DKIM RSA and Ed25519, relay client
-  key). `mail-core` decides who may receive (owner lists, proof, limits) and hands it a message
-  and recipients. `mail-send` checks `From` and the recipient count again, signs, and delivers
+  key). `mail-core` decides who may receive (owner lists, proof, pause, limits) and hands it a
+  message and recipients. `mail-send` checks `From` and the recipients again, signs, and delivers
   through the pinned relay. It pulls its own keys from a vault, so its egress allowlist is the
-  two vaults plus the gateway relay.
+  two vaults plus the relay host (added by the release that turns sending on).
 - **`forwarder`** is unchanged.
 
-All four run the same image, with a subcommand each (`front`, `core`, later `send`), as
+All four run the same image, with a subcommand each (`front`, `core`, `send`), as
 `egress-forward` does now. Every container keeps `read_only`, no `cap_add` and no `cvm_admin`;
-mail-front also gets `ipc: none`. Stage 1 refuses to boot on a wrong grant: front exits if it can
-see `transfer`, `mail-sign`, `send-transfer`, any vault secret, or any vault, S3 or send
-setting, and core exits if it can see `mail-tls` or `send-transfer`.
+mail-front and mail-send also get `ipc: none`. Each refuses to boot on a wrong grant: front exits
+if it can see `transfer`, `mail-sign`, `send-transfer`, any vault secret, or any vault, S3 or send
+setting or `SEND_LINK`; core exits if it can see `mail-tls` or `send-transfer`, or any send
+setting; send exits if it can see `mail-tls`, `mail-sign` or `transfer`, any vault secret, or
+any keyset, S3, ACME, tunnel or link setting (`config.SendForbidden`).
 
 ### What crosses each boundary
 
@@ -98,11 +101,11 @@ setting, and core exits if it can see `mail-tls` or `send-transfer`.
 | front → core | `POST /link/rcpt`, `POST /link/put`, `POST /link/csr`, `GET /link/cert?have=` | `put` carries the plaintext message, which front already saw when it terminated TLS. Core seals it. `have` tells core which leaf front holds, which core's `/ready` waits for |
 | front → core | the tunnelled challenge port, forwarded | Only `GET /` and `GET /.well-known/acme-challenge/…`; `/link/` is never reachable from outside |
 | front → core | the Device API's TLS port, forwarded | Only `deviceapi.Routes()`; `/operator` stays shim-only |
-| core → send | `Send(from, to[], raw)`, status | Stage 2. Send answers with per-recipient results, as `send.Service` does today |
+| core → send | `POST /link/send`, `GET /link/send/status` | `send` carries `from`, `recipients` and the raw message. Send answers with per-recipient results, or 503 while sending is off. `status` is `on` or `off: <why>`, with the held send keyset's commitment |
 
-Front is always the client: core never dials front. The link (`internal/link`) is plain HTTP on
-the closed `frontlink` network, which admits only the two containers the measured config names
-(decision 3). Mutual TLS with per-container attested keys stays possible later, at the cost of
+Front is always the client: core never dials front, and core is always mail-send's client. The
+links (`internal/link`) are plain HTTP on the closed `frontlink` and `sendnet` networks, each of
+which admits only the two containers the measured config names (decision 3). Mutual TLS with per-container attested keys stays possible later, at the cost of
 `attestation: true` on front.
 
 ### ACME (decision 2)
@@ -119,8 +122,9 @@ without tinfoil-go; a front that lied would only get a certificate for a key it 
 
 - Sending stays off. `SEND_ENABLED` still needs every send setting, `tinfoil-config.yml` sets none
   of them, the shim doesn't forward `/send`, and `TestReleaseConfigLeavesSendingOff` keeps
-  checking it. The checks move to `mail-send`'s config, and the test also checks that the send
-  settings appear on no other container.
+  checking it. In the split the checks move to `mail-send`'s config (`config.LoadSend` keeps
+  `Load`'s gates, and `newOutbox` the same gate order as `newSender`), and
+  `TestSplitConfigLeavesSendingOff` checks that the send settings appear on no other container.
 - The Device API, routing format, stored message format, boot records and signatures don't
   change. The broker sees no difference.
 - `mail-sign` stays with core, because it signs what core stores.
@@ -134,23 +138,70 @@ without tinfoil-go; a front that lied would only get a certificate for a key it 
    container, so `tinfoil-config.yml` is unchanged and a release from `main` is safe as it is.
    Tests keep the split config in line with the live one (same settings, moved), give front only
    `mail-tls` and `frontlink`, and keep every send setting off front and the forwarder.
-3. Edge, stage 2: `mail-send`, after step 1's vault release is live. It re-vendors `wire` for
-   `PullSendKeyset`, moves the send settings and `send.Service` to `mail-send`, and core hands it
-   messages over a second closed network.
+3. Edge, stage 2 (built): `edge send`, the send link, and `mail-send` in
+   `docs/tinfoil-config.split.yml`. See "Stage 2" below.
 
-### Turning stage 1 on
+## Stage 2: what was built
 
-A release, so the owner's:
+- `wire` is re-vendored from vault `90bac8d` (v0.2.1), for `wire.PullSendKeyset`.
+- `internal/send` splits signing and delivery (`send.Outbox`, behind `send.Transmitter`) from
+  the checks that need routing data (`send.Policy`). `send.Service` is Policy in front of a
+  Transmitter, and owner notices (`internal/notice`) go through the same Transmitter, so there's
+  still one way out. The Outbox checks again what it can see in the message
+  (`send.CheckHandoff`): Parse's shape, that the sender is the message's one `From` in the mail
+  domain, and that the recipients are some of its own `To` and `Cc`, none in the mail domain, at
+  most 10, no repeats.
+- `edge send` (`cmd/edge/mailsend.go`) loads only `send-transfer` and the send settings, pulls the
+  send keyset with `wire.PullSendKeyset` from each vault in turn, retrying with backoff up to
+  10 minutes until one hands it over, and serves `internal/link`'s send link on `:7026`
+  (`SEND_LINK_ADDR`). It builds an Outbox only past the same gates the one-container edge uses:
+  `SEND_KEYSET_COMMITMENT`, the pulled keyset, `SEND_ENABLED` (which `LoadSend` refuses without
+  the relay, its pins and the DKIM selector), and a buildable relay client. Until then the link
+  answers 503, which core turns into `send.ErrOff`.
+- `edge core` refuses every send setting and reads `SEND_LINK` (`mail-send:7026`). With it and
+  routing, `POST /send` runs the Policy in core and hands the message to mail-send. Core asks
+  mail-send's status every 15 s: while it isn't `on`, `POST /send` answers 501 (`send.ErrOff`)
+  before any check, so no limit is spent; owner notices start only the first time it's `on`, and
+  a notice mail-send can't take stays queued without counting toward its give-up time.
+  `/operator/status` shows `off: mail-send: <why>`, `off: mail-send unreachable`, or `on`, and
+  mail-send's commitment.
+- In core the vault leaves the send keyset out of the `transfer` box, because the enclave's
+  document endorses `send-transfer`; core also sets no send commitment, so `InstallVaultKeys`
+  would drop one anyway.
+- `edge` alone is unchanged: one container, the Outbox in process, and it refuses `SEND_LINK`.
+- `docs/tinfoil-config.split.yml` adds the `send-transfer` key, `mail-send` (`keys:
+  [send-transfer]`, `attestation: true`, `ipc: none`, no ports), the closed `sendnet`, and
+  `sendout`, an allowlist of the two vaults. It sets no send setting, so mail-send boots, pulls
+  nothing and reports `off: SEND_KEYSET_COMMITMENT unset`. The relay host isn't in `sendout`:
+  Tinfoil resolves every allowlisted name at deploy, and `out.fountbox.com` doesn't exist yet.
+
+Not tested: a real attested pull through `send-transfer` (unit tests fake the vault), whether
+Tinfoil publishes `ports` for a container whose only network is `closed` (stage 1's open
+question, below), and Tinfoil egress to a non-AWS relay host from an allowlist network.
+
+### Turning the split on
+
+A release, so the owner's. Stages 1 and 2 go live together: the split config has all four
+containers.
 
 1. Copy `docs/tinfoil-config.split.yml` over `tinfoil-config.yml`, keeping that release's
-   commitments, and pin the new image digest in all three containers.
+   commitments, and pin the new image digest in all four containers.
 2. Deploy held (`--hold=true`) and check before promoting: `/operator/status` answers through
    the shim (core), `/ready` passes after the certificate loads (core and front), and a test
    message through a gateway lands. One thing the docs don't settle: whether Tinfoil publishes
    `ports` for a container whose only network is `closed` (Docker doesn't for its `internal`
    networks). If the held deploy's tunnels can't reach 2525 or 8088, give mail-front an
-   `allowlist` network with an empty `allow` list instead, and say so here.
+   `allowlist` network with an empty `allow` list instead, and say so here. `/operator/status`
+   should show `send` as `off: mail-send: SEND_KEYSET_COMMITMENT unset`, which proves core reaches
+   mail-send over `sendnet`.
 3. Redeploy the gateways with the new tag, as for any edge release.
+4. Optional, still with sending off: set only `SEND_KEYSET_COMMITMENT` on mail-send (the vaults'
+   `98fcffaa…3480`). `/operator/status` should then show the commitment with
+   `off: mail-send: SEND_ENABLED unset`, which proves the `send-transfer` pull end to end.
+
+Turning sending on later is its own release: on mail-send only, `SEND_KEYSET_COMMITMENT`,
+`SEND_RELAY_ADDR` (`out.fountbox.com:443`), `SEND_RELAY_PINS`, `DKIM_SELECTOR` and
+`SEND_ENABLED`; the relay host added to `sendout`; and `/send` added to the shim paths.
 
 ## Decisions for the owner (all accepted 2026-11-11)
 
