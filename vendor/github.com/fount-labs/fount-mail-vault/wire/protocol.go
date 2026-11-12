@@ -35,10 +35,13 @@ type FinishRequest struct {
 
 // FinishResponse carries the sealed payload. HolderKey is unauthenticated on its
 // own: a vault checks it against Document, and the edge relies on the commitment.
+// SendSealed is the send keyset in its own box, sealed to the requester's
+// send-transfer key, when its document endorses one; Sealed then leaves it out.
 type FinishResponse struct {
-	Document  []byte `json:"document"`
-	HolderKey []byte `json:"holder_key"`
-	Sealed    []byte `json:"sealed"`
+	Document   []byte `json:"document"`
+	HolderKey  []byte `json:"holder_key"`
+	Sealed     []byte `json:"sealed"`
+	SendSealed []byte `json:"send_sealed,omitempty"`
 }
 
 // Payload is what a keyset box holds. S3 credentials ride along when the vault
@@ -69,8 +72,10 @@ type HolderCheck func(doc, nonce []byte) (*ecdh.PublicKey, error)
 type PullResult struct {
 	Keyset *Keyset
 	S3     *S3Credentials
-	// SendKeyset is nil when the holder has none, or when nothing could
-	// authenticate it: no send commitment and no HolderCheck.
+	// SendKeyset is nil when the holder has none, when nothing could
+	// authenticate it (no send commitment and no HolderCheck), or when the
+	// requester's document endorses a send-transfer key, which gets the send
+	// keyset in its own box instead (PullSendKeyset).
 	SendKeyset *SendKeyset
 	HolderKey  *ecdh.PublicKey
 	Elapsed    time.Duration
@@ -102,6 +107,88 @@ func pull(ctx context.Context, client *http.Client, base string, me *ecdh.Privat
 	if commitment == "" && check == nil {
 		return nil, errors.New("pulling with no commitment needs a holder check")
 	}
+	ex, err := exchange(ctx, client, base, a, check)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := Open(PurposeKeyset, me, ex.holder, ex.nonces, ex.finished.Sealed)
+	if err != nil {
+		return nil, err
+	}
+	var payload Payload
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return nil, fmt.Errorf("decoding payload: %w", err)
+	}
+	keyset, err := ParseKeyset(payload.Keyset)
+	if err != nil {
+		return nil, err
+	}
+	if commitment != "" && !keyset.Matches(commitment) {
+		return nil, fmt.Errorf("keyset %s doesn't match the commitment %s", keyset.Commitment(), commitment)
+	}
+	var send *SendKeyset
+	if takeSend && len(payload.SendKeyset) > 0 && (want.Send != "" || check != nil) {
+		if send, err = ParseSendKeyset(payload.SendKeyset); err != nil {
+			return nil, err
+		}
+		if want.Send != "" && !send.Matches(want.Send) {
+			return nil, fmt.Errorf("send keyset %s doesn't match the send commitment %s", send.Commitment(), want.Send)
+		}
+	}
+	return &PullResult{Keyset: keyset, S3: payload.S3, SendKeyset: send, HolderKey: ex.holder, Elapsed: time.Since(ex.start)}, nil
+}
+
+// SendPullResult is what a send-transfer requester gets: the send keyset only.
+type SendPullResult struct {
+	// SendKeyset is nil when the holder has none to give this requester.
+	SendKeyset *SendKeyset
+	HolderKey  *ecdh.PublicKey
+	Elapsed    time.Duration
+}
+
+// PullSendKeyset is the send container's pull. me is its send-transfer key, and
+// its document must endorse that key as SendTransferKeyID. It opens only the
+// send keyset's own box; the keyset's box is sealed to a key it doesn't hold. A
+// holder with no send keyset isn't an error, and neither is one that predates
+// the separate box: both leave SendKeyset nil.
+func PullSendKeyset(ctx context.Context, client *http.Client, base string, me *ecdh.PrivateKey, a Attester, check HolderCheck, sendCommitment string) (*SendPullResult, error) {
+	if sendCommitment == "" && check == nil {
+		return nil, errors.New("pulling the send keyset with no send commitment needs a holder check")
+	}
+	ex, err := exchange(ctx, client, base, a, check)
+	if err != nil {
+		return nil, err
+	}
+	res := &SendPullResult{HolderKey: ex.holder, Elapsed: time.Since(ex.start)}
+	if len(ex.finished.SendSealed) == 0 {
+		return res, nil
+	}
+	plaintext, err := Open(PurposeSendKeyset, me, ex.holder, ex.nonces, ex.finished.SendSealed)
+	if err != nil {
+		return nil, fmt.Errorf("send keyset box: %w", err)
+	}
+	send, err := ParseSendKeyset(plaintext)
+	clear(plaintext)
+	if err != nil {
+		return nil, err
+	}
+	if sendCommitment != "" && !send.Matches(sendCommitment) {
+		return nil, fmt.Errorf("send keyset %s doesn't match the send commitment %s", send.Commitment(), sendCommitment)
+	}
+	res.SendKeyset = send
+	return res, nil
+}
+
+type exchanged struct {
+	finished FinishResponse
+	holder   *ecdh.PublicKey
+	nonces   Nonces
+	start    time.Time
+}
+
+// exchange runs begin and finish: the requester attests to the holder's nonce,
+// and, with a HolderCheck, checks the holder's document for its own.
+func exchange(ctx context.Context, client *http.Client, base string, a Attester, check HolderCheck) (*exchanged, error) {
 	start := time.Now()
 	var begun BeginResponse
 	if err := PostJSON(ctx, client, base+"/transfer/begin", nil, &begun); err != nil {
@@ -137,31 +224,7 @@ func pull(ctx context.Context, client *http.Client, base string, me *ecdh.Privat
 			return nil, errors.New("verifying holder: its key isn't the one its document endorses")
 		}
 	}
-	plaintext, err := Open(PurposeKeyset, me, holder, Nonces{Issued: issued, Answer: answer}, finished.Sealed)
-	if err != nil {
-		return nil, err
-	}
-	var payload Payload
-	if err := json.Unmarshal(plaintext, &payload); err != nil {
-		return nil, fmt.Errorf("decoding payload: %w", err)
-	}
-	keyset, err := ParseKeyset(payload.Keyset)
-	if err != nil {
-		return nil, err
-	}
-	if commitment != "" && !keyset.Matches(commitment) {
-		return nil, fmt.Errorf("keyset %s doesn't match the commitment %s", keyset.Commitment(), commitment)
-	}
-	var send *SendKeyset
-	if takeSend && len(payload.SendKeyset) > 0 && (want.Send != "" || check != nil) {
-		if send, err = ParseSendKeyset(payload.SendKeyset); err != nil {
-			return nil, err
-		}
-		if want.Send != "" && !send.Matches(want.Send) {
-			return nil, fmt.Errorf("send keyset %s doesn't match the send commitment %s", send.Commitment(), want.Send)
-		}
-	}
-	return &PullResult{Keyset: keyset, S3: payload.S3, SendKeyset: send, HolderKey: holder, Elapsed: time.Since(start)}, nil
+	return &exchanged{finished: finished, holder: holder, nonces: Nonces{Issued: issued, Answer: answer}, start: start}, nil
 }
 
 // PostJSON posts in (or nothing) and decodes a 200 into out. Any other status is

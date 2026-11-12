@@ -291,3 +291,33 @@ func TestRunDrainsAtOnceAndStops(t *testing.T) {
 	cancel()
 	<-done
 }
+
+type offTransmitter struct{ calls int }
+
+func (o *offTransmitter) Transmit(context.Context, string, []string, []byte) ([]send.Result, error) {
+	o.calls++
+	return nil, send.ErrOff
+}
+
+// When the signer is off or out of reach (mail-send in a split edge), nothing was
+// sent, so the notice stays queued and the wait doesn't count toward GiveUp.
+func TestNoticeWaitsOutASignerThatIsOff(t *testing.T) {
+	clk := &clock{time.Unix(1_800_000_000, 0)}
+	out := &offTransmitter{}
+	m, err := New(Options{MailDomain: "@fountbox.com", Out: out, Now: clk.now,
+		License: func(w []byte) ([]byte, bool) { return w, true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := proof("n1", "jane@example.com")
+	for range 2 {
+		err := m.SendNotice(context.Background(), n)
+		if !errors.Is(err, send.ErrOff) || errors.Is(err, routing.ErrNoticeUndeliverable) {
+			t.Fatalf("err = %v", err)
+		}
+		clk.t = clk.t.Add(GiveUp)
+	}
+	if out.calls != 2 {
+		t.Fatalf("%d tries, want each pass to try again", out.calls)
+	}
+}

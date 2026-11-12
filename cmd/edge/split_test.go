@@ -127,9 +127,9 @@ func TestSplitConfigIsolatesFront(t *testing.T) {
 		t.Error("the shim doesn't target mail-core")
 	}
 	// Tinfoil requires each attested key granted to exactly one container.
-	for _, id := range []string{"mail-tls", "mail-sign", "transfer"} {
+	for _, id := range []string{"mail-tls", "mail-sign", "transfer", "send-transfer"} {
 		holders := 0
-		for _, name := range []string{"mail-core", "mail-front", "forwarder"} {
+		for _, name := range splitContainers {
 			ks, _ := yamlField(containerBlock(t, text, name), "keys")
 			if slices.Contains(strings.Split(strings.Trim(ks, "[]"), ", "), id) {
 				holders++
@@ -141,14 +141,16 @@ func TestSplitConfigIsolatesFront(t *testing.T) {
 	}
 }
 
-// Sending stays off in the split layout too, and only a sending container may
-// carry the send settings: mail-core until stage 2 adds mail-send.
+var splitContainers = []string{"mail-core", "mail-front", "mail-send", "forwarder"}
+
+// Sending stays off in the split layout too, and only mail-send may carry the
+// send settings.
 func TestSplitConfigLeavesSendingOff(t *testing.T) {
 	text := readFile(t, splitConfig)
 	if strings.Contains(text, "SEND_ENABLED") {
 		t.Fatal("the split config sets SEND_ENABLED")
 	}
-	for _, name := range []string{"mail-front", "forwarder"} {
+	for _, name := range []string{"mail-core", "mail-front", "forwarder"} {
 		env := envOf(containerBlock(t, text, name))
 		for _, k := range config.SendSettings {
 			if _, ok := env[k]; ok {
@@ -165,7 +167,14 @@ func TestSplitConfigMatchesTheReleaseConfig(t *testing.T) {
 	edgeEnv := envOf(containerBlock(t, live, "mail-edge"))
 	coreEnv := envOf(containerBlock(t, split, "mail-core"))
 	frontEnv := envOf(containerBlock(t, split, "mail-front"))
+	sendEnv := envOf(containerBlock(t, split, "mail-send"))
 	for k, v := range edgeEnv {
+		if slices.Contains(config.SendSettings, k) {
+			if sendEnv[k] != v {
+				t.Errorf("mail-send %s = %q, live %q", k, sendEnv[k], v)
+			}
+			continue
+		}
 		if k == "GATEWAY_CLIENT_PINS" {
 			if frontEnv[k] != v {
 				t.Errorf("mail-front %s = %q, live %q", k, frontEnv[k], v)
@@ -177,13 +186,18 @@ func TestSplitConfigMatchesTheReleaseConfig(t *testing.T) {
 		}
 	}
 	for k := range coreEnv {
-		if _, ok := edgeEnv[k]; !ok {
+		if _, ok := edgeEnv[k]; !ok && k != "SEND_LINK" {
 			t.Errorf("mail-core sets %s, which the live mail-edge doesn't", k)
 		}
 	}
 	for _, k := range []string{"MAIL_HOSTNAMES", "MAIL_DOMAIN"} {
 		if frontEnv[k] != edgeEnv[k] {
 			t.Errorf("mail-front %s = %q, live %q", k, frontEnv[k], edgeEnv[k])
+		}
+	}
+	for _, k := range []string{"MAIL_HOSTNAMES", "MAIL_DOMAIN", "VAULT_HOSTS"} {
+		if sendEnv[k] != edgeEnv[k] {
+			t.Errorf("mail-send %s = %q, live %q", k, sendEnv[k], edgeEnv[k])
 		}
 	}
 	shim := func(text string) string {
@@ -198,11 +212,87 @@ func TestSplitConfigMatchesTheReleaseConfig(t *testing.T) {
 	}
 }
 
+// networkAllow reads a network's allow list from the networks section.
+func networkAllow(t *testing.T, text, name string) []string {
+	t.Helper()
+	nets, _, _ := strings.Cut(text, "\ncontainers:")
+	_, block, ok := strings.Cut(nets, "\n  "+name+":\n")
+	if !ok {
+		t.Fatalf("no network %s", name)
+	}
+	var out []string
+	_, list, ok := strings.Cut(block, "    allow:\n")
+	if !ok {
+		return nil
+	}
+	for _, line := range strings.Split(list, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "- ") {
+			break
+		}
+		out = append(out, strings.TrimPrefix(line, "- "))
+	}
+	return out
+}
+
+// mail-send holds send-transfer and nothing else, reaches the vaults and, through
+// sendnet, mail-core; mail-core holds no send key and no send setting.
+func TestSplitConfigIsolatesSend(t *testing.T) {
+	text := readFile(t, splitConfig)
+	snd := containerBlock(t, text, "mail-send")
+	core := containerBlock(t, text, "mail-core")
+	want := map[string]string{"keys": "[send-transfer]", "networks": "[sendnet, sendout]", "command": `["send"]`, "ipc": "none", "attestation": "true"}
+	for k, v := range want {
+		if got, _ := yamlField(snd, k); got != v {
+			t.Errorf("mail-send %s = %q, want %q", k, got, v)
+		}
+	}
+	for _, k := range []string{"ports", "secrets", "cvm_admin", "cap_add"} {
+		if _, ok := yamlField(snd, k); ok {
+			t.Errorf("mail-send has %s", k)
+		}
+	}
+	allowed := append([]string{"MAIL_HOSTNAMES", "MAIL_DOMAIN", "VAULT_HOSTS"}, config.SendSettings...)
+	for k := range envOf(snd) {
+		if !slices.Contains(allowed, k) {
+			t.Errorf("mail-send sets %s", k)
+		}
+	}
+	if !strings.Contains(text, "\n  sendnet: {}") {
+		t.Error("sendnet isn't a closed network")
+	}
+	if got, _ := yamlField(core, "networks"); !strings.Contains(got, "sendnet") {
+		t.Errorf("mail-core networks = %s, no sendnet", got)
+	}
+	if got, _ := yamlField(core, "keys"); strings.Contains(got, "send-transfer") {
+		t.Error("mail-core holds send-transfer")
+	}
+	_, port, _ := strings.Cut(config.SendLinkAddr(), ":")
+	if got := envOf(core)["SEND_LINK"]; got != "mail-send:"+port {
+		t.Errorf("mail-core SEND_LINK = %q, want mail-send:%s", got, port)
+	}
+	// Its way out reaches the vaults it pulls from, and nothing else the release
+	// doesn't name: the relay host joins when sending is turned on.
+	out := networkAllow(t, text, "sendout")
+	vaults := strings.Split(envOf(snd)["VAULT_HOSTS"], ",")
+	for _, v := range vaults {
+		if !slices.Contains(out, v) {
+			t.Errorf("sendout doesn't allow %s", v)
+		}
+	}
+	relay, _, _ := strings.Cut(envOf(snd)["SEND_RELAY_ADDR"], ":")
+	for _, h := range out {
+		if !slices.Contains(vaults, h) && h != relay {
+			t.Errorf("sendout allows %s, which mail-send doesn't use", h)
+		}
+	}
+}
+
 // Each container's env, as the split config sets it, loads.
 func TestSplitConfigLoads(t *testing.T) {
 	text := readFile(t, splitConfig)
 	set := func(t *testing.T, env map[string]string) {
-		for _, k := range append(append([]string{"EDGE_DEV", "GATEWAY_CLIENT_PINS", "CORE_LINK", "CORE_API"}, config.FrontForbidden...), config.SecretNames...) {
+		for _, k := range append(append(append([]string{"EDGE_DEV", "GATEWAY_CLIENT_PINS", "CORE_LINK", "CORE_API"}, config.FrontForbidden...), config.SendForbidden...), config.SecretNames...) {
 			t.Setenv(k, "")
 			os.Unsetenv(k)
 		}
@@ -222,8 +312,25 @@ func TestSplitConfigLoads(t *testing.T) {
 	})
 	t.Run("core", func(t *testing.T) {
 		set(t, envOf(containerBlock(t, text, "mail-core")))
-		if _, err := config.LoadCore(); err != nil {
+		c, err := config.LoadCore()
+		if err != nil {
 			t.Fatal(err)
+		}
+		if c.SendLink == "" || c.SendKeysetCommitment != "" {
+			t.Fatalf("core send config: link %q commitment %q", c.SendLink, c.SendKeysetCommitment)
+		}
+	})
+	t.Run("send", func(t *testing.T) {
+		set(t, envOf(containerBlock(t, text, "mail-send")))
+		c, err := config.LoadSend()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(c.VaultHosts) != 2 || c.SendEnabled {
+			t.Fatalf("send config: %+v", c)
+		}
+		if _, st := newOutbox(c); !strings.HasPrefix(st.State, "off: ") {
+			t.Fatalf("the split config's mail-send is %q", st.State)
 		}
 	})
 }

@@ -27,8 +27,9 @@ func setSecrets(t *testing.T) {
 	t.Setenv("S3_BUCKET", "mail")
 	t.Setenv("S3_BOOT_LOG_BUCKET", "log")
 	t.Setenv("S3_REGION", "us-east-1")
-	for _, k := range []string{"SEND_ENABLED", "SEND_KEYSET_COMMITMENT", "SEND_RELAY_ADDR", "SEND_RELAY_PINS", "DKIM_SELECTOR"} {
+	for _, k := range append([]string{"SEND_LINK"}, SendSettings...) {
 		t.Setenv(k, "")
+		os.Unsetenv(k)
 	}
 }
 

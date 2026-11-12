@@ -80,7 +80,7 @@ func TestSenderUsesThePulledSendKeyset(t *testing.T) {
 	if sender == nil || st.State != "on" || st.Commitment != sk.Commitment() {
 		t.Fatalf("sender=%v state=%+v", sender != nil, st)
 	}
-	svc := sender.(*send.Service)
+	svc := sender.(*send.Service).Out.(*send.Outbox)
 	rsaKey, _ := sk.DKIMRSA()
 	edKey, _ := sk.DKIMEd25519()
 	if len(svc.Signers) != 2 {

@@ -27,30 +27,50 @@ type sendRouting interface {
 
 var _ sendRouting = (*routing.Store)(nil)
 
-// newSender builds POST /send's Sender from the pulled send keyset. Each gate
-// that isn't met leaves it nil, so the route stays 501, and names itself in the
-// state. The order is the order the owner turns them on.
-func newSender(cfg *config.Config, rt sendRouting) (deviceapi.Sender, sendState) {
-	var st sendState
-	keys := cfg.Secrets.Send
-	if keys != nil {
-		st.Commitment = keys.Commitment
+// sendGate names the first send gate that is shut, or returns "" when the
+// release has turned sending on and holds the committed send keyset. The order
+// is the order the owner turns them on. The one-container edge and mail-send
+// both pass through it.
+func sendGate(cfg *config.Config) string {
+	switch {
+	case cfg.SendKeysetCommitment == "":
+		return "SEND_KEYSET_COMMITMENT unset"
+	case cfg.Secrets.Send == nil:
+		return "no vault had the send keyset at boot"
+	case !cfg.SendEnabled:
+		return "SEND_ENABLED unset"
 	}
+	return ""
+}
+
+func heldCommitment(cfg *config.Config) string {
+	if cfg.Secrets.Send != nil {
+		return cfg.Secrets.Send.Commitment
+	}
+	return ""
+}
+
+// newSender builds POST /send's Sender for the one-container edge from the
+// pulled send keyset. Each gate that isn't met leaves it nil, so the route stays
+// 501, and names itself in the state.
+func newSender(cfg *config.Config, rt sendRouting) (deviceapi.Sender, sendState) {
+	st := sendState{Commitment: heldCommitment(cfg)}
 	off := func(why string) (deviceapi.Sender, sendState) {
 		st.State = "off: " + why
 		return nil, st
 	}
-	switch {
-	case cfg.SendKeysetCommitment == "":
-		return off("SEND_KEYSET_COMMITMENT unset")
-	case keys == nil:
-		return off("no vault had the send keyset at boot")
-	case !cfg.SendEnabled:
-		return off("SEND_ENABLED unset")
-	case rt == nil:
+	if why := sendGate(cfg); why != "" {
+		return off(why)
+	}
+	if rt == nil {
 		return off("no routing")
 	}
-	svc, err := buildSender(cfg, keys, rt)
+	o, err := sendOptions(cfg)
+	if err != nil {
+		return off(err.Error())
+	}
+	o.Directory, o.Proven = rt, rt.OwnerProven
+	svc, err := send.New(o)
 	if err != nil {
 		return off(err.Error())
 	}
@@ -58,20 +78,39 @@ func newSender(cfg *config.Config, rt sendRouting) (deviceapi.Sender, sendState)
 	return svc, st
 }
 
-func buildSender(cfg *config.Config, keys *config.SendKeys, rt sendRouting) (*send.Service, error) {
+// newOutbox is mail-send's half of newSender: the same gates, and signing and
+// delivery with no routing data. mail-core makes the checks that need it.
+func newOutbox(cfg *config.Config) (*send.Outbox, sendState) {
+	st := sendState{Commitment: heldCommitment(cfg)}
+	if why := sendGate(cfg); why != "" {
+		st.State = "off: " + why
+		return nil, st
+	}
+	o, err := sendOptions(cfg)
+	if err == nil {
+		var out *send.Outbox
+		if out, err = send.NewOutbox(o); err == nil {
+			st.State = "on"
+			return out, st
+		}
+	}
+	st.State = "off: " + err.Error()
+	return nil, st
+}
+
+func sendOptions(cfg *config.Config) (send.Options, error) {
+	keys := cfg.Secrets.Send
 	clientCert, err := send.RelayClientCert(keys.RelayClient)
 	if err != nil {
-		return nil, fmt.Errorf("relay client certificate: %w", err)
+		return send.Options{}, fmt.Errorf("relay client certificate: %w", err)
 	}
 	domain := strings.TrimPrefix(cfg.MailDomain, "@")
-	return send.New(send.Options{
-		Directory:  rt,
+	return send.Options{
 		MailDomain: cfg.MailDomain,
 		Hostname:   cfg.MailHostnames[0],
 		Relay:      &send.Relay{Addr: cfg.SendRelayAddr, ClientCert: clientCert, Pins: cfg.SendRelayPins},
 		Signers:    dkimSigners(domain, cfg.DKIMSelector, keys),
-		Proven:     rt.OwnerProven,
-	})
+	}, nil
 }
 
 // dkimSigners signs with RSA first, then Ed25519 (RFC 8463 §4), under the

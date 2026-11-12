@@ -15,6 +15,15 @@ import (
 // seal to. The config names it `transfer`.
 const TransferKeyPath = "/run/tinfoil/keys/transfer/private_key.pem"
 
+// SendTransferKeyID names a second attested X25519 key. When a requester's
+// document endorses one, the holder seals the send keyset to it in a box of its
+// own, apart from the keyset's box, so the container holding `transfer` never
+// sees the send keyset. Tinfoil grants each attested key to exactly one container.
+const SendTransferKeyID = "send-transfer"
+
+// SendTransferKeyPath is where Tinfoil writes the send-transfer key.
+const SendTransferKeyPath = "/run/tinfoil/keys/" + SendTransferKeyID + "/private_key.pem"
+
 // LoadTransferKey reads Tinfoil's PKCS#8 PEM.
 func LoadTransferKey(path string) (*ecdh.PrivateKey, error) {
 	raw, err := os.ReadFile(path)

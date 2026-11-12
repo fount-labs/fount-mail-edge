@@ -44,7 +44,7 @@ func TestNoticesStayQueuedWithSendingOff(t *testing.T) {
 			q := &countingQueue{}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if startNotices(ctx, cfg, sender, q) {
+			if startNotices(ctx, cfg, transmitterOf(sender), q) {
 				t.Fatal("owner notices started with sending off")
 			}
 			time.Sleep(20 * time.Millisecond)
@@ -64,7 +64,7 @@ func TestNoticesDrainWhenSendingIsOn(t *testing.T) {
 	q := &countingQueue{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if !startNotices(ctx, cfg, sender, q) {
+	if !startNotices(ctx, cfg, transmitterOf(sender), q) {
 		t.Fatal("owner notices didn't start with sending on")
 	}
 	deadline := time.Now().Add(5 * time.Second)

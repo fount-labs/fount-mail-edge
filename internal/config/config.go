@@ -125,8 +125,11 @@ type Config struct {
 	SendRelayAddr string           // host:port of the gateway relay's listener
 	SendRelayPins []gatewaytls.Pin // the relay's server keys
 	DKIMSelector  string           // RSA selector, e.g. "f1"; Ed25519 signs as "f1e"
-	Dev           bool
-	Secrets       Secrets
+	// SendLink is mail-send's link address (host:port), on mail-core in a split
+	// edge only. Core holds no send setting; mail-send has them all.
+	SendLink string
+	Dev      bool
+	Secrets  Secrets
 }
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
@@ -200,11 +203,8 @@ func load(core bool) (*Config, error) {
 		}
 		c.GatewayPins = pins
 	}
-	if v := os.Getenv("SEND_ENABLED"); v != "" {
-		if v != "1" {
-			return nil, fmt.Errorf("SEND_ENABLED must be 1 or unset, got %q", v)
-		}
-		c.SendEnabled = true
+	if err := c.loadSendLink(core); err != nil {
+		return nil, err
 	}
 	if err := c.loadSend(dev); err != nil {
 		return nil, err
@@ -222,18 +222,51 @@ func load(core bool) (*Config, error) {
 	return c, nil
 }
 
+// loadSendLink keeps the send settings in one container. In a split edge they
+// belong to mail-send, so mail-core refuses them and reads only where mail-send
+// is; the one-container edge has no mail-send to reach.
+func (c *Config) loadSendLink(core bool) error {
+	c.SendLink = os.Getenv("SEND_LINK")
+	if !core {
+		if c.SendLink != "" {
+			return fmt.Errorf("SEND_LINK is set, but only a split edge's mail-core has a mail-send to reach")
+		}
+		return nil
+	}
+	for _, name := range SendSettings {
+		if _, ok := os.LookupEnv(name); ok {
+			return fmt.Errorf("%s is set, and it belongs to mail-send, not mail-core", name)
+		}
+	}
+	if c.SendLink != "" {
+		if _, _, err := net.SplitHostPort(c.SendLink); err != nil {
+			return fmt.Errorf("SEND_LINK must be mail-send's host:port: %w", err)
+		}
+	}
+	return nil
+}
+
+func vaultHosts() ([]string, error) {
+	hosts := splitList(os.Getenv("VAULT_HOSTS"))
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("VAULT_HOSTS is empty: a release gets its keys only from a vault")
+	}
+	for _, h := range hosts {
+		if strings.ContainsAny(h, "/?#@: ") {
+			return nil, fmt.Errorf("VAULT_HOSTS entry %q must be a bare hostname", h)
+		}
+	}
+	return hosts, nil
+}
+
 // loadVault reads where the keyset comes from and which one to accept. The
 // entitlement key rides along because it used to be a keyserver secret.
 func (c *Config) loadVault() error {
-	c.VaultHosts = splitList(os.Getenv("VAULT_HOSTS"))
-	if len(c.VaultHosts) == 0 {
-		return fmt.Errorf("VAULT_HOSTS is empty: a release gets its keys only from a vault")
+	hosts, err := vaultHosts()
+	if err != nil {
+		return err
 	}
-	for _, h := range c.VaultHosts {
-		if strings.ContainsAny(h, "/?#@: ") {
-			return fmt.Errorf("VAULT_HOSTS entry %q must be a bare hostname", h)
-		}
-	}
+	c.VaultHosts = hosts
 	c.KeysetCommitment = os.Getenv("KEYSET_COMMITMENT")
 	if err := wire.ValidateCommitment(c.KeysetCommitment); err != nil {
 		return fmt.Errorf("KEYSET_COMMITMENT: %w", err)
@@ -262,6 +295,12 @@ func (c *Config) loadVault() error {
 // take the send keyset; SEND_ENABLED also needs the relay and a DKIM selector, so
 // a release can't turn sending on with nowhere to send through.
 func (c *Config) loadSend(dev bool) error {
+	if v := os.Getenv("SEND_ENABLED"); v != "" {
+		if v != "1" {
+			return fmt.Errorf("SEND_ENABLED must be 1 or unset, got %q", v)
+		}
+		c.SendEnabled = true
+	}
 	c.SendKeysetCommitment = os.Getenv("SEND_KEYSET_COMMITMENT")
 	if c.SendKeysetCommitment != "" {
 		if err := wire.ValidateCommitment(c.SendKeysetCommitment); err != nil {

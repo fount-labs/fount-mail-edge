@@ -1,4 +1,4 @@
-# PROPOSED split layout (docs/CONTAINER-SPLIT.md, stage 1). Tinfoil reads only
+# PROPOSED split layout (docs/CONTAINER-SPLIT.md, stages 1 and 2). Tinfoil reads only
 # tinfoil-config.yml, so this file changes nothing live. At the release that
 # turns the split on, it replaces tinfoil-config.yml, with the release's digest
 # and commitments. cmd/edge's split tests keep it in line with that file.
@@ -26,6 +26,8 @@ attested-keys:
     key: ed25519
   - id: transfer   # x25519: the vault seals the keyset to this
     key: x25519
+  - id: send-transfer # x25519: the vault seals the send keyset alone to this, and leaves it out of transfer's box; mail-send only
+    key: x25519
 
 networks:
   edge:
@@ -38,18 +40,29 @@ networks:
       - acme-v02.api.letsencrypt.org
   internal: {} # closed: mail-core reaches the forwarder here and nothing else
   frontlink: {} # closed: mail-front reaches mail-core here, and has no other network
+  sendnet: {} # closed: mail-core reaches mail-send here
+  # mail-send's way out: the vaults it pulls the send keyset from. The release
+  # that turns sending on adds the relay host (SEND_RELAY_ADDR's, out.fountbox.com);
+  # Tinfoil resolves every name here at deploy, so it can't be listed before the
+  # relay exists.
+  sendout:
+    egress: allowlist
+    allow:
+      - vault-a.fount.containers.tinfoil.dev
+      - vault-b.fount.containers.tinfoil.dev
   # The forwarder only. S3 doesn't work through an allowlist (design §6).
   storage:
     egress: open
 
 containers:
   # Holds the keyset, S3 credentials, mail-sign and transfer: routing, sealing,
-  # storage, ACME, the Device API and /operator. No TLS key, no tunnelled port
-  # but 8080, which the shim and the gateway's /ready check reach.
+  # storage, ACME, the Device API and /operator, and the send checks that need
+  # routing data. No TLS key, no send key, no tunnelled port but 8080, which the
+  # shim and the gateway's /ready check reach.
   - name: mail-core
     image: "ghcr.io/fount-labs/fount-mail-edge@sha256:9042d8997bb3551bb120e4f5d1623a51642b4f6c11c527bb2e39fc0393a8649b" # set by release
     command: ["core"]
-    networks: [edge, internal, frontlink]
+    networks: [edge, internal, frontlink, sendnet]
     keys: [mail-sign, transfer]
     attestation: true # the socket the edge attests to the vault through
     restart: always
@@ -77,6 +90,7 @@ containers:
       - ENTITLEMENT_VERIFY_KEY: "SFGtxHgwCfhpp7R03IDEcJy2RuX0a/KH9oGTDOXy6/4=" # public, base64 raw Ed25519; PROD key (alias/fount-mail-entitlement-signing-prod)
       - RECOVERY_RP_ID: "fount.sh" # WebAuthn RP id for /recover and /pause; fount.sh serves the passkey AASA. RECOVERY_ORIGIN stays unset until a signed build shows the origin
       - OPERATOR_KEY: "6b8cebf9ea0a064955b8673b49d715d70be2265b89c025b483a8e8ceec4ae986" # public, hex Ed25519; signs edgectl requests, same as the vault's
+      - SEND_LINK: "mail-send:7026"
 
   # Holds mail-tls and nothing from the vault: gateway mutual TLS, SMTP with
   # STARTTLS, the CSR, and the tunnelled ports. Its one network is closed and
@@ -101,6 +115,31 @@ containers:
       - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
       - CORE_LINK: "mail-core:7025"
       - CORE_API: "mail-core:8080"
+
+  # Holds send-transfer and, once a vault hands it over, the send keyset (DKIM
+  # and the relay client key): signs and delivers what mail-core hands it. Every
+  # send setting lives here and nowhere else; the release sets none, so sending
+  # stays off. Turning it on is a release that sets the commitment (the vaults'
+  # 98fcffaa…3480), the relay address and pins, the DKIM selector and the
+  # enable flag here, and adds the relay host to sendout.
+  - name: mail-send
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:9042d8997bb3551bb120e4f5d1623a51642b4f6c11c527bb2e39fc0393a8649b" # set by release
+    command: ["send"]
+    networks: [sendnet, sendout]
+    keys: [send-transfer]
+    attestation: true # it pulls the send keyset through this
+    ipc: none
+    restart: always
+    healthcheck:
+      test: ["CMD", "/edge", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    env:
+      - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
+      - MAIL_DOMAIN: "@fountbox.com"
+      - VAULT_HOSTS: "vault-a.fount.containers.tinfoil.dev,vault-b.fount.containers.tinfoil.dev"
 
   - name: forwarder
     image: "ghcr.io/fount-labs/fount-mail-edge@sha256:9042d8997bb3551bb120e4f5d1623a51642b4f6c11c527bb2e39fc0393a8649b" # set by release, same digest as mail-edge

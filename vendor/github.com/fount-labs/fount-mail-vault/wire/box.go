@@ -21,6 +21,9 @@ const (
 	PurposeKeyset Purpose = "keyset"
 	PurposeShare  Purpose = "share"
 	PurposeImport Purpose = "import"
+	// PurposeSendKeyset is the send keyset's own box, sealed to the requester's
+	// send-transfer key, so a box for the keyset can't be opened as one for it.
+	PurposeSendKeyset Purpose = "send-keyset"
 )
 
 // Nonces bind a box to one exchange. Issued is the one-use nonce from the begin
@@ -66,7 +69,7 @@ func boxCipher(p Purpose, mine *ecdh.PrivateKey, peer, sender, recipient *ecdh.P
 		return nil, fmt.Errorf("nonces must be %d bytes", NonceSize)
 	}
 	switch p {
-	case PurposeKeyset, PurposeShare, PurposeImport:
+	case PurposeKeyset, PurposeShare, PurposeImport, PurposeSendKeyset:
 	default:
 		return nil, fmt.Errorf("unknown purpose %q", p)
 	}

@@ -56,6 +56,13 @@ func TestSplitLoadsTakeOnlyTheirKeys(t *testing.T) {
 	if err != nil || core.TLS != nil || core.Sign == nil || core.Transfer == nil {
 		t.Fatalf("core: %+v, %v", core, err)
 	}
+	snd, err := LoadSend(keyDir(t, "send-transfer"))
+	if err != nil || snd.SendTransfer == nil || snd.TLS != nil || snd.Sign != nil || snd.Transfer != nil {
+		t.Fatalf("send: %+v, %v", snd, err)
+	}
+	if _, err := LoadSend(keyDir(t)); err == nil {
+		t.Fatal("mail-send booted with no send-transfer key")
+	}
 }
 
 // A config that grants a container another's key must not boot.
@@ -70,6 +77,9 @@ func TestSplitLoadsRefuseAnotherContainersKey(t *testing.T) {
 		"front with send-transfer": {LoadFront, []string{"mail-tls", "send-transfer"}, "send-transfer"},
 		"core with mail-tls":       {LoadCore, []string{"mail-sign", "transfer", "mail-tls"}, "mail-tls"},
 		"core with send-transfer":  {LoadCore, []string{"mail-sign", "transfer", "send-transfer"}, "send-transfer"},
+		"send with transfer":       {LoadSend, []string{"send-transfer", "transfer"}, "transfer"},
+		"send with mail-sign":      {LoadSend, []string{"send-transfer", "mail-sign"}, "mail-sign"},
+		"send with mail-tls":       {LoadSend, []string{"send-transfer", "mail-tls"}, "mail-tls"},
 	} {
 		if _, err := c.load(keyDir(t, c.ids...)); err == nil || !strings.Contains(err.Error(), c.bad) {
 			t.Errorf("%s: %v", name, err)

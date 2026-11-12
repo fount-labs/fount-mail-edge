@@ -11,7 +11,7 @@ import (
 
 // Sender sends a worker's message to its owners (design §14). send.Service
 // implements it; nil leaves POST /send a 501 stub, which is how the live release
-// keeps sending off.
+// keeps sending off. A Sender whose signer is off answers send.ErrOff, also 501.
 type Sender interface {
 	Send(ctx context.Context, mailboxID, raw []byte) ([]send.Result, error)
 }
@@ -39,6 +39,10 @@ func (a *API) sendMail() http.Handler {
 		switch {
 		case errors.Is(err, send.ErrBadMessage):
 			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		case errors.Is(err, send.ErrOff):
+			// A split edge's mail-send has sending off: the same answer as no Sender.
+			writeErr(w, http.StatusNotImplemented, "sending is off")
 			return
 		case errors.Is(err, send.ErrNoMailbox):
 			writeErr(w, http.StatusNotFound, "no such mailbox")
