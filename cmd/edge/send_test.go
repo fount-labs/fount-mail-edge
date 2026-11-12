@@ -117,14 +117,6 @@ func TestSenderUsesThePulledSendKeyset(t *testing.T) {
 	}
 }
 
-// Sending can be on inside the edge and still unreachable: the shim forwards
-// /send only once the route is marked built.
-func TestShimDoesNotForwardSend(t *testing.T) {
-	if shimAllows(shimPaths(t), "/send") {
-		t.Fatal("tinfoil-config.yml forwards /send")
-	}
-}
-
 func TestEHLONameDefaultsToTheFirstMailHostname(t *testing.T) {
 	cfg := &config.Config{MailHostnames: []string{"mx1.fountbox.com", "mx2.fountbox.com"}}
 	if got := ehloName(cfg); got != "mx1.fountbox.com" {

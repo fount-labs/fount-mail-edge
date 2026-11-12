@@ -202,9 +202,10 @@ containers.
    `98fcffaa…3480`). `/operator/status` should then show the commitment with
    `off: mail-send: SEND_ENABLED unset`, which proves the `send-transfer` pull end to end.
 
-Turning sending on later is its own release: on mail-send only, `SEND_KEYSET_COMMITMENT`,
-`SEND_RELAY_ADDR` (`out.fountbox.com:443`), `SEND_RELAY_PINS`, `DKIM_SELECTOR` and
-`SEND_ENABLED`; the relay host added to `sendout`; and `/send` added to the shim paths.
+Turning sending on is its own release (v0.5.0): on mail-send only, `SEND_KEYSET_COMMITMENT`,
+`SEND_RELAY_ADDR` (`out.fountbox.com:443`), `SEND_RELAY_PINS`, `DKIM_SELECTOR`, `SEND_EHLO_NAME`
+and `SEND_ENABLED`; the relay host added to `sendout`; and `POST /send` marked built, so the
+shim forwards `/send`.
 
 ## Decisions for the owner (all accepted 2026-11-11)
 
