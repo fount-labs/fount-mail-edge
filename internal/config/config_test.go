@@ -84,10 +84,15 @@ func TestReleaseConfigEgress(t *testing.T) {
 	if !ok {
 		t.Fatal("no containers section")
 	}
-	edge, forwarder, ok := strings.Cut(rest, "- name: forwarder")
+	_, forwarder, ok := strings.Cut(rest, "- name: forwarder")
 	if !ok {
 		t.Fatal("no forwarder container")
 	}
+	_, edge, ok := strings.Cut(rest, "- name: mail-core")
+	if !ok {
+		t.Fatal("no mail-core container")
+	}
+	edge, _, _ = strings.Cut(edge, "\n  - name: ")
 	field := func(block, key string) string {
 		_, v, ok := strings.Cut(block, key)
 		if !ok {
@@ -101,8 +106,8 @@ func TestReleaseConfigEgress(t *testing.T) {
 	if strings.Contains(nets, "amazonaws.com") {
 		t.Error("a bucket is back on the allowlist, which S3 doesn't work through")
 	}
-	if got := field(edge, "networks: "); got != "[edge, internal]" {
-		t.Errorf("edge networks = %s", got)
+	if got := field(edge, "networks: "); got != "[edge, internal, frontlink, sendnet]" {
+		t.Errorf("mail-core networks = %s", got)
 	}
 	if got := field(forwarder, "networks: "); got != "[internal, storage]" {
 		t.Errorf("forwarder networks = %s", got)
@@ -138,10 +143,10 @@ func TestReleaseConfigEgress(t *testing.T) {
 		}
 	}
 	if !strings.Contains(edge, "attestation: true") {
-		t.Error("mail-edge has no attestation socket, so it can't pull its keys")
+		t.Error("mail-core has no attestation socket, so it can't pull its keys")
 	}
 	if got := field(edge, "keys: "); !strings.Contains(got, "transfer") {
-		t.Errorf("mail-edge keys = %s, missing transfer", got)
+		t.Errorf("mail-core keys = %s, missing transfer", got)
 	}
 	if _, after, ok := strings.Cut(text, "- id: transfer"); !ok || !strings.HasPrefix(strings.SplitN(after, "\n", 3)[1], "    key: x25519") {
 		t.Error("no x25519 transfer key")

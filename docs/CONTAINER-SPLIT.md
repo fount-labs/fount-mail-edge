@@ -4,7 +4,8 @@ Status, 2026-11-11: the owner accepted all four decisions at the end. Stage 1 (`
 `mail-core`) is built (edge PR #20); the vault's `send-transfer` box is vault PR #4, live in vault
 v0.2.1 on both vaults; stage 2 (`mail-send`) is built. The live release still runs one `mail-edge`
 container: the split goes live only when a release copies `docs/tinfoil-config.split.yml` over
-`tinfoil-config.yml`.
+`tinfoil-config.yml`. **v0.4.0 did that**: `tinfoil-config.yml` is now the split config and the
+separate file is gone.
 
 The design says that from M3, TLS, the keyserver-delivered secrets, and DKIM signing run in
 separate containers, so one bug can't expose keys and mail in transit together (`fount-mail.md`,
@@ -177,7 +178,9 @@ without tinfoil-go; a front that lied would only get a certificate for a key it 
 
 Not tested: a real attested pull through `send-transfer` (unit tests fake the vault), whether
 Tinfoil publishes `ports` for a container whose only network is `closed` (stage 1's open
-question, below), and Tinfoil egress to a non-AWS relay host from an allowlist network.
+question, below), and Tinfoil egress to a non-AWS relay host from an allowlist network. The
+last two were settled by a live probe on 2026-11-12: a container whose only network is `closed`
+publishes `ports` that tunnels reach, and an allowlist reaches non-AWS hosts on 443.
 
 ### Turning the split on
 

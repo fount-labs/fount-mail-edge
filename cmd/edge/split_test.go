@@ -27,7 +27,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
-const splitConfig = "../../docs/tinfoil-config.split.yml"
+const splitConfig = "../../tinfoil-config.yml"
 
 // containerBlock is the text from "- name: <name>" to the next container or section.
 func containerBlock(t *testing.T, text, name string) string {
@@ -157,58 +157,6 @@ func TestSplitConfigLeavesSendingOff(t *testing.T) {
 				t.Errorf("%s carries %s", name, k)
 			}
 		}
-	}
-}
-
-// The split config must not drift from the live one: the same settings, moved.
-func TestSplitConfigMatchesTheReleaseConfig(t *testing.T) {
-	live := readFile(t, "../../tinfoil-config.yml")
-	split := readFile(t, splitConfig)
-	edgeEnv := envOf(containerBlock(t, live, "mail-edge"))
-	coreEnv := envOf(containerBlock(t, split, "mail-core"))
-	frontEnv := envOf(containerBlock(t, split, "mail-front"))
-	sendEnv := envOf(containerBlock(t, split, "mail-send"))
-	for k, v := range edgeEnv {
-		if slices.Contains(config.SendSettings, k) {
-			if sendEnv[k] != v {
-				t.Errorf("mail-send %s = %q, live %q", k, sendEnv[k], v)
-			}
-			continue
-		}
-		if k == "GATEWAY_CLIENT_PINS" {
-			if frontEnv[k] != v {
-				t.Errorf("mail-front %s = %q, live %q", k, frontEnv[k], v)
-			}
-			continue
-		}
-		if coreEnv[k] != v {
-			t.Errorf("mail-core %s = %q, live %q", k, coreEnv[k], v)
-		}
-	}
-	for k := range coreEnv {
-		if _, ok := edgeEnv[k]; !ok && k != "SEND_LINK" {
-			t.Errorf("mail-core sets %s, which the live mail-edge doesn't", k)
-		}
-	}
-	for _, k := range []string{"MAIL_HOSTNAMES", "MAIL_DOMAIN"} {
-		if frontEnv[k] != edgeEnv[k] {
-			t.Errorf("mail-front %s = %q, live %q", k, frontEnv[k], edgeEnv[k])
-		}
-	}
-	for _, k := range []string{"MAIL_HOSTNAMES", "MAIL_DOMAIN", "VAULT_HOSTS"} {
-		if sendEnv[k] != edgeEnv[k] {
-			t.Errorf("mail-send %s = %q, live %q", k, sendEnv[k], edgeEnv[k])
-		}
-	}
-	shim := func(text string) string {
-		_, s, _ := strings.Cut(text, "\n  paths:\n")
-		return s
-	}
-	if shim(live) != shim(split) {
-		t.Error("the split config's shim paths differ from the live ones")
-	}
-	if containerBlock(t, live, "forwarder") != containerBlock(t, split, "forwarder") {
-		t.Error("the forwarder differs from the live one")
 	}
 }
 
