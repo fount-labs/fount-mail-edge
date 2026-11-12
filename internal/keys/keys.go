@@ -10,6 +10,9 @@
 //	                       which boot's key encrypted it (design §9).
 //	transfer   x25519      The vault seals the keyset to this, after verifying
 //	                       the attestation that endorses it.
+//	send-transfer x25519   A split edge's mail-send only: the vault seals the
+//	                       send keyset alone to this, and leaves it out of the
+//	                       transfer box (docs/CONTAINER-SPLIT.md).
 //
 // No key here can decrypt stored mail (design §5): storage is encrypted to the
 // address's public key with HPKE, which the edge never holds the private half of.
@@ -36,15 +39,16 @@ import (
 	"github.com/fount-labs/fount-mail-vault/wire"
 )
 
-// sendTransferKeyID is the future mail-send container's key (vault wire's
-// SendTransferKeyID), which neither front nor core may hold.
-const sendTransferKeyID = "send-transfer"
+// sendTransferKeyID is mail-send's key in a split edge, which neither front nor
+// core may hold. The vault seals the send keyset alone to it.
+const sendTransferKeyID = wire.SendTransferKeyID
 
 type Keys struct {
-	TLS        *ecdsa.PrivateKey
-	Sign       ed25519.PrivateKey
-	Transfer   *ecdh.PrivateKey
-	deviceCert tls.Certificate
+	TLS          *ecdsa.PrivateKey
+	Sign         ed25519.PrivateKey
+	Transfer     *ecdh.PrivateKey
+	SendTransfer *ecdh.PrivateKey // mail-send only
+	deviceCert   tls.Certificate
 }
 
 // Load reads mail-tls, mail-sign, and transfer from dir (e.g. /run/tinfoil/keys) and builds
@@ -102,6 +106,19 @@ func LoadCore(dir string) (*Keys, error) {
 		return nil, fmt.Errorf("attested transfer key: %w", err)
 	}
 	return &Keys{Sign: signKey, Transfer: transfer}, nil
+}
+
+// LoadSend reads only send-transfer, for mail-send in a split edge. It refuses
+// to run where a key that belongs to mail-front or mail-core is visible.
+func LoadSend(dir string) (*Keys, error) {
+	if err := mustNotSee(dir, "mail-tls", "mail-sign", "transfer"); err != nil {
+		return nil, err
+	}
+	k, err := wire.LoadTransferKey(filepath.Join(dir, sendTransferKeyID, "private_key.pem"))
+	if err != nil {
+		return nil, fmt.Errorf("attested send-transfer key: %w", err)
+	}
+	return &Keys{SendTransfer: k}, nil
 }
 
 func mustNotSee(dir string, ids ...string) error {

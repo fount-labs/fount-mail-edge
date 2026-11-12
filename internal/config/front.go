@@ -27,17 +27,17 @@ type Front struct {
 	Dev               bool
 }
 
-// FrontForbidden are settings that belong to mail-core or the future mail-send.
+// FrontForbidden are settings that belong to mail-core or mail-send.
 // mail-front refuses to start if any is set, as the forwarder does with secrets,
 // so a config can't hand front more than the TLS key and the SMTP settings.
 var FrontForbidden = append([]string{
 	"KEYSET_COMMITMENT", "VAULT_HOSTS", "ENTITLEMENT_VERIFY_KEY", "OPERATOR_KEY",
 	"S3_BUCKET", "S3_BOOT_LOG_BUCKET", "S3_BACKUP_BUCKET", "EGRESS_ROUTES", "EGRESS_FORWARDER",
-	"ACME_DIRECTORY",
+	"ACME_DIRECTORY", "SEND_LINK",
 }, SendSettings...)
 
-// SendSettings are the settings only a sending container may carry: today
-// mail-edge or mail-core, and after stage 2 only mail-send.
+// SendSettings are the settings only a sending container may carry: mail-edge in
+// one container, and only mail-send in a split edge.
 var SendSettings = []string{
 	"SEND_ENABLED", "SEND_KEYSET_COMMITMENT", "SEND_RELAY_ADDR", "SEND_RELAY_PINS", "DKIM_SELECTOR",
 }
