@@ -443,13 +443,3 @@ func TestInstallSendKeyset(t *testing.T) {
 		t.Fatal("installed a send keyset that doesn't match the commitment")
 	}
 }
-
-func TestReleaseConfigLeavesSendingOff(t *testing.T) {
-	raw, err := os.ReadFile("../../tinfoil-config.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "SEND_ENABLED") {
-		t.Fatal("tinfoil-config.yml must not set SEND_ENABLED until sending is proven")
-	}
-}

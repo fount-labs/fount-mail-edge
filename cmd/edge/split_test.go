@@ -145,11 +145,8 @@ var splitContainers = []string{"mail-core", "mail-front", "mail-send", "forwarde
 
 // Sending stays off in the split layout too, and only mail-send may carry the
 // send settings.
-func TestSplitConfigLeavesSendingOff(t *testing.T) {
+func TestOnlyMailSendCarriesSendSettings(t *testing.T) {
 	text := readFile(t, splitConfig)
-	if strings.Contains(text, "SEND_ENABLED") {
-		t.Fatal("the split config sets SEND_ENABLED")
-	}
 	for _, name := range []string{"mail-core", "mail-front", "forwarder"} {
 		env := envOf(containerBlock(t, text, name))
 		for _, k := range config.SendSettings {
@@ -274,11 +271,12 @@ func TestSplitConfigLoads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(c.VaultHosts) != 2 || c.SendEnabled {
+		if len(c.VaultHosts) != 2 || !c.SendEnabled || c.SendEHLOName != "out.fountbox.com" {
 			t.Fatalf("send config: %+v", c)
 		}
+		// Without the send keyset, which only a vault hands over, it stays off.
 		if _, st := newOutbox(c); !strings.HasPrefix(st.State, "off: ") {
-			t.Fatalf("the split config's mail-send is %q", st.State)
+			t.Fatalf("the split config's mail-send is %q with no send keyset", st.State)
 		}
 	})
 }

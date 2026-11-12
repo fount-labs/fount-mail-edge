@@ -41,15 +41,16 @@ networks:
   internal: {} # closed: mail-core reaches the forwarder here and nothing else
   frontlink: {} # closed: mail-front reaches mail-core here, and has no other network
   sendnet: {} # closed: mail-core reaches mail-send here
-  # mail-send's way out: the vaults it pulls the send keyset from. The release
-  # that turns sending on adds the relay host (SEND_RELAY_ADDR's, out.fountbox.com);
-  # Tinfoil resolves every name here at deploy, so it can't be listed before the
-  # relay exists.
+  # mail-send's way out: the vaults it pulls the send keyset from, and the relay
+  # host (SEND_RELAY_ADDR's). All send traffic (DoH, MTA-STS, port 25) goes through
+  # the relay. Tinfoil resolves every name here at deploy, so a new relay IP needs
+  # a redeploy.
   sendout:
     egress: allowlist
     allow:
       - vault-a.fount.containers.tinfoil.dev
       - vault-b.fount.containers.tinfoil.dev
+      - out.fountbox.com
   # The forwarder only. S3 doesn't work through an allowlist (design §6).
   storage:
     egress: open
@@ -140,6 +141,12 @@ containers:
       - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
       - MAIL_DOMAIN: "@fountbox.com"
       - VAULT_HOSTS: "vault-a.fount.containers.tinfoil.dev,vault-b.fount.containers.tinfoil.dev"
+      - SEND_KEYSET_COMMITMENT: "98fcffaa60cd775f58d4fa99cc7977bb467be49c37a6f5873c0f36286cd33480" # the vaults' send keyset (v0.2.1)
+      - SEND_RELAY_ADDR: "out.fountbox.com:443" # the relay host, EC2 in the older Fount account
+      - SEND_RELAY_PINS: "6325543a9b159e5315c48de774df42632f58911ce48d9c224699751d7358e95e" # its server key, from check-pin.sh
+      - DKIM_SELECTOR: "f1" # f1/f1e._domainkey.fountbox.com hold the send keyset's public halves
+      - SEND_EHLO_NAME: "out.fountbox.com" # the relay's PTR
+      - SEND_ENABLED: "1"
 
   - name: forwarder
     image: "ghcr.io/fount-labs/fount-mail-edge@sha256:359e272b538689d3cf3b3565f35cc40c9c2d03d2d5d2e2433d5039e441a08aa3" # set by release, same digest as mail-edge
@@ -183,3 +190,4 @@ shim:
     - /recover/*
     - /pause
     - /pause/*
+    - /send

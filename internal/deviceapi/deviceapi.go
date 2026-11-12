@@ -144,6 +144,7 @@ var routes = map[string]route{
 var builtM3 = map[string]bool{
 	"GET /pause/{id}": true,
 	"POST /pause":     true,
+	"POST /send":      true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
