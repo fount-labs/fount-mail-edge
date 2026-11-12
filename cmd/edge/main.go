@@ -17,9 +17,12 @@
 //     lands; answer 421 until the certificate loads.
 //
 // `edge` runs all of that in one container. A split edge (docs/CONTAINER-SPLIT.md)
-// runs `edge core`, which is the above without TLS, SMTP or the tunnelled ports
-// and with the link listener for mail-front, and `edge front` (front.go), which
-// holds only the mail-tls key. `edge egress-forward` is the S3 forwarder.
+// runs `edge core`, which is the above without TLS, SMTP, the tunnelled ports or
+// the send keyset, with the link listener for mail-front and a link client for
+// mail-send; `edge front` (front.go), which holds only the mail-tls key; and
+// `edge send` (mailsend.go), which holds only send-transfer and the send keyset,
+// and signs and delivers what core hands it. `edge egress-forward` is the S3
+// forwarder.
 package main
 
 import (
@@ -64,6 +67,13 @@ func main() {
 		if err := forward(); err != nil {
 			log.Fatalf("edge: forwarder: %v", err)
 		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "send" {
+		if err := runSend(); err != nil {
+			log.Fatalf("edge: send: fatal: %v", err)
+		}
+		log.Printf("edge: send stopped")
 		return
 	}
 	if len(os.Args) == 2 && os.Args[1] == "front" {
@@ -196,9 +206,24 @@ func run(m mode) error {
 	if rt != nil {
 		sendRt = rt
 	}
-	sender, sendSt := newSender(cfg, sendRt)
-	sending.Store(&sendSt)
-	log.Printf("edge: sending %s", sendSt.State)
+	var (
+		sender     deviceapi.Sender
+		sendClient *link.SendClient
+	)
+	if m == modeCore {
+		sendClient = &link.SendClient{Base: "http://" + cfg.SendLink, HTTP: &http.Client{Timeout: 2 * time.Minute}}
+		var why string
+		if sender, why = newCoreSender(cfg, sendRt, sendClient, &sending); sender == nil {
+			sending.Store(&sendState{State: why})
+		} else {
+			sending.Store(&sendState{State: "off: waiting for mail-send"})
+		}
+	} else {
+		var st sendState
+		sender, st = newSender(cfg, sendRt)
+		sending.Store(&st)
+	}
+	log.Printf("edge: sending %s", sending.Load().State)
 	api := deviceapi.New(deviceapi.Options{
 		Store:          st,
 		Resolver:       resolver,
@@ -247,8 +272,13 @@ func run(m mode) error {
 		}
 	}
 	go startRetentionSweep(ctx, st)
-	if rt != nil {
-		startNotices(ctx, cfg, sender, rt)
+	switch {
+	case rt == nil:
+	case m == modeCore && sender != nil:
+		// Notices start once mail-send first reports sending on, and not before.
+		go watchSend(ctx, sendClient, &sending, func() { startNotices(ctx, cfg, sendClient, rt) })
+	default:
+		startNotices(ctx, cfg, transmitterOf(sender), rt)
 	}
 	if m == modeCore {
 		log.Printf("edge: core listening health=%s link=%s", cfg.HealthAddr, config.LinkAddr())
