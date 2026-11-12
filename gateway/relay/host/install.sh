@@ -21,7 +21,7 @@ set -euo pipefail
 # Committed, public settings. The pin is the vault's /status
 # send_public.relay_client_pin; commit it here so the deployed file is the
 # committed one. Environment variables override these for tests only.
-RELAY_CLIENT_PINS=${RELAY_CLIENT_PINS:-}
+RELAY_CLIENT_PINS=${RELAY_CLIENT_PINS:-4a4f2ed83465a29af414ddd9093d9df577dbc9d6157b8cd21e6b63e05a6bb326}
 RELAY_PORT=${RELAY_PORT:-443}
 EDGE_REPO=${EDGE_REPO:-fount-labs/fount-mail-edge}
 # The commit of the edge tag to build gateway/relay from (v0.3.0). Only the

@@ -1,10 +1,12 @@
 # Standalone relay host
 
 The edge's outbound relay (`gateway/relay`, design §14) on a VM of its own, at
-any provider that lets port 25 out. It's the fallback for EC2, where AWS
-declined (2026-11-11) to lift the port-25 limit and set PTRs for the gateways'
-Elastic IPs. The EC2 path in `template.yml` is unchanged. Use one or the other:
-the edge's `SEND_RELAY_ADDR` names one relay.
+any provider that lets port 25 out. AWS declined (2026-11-11) to lift the
+port-25 limit for the gateways' account, then lifted it (2026-11-12) for the
+older Fount account (277707116697, us-east-1), so the host runs there on EC2:
+Elastic IP `32.200.135.24`, PTR `out.fountbox.com`, launched by
+`launch-ec2.sh`. The gateway-side relay in `template.yml` stays off. Use one or
+the other: the edge's `SEND_RELAY_ADDR` names one relay.
 
 The relay is an untrusted TCP pipe. The edge does TLS to recipients itself, so
 the host sees which servers the edge connects to, when, and how much, but not
@@ -42,6 +44,8 @@ ahead of switching `SEND_RELAY_ADDR`. The provider can still read the disk, as
 AWS can on EC2.
 
 ## Provider
+
+Used only if the EC2 host has to move.
 
 Port-25 policies as of 2026-11-11, from each provider's docs:
 
