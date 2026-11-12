@@ -293,12 +293,15 @@ func TestOwnerAddressesAreSealed(t *testing.T) {
 
 type fakeMailer struct {
 	sent []routing.PendingNotice
-	fail bool
+	fail map[string]error // by recipient; "*" fails every one
 }
 
 func (m *fakeMailer) SendNotice(_ context.Context, n routing.PendingNotice) error {
-	if m.fail {
-		return errors.New("relay down")
+	if err, ok := m.fail[n.To]; ok {
+		return err
+	}
+	if err, ok := m.fail["*"]; ok {
+		return err
 	}
 	m.sent = append(m.sent, n)
 	return nil
@@ -309,16 +312,17 @@ func TestDrainNotices(t *testing.T) {
 	ctx := context.Background()
 	f.set(t, f.id, 1, "jane@example.com", "bob@example.com")
 
-	if n, err := f.s.DrainNotices(ctx, &fakeMailer{fail: true}, "@fountbox.com"); n != 0 || err == nil {
-		t.Fatalf("failed send: %d %v", n, err)
+	down := &fakeMailer{fail: map[string]error{"*": errors.New("relay down")}}
+	if r, err := f.s.DrainNotices(ctx, down, "@fountbox.com"); r != (routing.DrainResult{Waiting: 2}) || err != nil {
+		t.Fatalf("failed send: %+v %v", r, err)
 	}
 	f.s = f.reload(t)
 	if len(pending(t, f.s)) != 2 {
 		t.Fatal("notices didn't survive a failed send and a reboot")
 	}
 	m := &fakeMailer{}
-	if n, err := f.s.DrainNotices(ctx, m, "@fountbox.com"); n != 2 || err != nil {
-		t.Fatalf("drain: %d %v", n, err)
+	if r, err := f.s.DrainNotices(ctx, m, "@fountbox.com"); r != (routing.DrainResult{Sent: 2}) || err != nil {
+		t.Fatalf("drain: %+v %v", r, err)
 	}
 	if len(m.sent) != 2 || m.sent[0].ReplyTo == "" {
 		t.Fatalf("sent %+v", m.sent)
@@ -330,6 +334,59 @@ func TestDrainNotices(t *testing.T) {
 	// A sent proof mail still proves when answered.
 	if st, _ := f.s.Status(ctx, m.sent[0].ReplyTo); st != smtp.RecipientAccepting {
 		t.Fatal("the reply address stopped working once its mail was sent")
+	}
+}
+
+func TestDrainNoticesPerNoticeOutcome(t *testing.T) {
+	f := newOwnerFixture(t)
+	ctx := context.Background()
+	f.set(t, f.id, 1, "jane@example.com", "bob@example.com", "ann@example.com")
+
+	m := &fakeMailer{fail: map[string]error{
+		"jane@example.com": errors.New("try later"),
+		"bob@example.com":  fmt.Errorf("550 no such user: %w", routing.ErrNoticeUndeliverable),
+	}}
+	r, err := f.s.DrainNotices(ctx, m, "@fountbox.com")
+	if err != nil || r != (routing.DrainResult{Sent: 1, Dropped: 1, Waiting: 1}) {
+		t.Fatalf("drain: %+v %v", r, err)
+	}
+	if len(m.sent) != 1 || m.sent[0].To != "ann@example.com" {
+		t.Fatalf("a failing owner held up another's notice: %+v", m.sent)
+	}
+	f.s = f.reload(t)
+	ns := pending(t, f.s)
+	if len(ns) != 1 || ns[0].To != "jane@example.com" {
+		t.Fatalf("queue after drain: %+v", ns)
+	}
+}
+
+func TestDrainNoticesClearsMootProofMail(t *testing.T) {
+	f := newOwnerFixture(t)
+	ctx := context.Background()
+	f.set(t, f.id, 1, "jane@example.com")
+	f.prove(t, "jane@example.com") // proved before its proof mail went out
+
+	m := &fakeMailer{}
+	if r, err := f.s.DrainNotices(ctx, m, "@fountbox.com"); r != (routing.DrainResult{}) || err != nil {
+		t.Fatalf("drain: %+v %v", r, err)
+	}
+	f.s = f.reload(t)
+	if mb, _ := f.s.Snapshot(f.id); len(mb.Notices) != 0 {
+		t.Fatalf("moot proof mail still stored: %+v", mb.Notices)
+	}
+}
+
+func TestDrainNoticesStopsWithContext(t *testing.T) {
+	f := newOwnerFixture(t)
+	f.set(t, f.id, 1, "jane@example.com", "bob@example.com")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r, err := f.s.DrainNotices(ctx, &fakeMailer{}, "@fountbox.com")
+	if !errors.Is(err, context.Canceled) || r.Sent != 0 {
+		t.Fatalf("drain on a dead context: %+v %v", r, err)
+	}
+	if len(pending(t, f.s)) != 2 {
+		t.Fatal("notices lost")
 	}
 }
 

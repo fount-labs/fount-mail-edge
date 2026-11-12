@@ -45,8 +45,8 @@ const (
 	DefaultNewOwnersPerDay = 5
 
 	// MaxNotices bounds a license's queued owner mail. A full queue refuses owner
-	// changes rather than drop a security notice. Until the send path drains it,
-	// the daily cap keeps it from filling in under a month.
+	// changes rather than drop a security notice. While sending is off nothing
+	// drains it, and the daily cap keeps it from filling in under a month.
 	MaxNotices = 256
 
 	// ProofLocalPart is the reply address's local part, before "+<token>". It's a
@@ -448,12 +448,18 @@ type PendingNotice struct {
 	Worker  []byte // the record whose owner list changed
 }
 
-// NoticeMailer sends one owner notice. Nothing implements it yet: it waits on the
-// send path (group F's send.Service) and the DKIM key (fount-mail-send-keys.md).
-// Until then notices wait in routing data, so none is lost to a reboot.
+// NoticeMailer sends one owner notice. internal/notice implements it on the send
+// path, and cmd/edge runs it only when sending is on. Until then notices wait in
+// routing data, so none is lost to a reboot or to sending being off.
 type NoticeMailer interface {
 	SendNotice(ctx context.Context, n PendingNotice) error
 }
+
+// ErrNoticeUndeliverable, wrapped in a NoticeMailer's error, means the notice
+// can never be sent: the owner's domain refused it for good, or it kept failing
+// past the mailer's give-up time. DrainNotices removes it. Any other error leaves
+// it queued for a later pass.
+var ErrNoticeUndeliverable = errors.New("routing: owner notice undeliverable")
 
 // PendingNotices lists every queued notice, oldest first per license. domain is
 // the mail domain, such as "@fountbox.com", for proof reply addresses. A proof
@@ -467,6 +473,9 @@ func (s *Store) PendingNotices(domain string) ([]PendingNotice, error) {
 			continue
 		}
 		for _, n := range r.Notices {
+			if moot(r, n) {
+				continue
+			}
 			p := PendingNotice{ID: n.ID, Kind: n.Kind, Worker: slices.Clone(n.Worker)}
 			var err error
 			if p.To, err = s.openOwner(r.MailboxID, n.ToHash, n.To); err != nil {
@@ -479,9 +488,6 @@ func (s *Store) PendingNotices(domain string) ([]PendingNotice, error) {
 			}
 			if n.Kind == NoticeOwnerProof {
 				i := slices.IndexFunc(r.OwnerState, func(o Owner) bool { return hmac.Equal(o.Hash, n.ToHash) })
-				if i < 0 || r.OwnerState[i].ProvedAt > 0 {
-					continue
-				}
 				p.ReplyTo = ProofLocalPart + "+" + s.proofToken(r.MailboxID, r.OwnerState[i]) + domain
 			}
 			out = append(out, p)
@@ -490,44 +496,84 @@ func (s *Store) PendingNotices(domain string) ([]PendingNotice, error) {
 	return out, nil
 }
 
+// moot reports whether a queued notice no longer needs sending: a proof mail to
+// someone who has proved, or who is no longer an owner. Caller holds s.mu.
+func moot(root *Mailbox, n Notice) bool {
+	if n.Kind != NoticeOwnerProof {
+		return false
+	}
+	i := slices.IndexFunc(root.OwnerState, func(o Owner) bool { return hmac.Equal(o.Hash, n.ToHash) })
+	return i < 0 || root.OwnerState[i].ProvedAt > 0
+}
+
 // NoticeSent removes a notice from the queue once it's sent.
 func (s *Store) NoticeSent(ctx context.Context, id string) error {
+	return s.removeNotices(ctx, func(_ *Mailbox, n Notice) bool { return n.ID == id })
+}
+
+// removeNotices drops every queued notice drop picks, in one write.
+func (s *Store) removeNotices(ctx context.Context, drop func(*Mailbox, Notice) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refresh(ctx); err != nil {
 		return err
 	}
+	var records []*Mailbox
 	for _, r := range s.data.Mailboxes {
-		i := slices.IndexFunc(r.Notices, func(n Notice) bool { return n.ID == id })
-		if i < 0 {
-			continue
+		if slices.ContainsFunc(r.Notices, func(n Notice) bool { return drop(r, n) }) {
+			records = append(records, r)
 		}
-		return s.update(ctx, []*Mailbox{r}, func(r *Mailbox) {
-			r.Notices = slices.Delete(slices.Clone(r.Notices), i, i+1)
-		})
 	}
-	return nil
+	if len(records) == 0 {
+		return nil
+	}
+	return s.update(ctx, records, func(r *Mailbox) {
+		r.Notices = slices.DeleteFunc(slices.Clone(r.Notices), func(n Notice) bool { return drop(r, n) })
+	})
 }
 
-// DrainNotices sends every queued notice through m and removes each one sent. It
-// stops at the first failure, so the rest wait for the next pass. Nothing calls it
-// until the send path exists.
-func (s *Store) DrainNotices(ctx context.Context, m NoticeMailer, domain string) (int, error) {
+// DrainResult is what one DrainNotices pass did.
+type DrainResult struct {
+	Sent    int // sent and removed
+	Dropped int // undeliverable and removed
+	Waiting int // still queued for a later pass
+}
+
+// DrainNotices offers every queued notice to m once. A sent notice is removed, an
+// undeliverable one (ErrNoticeUndeliverable) is removed, and any other failure
+// leaves it queued, so one owner's broken domain never holds up another's
+// notice. Moot proof mails are cleared first. The error is a storage failure or
+// ctx ending; a notice whose removal failed is sent again on a later pass.
+func (s *Store) DrainNotices(ctx context.Context, m NoticeMailer, domain string) (DrainResult, error) {
+	var res DrainResult
+	if err := s.removeNotices(ctx, moot); err != nil {
+		return res, err
+	}
 	pending, err := s.PendingNotices(domain)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
-	sent := 0
-	for _, n := range pending {
-		if err := m.SendNotice(ctx, n); err != nil {
-			return sent, err
+	for i, n := range pending {
+		if err := ctx.Err(); err != nil {
+			res.Waiting += len(pending) - i
+			return res, err
 		}
-		if err := s.NoticeSent(ctx, n.ID); err != nil {
-			return sent, err
+		err := m.SendNotice(ctx, n)
+		if err != nil && !errors.Is(err, ErrNoticeUndeliverable) {
+			res.Waiting++
+			continue
 		}
-		sent++
+		if rerr := s.NoticeSent(ctx, n.ID); rerr != nil {
+			res.Waiting += len(pending) - i
+			return res, rerr
+		}
+		if err != nil {
+			res.Dropped++
+		} else {
+			res.Sent++
+		}
 	}
-	return sent, nil
+	return res, nil
 }
 
 // --- pause ------------------------------------------------------------------

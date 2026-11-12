@@ -216,6 +216,9 @@ func run() error {
 		go startCertLoop(ctx, cfg, k, certMgr, challenges, i)
 	}
 	go startRetentionSweep(ctx, st)
+	if rt != nil {
+		startNotices(ctx, cfg, sender, rt)
+	}
 	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
 		cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
 
