@@ -1,0 +1,146 @@
+# PROPOSED split layout (docs/CONTAINER-SPLIT.md, stage 1). Tinfoil reads only
+# tinfoil-config.yml, so this file changes nothing live. At the release that
+# turns the split on, it replaces tinfoil-config.yml, with the release's digest
+# and commitments. cmd/edge's split tests keep it in line with that file.
+#
+# Fount Fleet mail edge — Tinfoil enclave config (measured as part of attestation).
+#
+# Approving a release pins everything in this file: the image digest, the
+# attested keys, the vaults, the keyset commitment, and the egress allowlist.
+#
+# This repo is PUBLIC by design (reproducible builds need a public source). No
+# secret value lives here. After boot the edge pulls its keys from a Fount Mail
+# vault, which verifies this release first, and accepts only the keyset that
+# KEYSET_COMMITMENT names (see fount-mail-vault).
+
+cvm-version: 0.14.17 # https://github.com/tinfoilsh/cvmimage/releases/latest, no `v`
+cpus: 2
+memory: 8192
+
+# Per-boot keys generated inside the enclave; their public halves are in the
+# attestation, so no one outside ever holds them (design §5 "Edge keys").
+attested-keys:
+  - id: mail-tls   # ecdsa-p256: STARTTLS (ACME cert) + Device API TLS leaf; mail-front only
+    key: ecdsa-p256
+  - id: mail-sign  # ed25519: signs each stored message (design §9)
+    key: ed25519
+  - id: transfer   # x25519: the vault seals the keyset to this
+    key: x25519
+
+networks:
+  edge:
+    # Tinfoil has no wildcards; list every host by exact name. It resolves each one
+    # when it builds the firewall, so the edge can't deploy while either vault is gone.
+    egress: allowlist
+    allow:
+      - vault-a.fount.containers.tinfoil.dev
+      - vault-b.fount.containers.tinfoil.dev
+      - acme-v02.api.letsencrypt.org
+  internal: {} # closed: mail-core reaches the forwarder here and nothing else
+  frontlink: {} # closed: mail-front reaches mail-core here, and has no other network
+  # The forwarder only. S3 doesn't work through an allowlist (design §6).
+  storage:
+    egress: open
+
+containers:
+  # Holds the keyset, S3 credentials, mail-sign and transfer: routing, sealing,
+  # storage, ACME, the Device API and /operator. No TLS key, no tunnelled port
+  # but 8080, which the shim and the gateway's /ready check reach.
+  - name: mail-core
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:9042d8997bb3551bb120e4f5d1623a51642b4f6c11c527bb2e39fc0393a8649b" # set by release
+    command: ["core"]
+    networks: [edge, internal, frontlink]
+    keys: [mail-sign, transfer]
+    attestation: true # the socket the edge attests to the vault through
+    restart: always
+    healthcheck:
+      test: ["CMD", "/edge", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    ports: ["8080:8080"] # /ready, which the gateway checks over the tunnel
+    tmpfs:
+      /tmp: "size=64m"
+    env:
+      - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
+      - MAIL_DOMAIN: "@fountbox.com"
+      - ACME_DIRECTORY: "https://acme-v02.api.letsencrypt.org/directory"
+      - S3_BUCKET: "fount-mail-063207099341"
+      - S3_BOOT_LOG_BUCKET: "fount-mail-bootlog-063207099341"
+      - S3_BACKUP_BUCKET: "fount-mail-routing-backup-063207099341"
+      - S3_REGION: "us-east-1"
+      - EGRESS_FORWARDER: "forwarder"
+      - EGRESS_ROUTES: "9001=fount-mail-063207099341.s3.us-east-1.amazonaws.com,9002=fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com,9003=fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com" # same value on the forwarder
+      - VAULT_HOSTS: "vault-a.fount.containers.tinfoil.dev,vault-b.fount.containers.tinfoil.dev"
+      - KEYSET_COMMITMENT: "db2d1d4e7a8e474c78d48b89e93ccac6d9810776cda72ca8955000f9987dcb95" # from the vault's /status after it generates
+      - ENTITLEMENT_VERIFY_KEY: "SFGtxHgwCfhpp7R03IDEcJy2RuX0a/KH9oGTDOXy6/4=" # public, base64 raw Ed25519; PROD key (alias/fount-mail-entitlement-signing-prod)
+      - RECOVERY_RP_ID: "fount.sh" # WebAuthn RP id for /recover and /pause; fount.sh serves the passkey AASA. RECOVERY_ORIGIN stays unset until a signed build shows the origin
+      - OPERATOR_KEY: "6b8cebf9ea0a064955b8673b49d715d70be2265b89c025b483a8e8ceec4ae986" # public, hex Ed25519; signs edgectl requests, same as the vault's
+
+  # Holds mail-tls and nothing from the vault: gateway mutual TLS, SMTP with
+  # STARTTLS, the CSR, and the tunnelled ports. Its one network is closed and
+  # reaches only mail-core.
+  - name: mail-front
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:9042d8997bb3551bb120e4f5d1623a51642b4f6c11c527bb2e39fc0393a8649b" # set by release
+    command: ["front"]
+    networks: [frontlink]
+    keys: [mail-tls]
+    ipc: none
+    restart: always
+    healthcheck:
+      test: ["CMD", "/edge", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    ports: ["2525:2525", "8443:8443", "8088:8088"]
+    env:
+      - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
+      - MAIL_DOMAIN: "@fountbox.com"
+      - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
+      - CORE_LINK: "mail-core:7025"
+      - CORE_API: "mail-core:8080"
+
+  - name: forwarder
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:9042d8997bb3551bb120e4f5d1623a51642b4f6c11c527bb2e39fc0393a8649b" # set by release, same digest as mail-edge
+    networks: [internal, storage]
+    command: ["egress-forward"]
+    restart: always
+    healthcheck:
+      test: ["CMD", "/edge", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    env:
+      - EGRESS_ROUTES: "9001=fount-mail-063207099341.s3.us-east-1.amazonaws.com,9002=fount-mail-bootlog-063207099341.s3.us-east-1.amazonaws.com,9003=fount-mail-routing-backup-063207099341.s3.us-east-1.amazonaws.com"
+
+shim:
+  upstream-container: mail-core
+  upstream-port: 8080
+  paths:
+    - /health
+    - /ready
+    # edgectl: signed routing init, role mailboxes, and restores
+    - /operator/status
+    - /operator/begin
+    - /operator/init
+    - /operator/provision
+    - /operator/restore
+    # Device API (design §8), built routes only. Each is signed per its row in
+    # internal/deviceapi; cmd/edge's TestShimPathsMatchDeviceAPI keeps this in sync.
+    # The shim matches exactly, or by segment prefix where a path ends in /*.
+    - /mailbox
+    - /handle/*
+    - /address
+    - /routing
+    - /entitlement
+    - /mail
+    - /mail/*
+    - /gaps
+    - /boots/*
+    - /recover
+    - /recover/*
+    - /pause
+    - /pause/*
