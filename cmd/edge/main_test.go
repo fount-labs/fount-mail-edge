@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
-	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 	"github.com/fount-labs/fount-mail-edge/internal/keys"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
@@ -153,8 +152,7 @@ func testKeys(t *testing.T) *keys.Keys {
 // A tunnel without a pinned client key can't reach SMTP, or anyone with a tk_ key
 // could write a PROXY header naming a fake sender.
 func TestTunnelRefusesAPlainConnection(t *testing.T) {
-	cfg := &config.Config{GatewayPins: []gatewaytls.Pin{{1}}}
-	ln, err := tunnelListener(cfg, testKeys(t), "127.0.0.1:0")
+	ln, err := tunnelListener([]gatewaytls.Pin{{1}}, testKeys(t), "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,11 @@
 //  5. Start the SMTP and Device API listeners.
 //  6. Run ACME for the attested TLS key once the gateway's first health check
 //     lands; answer 421 until the certificate loads.
+//
+// `edge` runs all of that in one container. A split edge (docs/CONTAINER-SPLIT.md)
+// runs `edge core`, which is the above without TLS, SMTP or the tunnelled ports
+// and with the link listener for mail-front, and `edge front` (front.go), which
+// holds only the mail-tls key. `edge egress-forward` is the S3 forwarder.
 package main
 
 import (
@@ -39,6 +44,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
 	"github.com/fount-labs/fount-mail-edge/internal/keys"
+	"github.com/fount-labs/fount-mail-edge/internal/link"
 	"github.com/fount-labs/fount-mail-edge/internal/operator"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/s3"
@@ -60,27 +66,55 @@ func main() {
 		}
 		return
 	}
-	if err := run(); err != nil {
+	if len(os.Args) == 2 && os.Args[1] == "front" {
+		if err := runFront(); err != nil {
+			log.Fatalf("edge: front: fatal: %v", err)
+		}
+		log.Printf("edge: front stopped")
+		return
+	}
+	m := modeAll
+	if len(os.Args) == 2 && os.Args[1] == "core" {
+		m = modeCore
+	}
+	if err := run(m); err != nil {
 		log.Fatalf("edge: fatal: %v", err)
 	}
 	log.Printf("edge: stopped")
 }
 
-func run() error {
-	cfg, err := config.Load()
+// mode is how much of the edge this process runs. modeAll is one container, as
+// every release up to v0.3.0 runs. modeCore is mail-core in a split edge
+// (docs/CONTAINER-SPLIT.md): everything but TLS and SMTP, which mail-front runs.
+type mode int
+
+const (
+	modeAll mode = iota
+	modeCore
+)
+
+func run(m mode) error {
+	loadCfg := config.Load
+	if m == modeCore {
+		loadCfg = config.LoadCore
+	}
+	cfg, err := loadCfg()
 	if err != nil {
 		return err // a bad measured config must not boot
 	}
-	log.Printf("edge: booting hostnames=%v domain=%s", cfg.MailHostnames, cfg.MailDomain)
+	log.Printf("edge: booting hostnames=%v domain=%s core-only=%t", cfg.MailHostnames, cfg.MailDomain, m == modeCore)
 
-	k, err := keys.Load(cfg.AttestedKeyDir)
+	load := keys.Load
+	if m == modeCore {
+		load = keys.LoadCore
+	}
+	k, err := load(cfg.AttestedKeyDir) // in dev the attested keys usually aren't present; see docs/DEV.md
 	if err != nil {
-		if cfg.Dev {
-			return err // in dev the attested keys usually aren't present; see docs/DEV.md
-		}
 		return err
 	}
-	log.Printf("edge: attested TLS spki(sha256)=%s", k.TLSPublicSPKI())
+	if k.TLS != nil {
+		log.Printf("edge: attested TLS spki(sha256)=%s", k.TLSPublicSPKI())
+	}
 	log.Printf("edge: attested signing pub(ed25519)=%s", k.SignPublicB64())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -119,7 +153,19 @@ func run() error {
 	// The shim forwards one port, so the Device API is served here too, once
 	// storage loads. Until then its routes answer 503.
 	late := &lateHandler{}
-	healthSrv := deviceAPIServer(cfg.HealthAddr, health(certMgr, opHandler, late), nil)
+	var linkSrv *link.Server
+	var ready certSource = certMgr
+	if m == modeCore {
+		linkSrv = link.NewServer(cfg.MailHostnames, cfg.MaxMessageBytes, challenges.Handler())
+		linkSrv.SetCert(func() []byte {
+			if c, ok := certMgr.Current(); ok {
+				return certs.ChainPEM(c)
+			}
+			return nil
+		})
+		ready = frontReady{certMgr, linkSrv}
+	}
+	healthSrv := deviceAPIServer(cfg.HealthAddr, health(ready, opHandler, late), nil)
 	errc := make(chan error, 4)
 	go func() { errc <- ignoreClosed(healthSrv.ListenAndServe()) }()
 	if !cfg.Dev {
@@ -146,12 +192,6 @@ func run() error {
 		provisioner = rt
 		mutator = rt
 	}
-	acmeSrv := &http.Server{
-		Addr:              cfg.ACMEChallengeAddr,
-		Handler:           challenges.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
 	var sendRt sendRouting
 	if rt != nil {
 		sendRt = rt
@@ -170,24 +210,14 @@ func run() error {
 		RecoveryOrigin: cfg.RecoveryOrigin,
 		Sender:         sender,
 	})
-	apiSrv := deviceAPIServer(cfg.DeviceAPIAddr, api, k.DeviceAPITLSConfig())
 	late.set(api)
 
-	smtpSrv := smtp.New(smtp.Options{
-		Addr:       cfg.SMTPAddr,
-		Hostname:   cfg.MailHostnames[0],
-		Domain:     cfg.MailDomain,
-		Certs:      certMgr,
-		Store:      smtpStore,
-		Recipients: recipients,
-		MaxBytes:   cfg.MaxMessageBytes,
-	})
-
-	smtpLn, err := tunnelListener(cfg, k, cfg.SMTPAddr)
-	if err != nil {
-		return err
+	var l listeners
+	if m == modeCore {
+		l, err = coreListeners(cfg, linkSrv, smtpStore, recipients)
+	} else {
+		l, err = allListeners(cfg, k, api, certMgr, challenges, smtpStore, recipients)
 	}
-	acmeLn, err := tunnelListener(cfg, k, cfg.ACMEChallengeAddr)
 	if err != nil {
 		return err
 	}
@@ -200,27 +230,32 @@ func run() error {
 		ops.Serve(rt, keylog, func(ctx context.Context) {
 			draining.Store(true)
 			late.set(nil)
-			_ = apiSrv.Shutdown(ctx)
-			_ = smtpSrv.Shutdown(ctx)
+			l.drain(ctx)
 		})
 	}
 
-	go func() { errc <- smtpSrv.Serve(ctx, smtpLn) }()
-	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
-	go func() { errc <- ignoreClosed(acmeSrv.Serve(acmeLn)) }()
+	l.serve(ctx, errc)
 	if i, err := acme.NewIssuer(cfg.Secrets.ACMEAccountKeyPEM, cfg.ACMEDirectory, challenges); err != nil {
 		log.Printf("edge: ACME disabled (%v); SMTP will answer 421 until a cert loads", err)
 	} else {
 		issuer.Store(i)
 		go registerAccount(ctx, i, accountRetries)
-		go startCertLoop(ctx, cfg, k, certMgr, challenges, i)
+		if m == modeCore {
+			go startCoreCertLoop(ctx, cfg, certMgr, challenges, i, linkSrv)
+		} else {
+			go startCertLoop(ctx, cfg, k, certMgr, challenges, i)
+		}
 	}
 	go startRetentionSweep(ctx, st)
 	if rt != nil {
 		startNotices(ctx, cfg, sender, rt)
 	}
-	log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
-		cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
+	if m == modeCore {
+		log.Printf("edge: core listening health=%s link=%s", cfg.HealthAddr, config.LinkAddr())
+	} else {
+		log.Printf("edge: listening smtp=%s device-api=%s health=%s acme=%s",
+			cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.HealthAddr, cfg.ACMEChallengeAddr)
+	}
 
 wait:
 	for {
@@ -244,10 +279,8 @@ wait:
 
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_ = apiSrv.Shutdown(sctx)
 	_ = healthSrv.Shutdown(sctx)
-	_ = acmeSrv.Shutdown(sctx)
-	_ = smtpSrv.Shutdown(sctx)
+	l.shutdown(sctx)
 	return nil
 }
 
@@ -300,16 +333,16 @@ func deviceAPIServer(addr string, h http.Handler, tlsCfg *tls.Config) *http.Serv
 
 // tunnelListener binds a tunnelled port behind gateway mutual TLS (§7). config.Load
 // refuses a production boot with no pins, so the plain branch is dev only.
-func tunnelListener(cfg *config.Config, k *keys.Keys, addr string) (net.Listener, error) {
+func tunnelListener(pins []gatewaytls.Pin, k *keys.Keys, addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	if len(cfg.GatewayPins) == 0 {
+	if len(pins) == 0 {
 		log.Printf("edge: *** %s has no gateway mutual TLS (dev only) ***", addr)
 		return ln, nil
 	}
-	return gatewaytls.Listen(ln, k.DeviceAPITLSConfig(), cfg.GatewayPins), nil
+	return gatewaytls.Listen(ln, k.DeviceAPITLSConfig(), pins), nil
 }
 
 // storage wires the durable layer. In production it is the real store over S3:
@@ -489,7 +522,7 @@ func startRetentionSweep(ctx context.Context, st store.Store) {
 // exposes and the only one up before routing loads. So does the Device API, whose
 // routes are registered here by pattern and passed to api; shim.paths in
 // tinfoil-config.yml decides which of them the outside reaches.
-func health(c *certs.Manager, op http.Handler, api http.Handler) http.Handler {
+func health(c certSource, op http.Handler, api http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if op != nil {
 		mux.Handle("/operator/", op)

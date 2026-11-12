@@ -29,14 +29,21 @@ type Blobs interface {
 // That also means one object per host, overwritten each boot, with no buildup.
 type S3Cache struct {
 	blobs   Blobs
-	key     *ecdsa.PrivateKey // the attested TLS key the serving cert is bound to
+	pub     *ecdsa.PublicKey  // the attested TLS key the serving cert is bound to
+	key     *ecdsa.PrivateKey // its private half, or nil where it lives in another container
 	timeout time.Duration
 }
 
 // NewS3Cache builds the cache over blobs, binding cached certs to the attested
 // TLS key.
 func NewS3Cache(blobs Blobs, key *ecdsa.PrivateKey) *S3Cache {
-	return &S3Cache{blobs: blobs, key: key, timeout: 15 * time.Second}
+	return &S3Cache{blobs: blobs, pub: &key.PublicKey, key: key, timeout: 15 * time.Second}
+}
+
+// NewS3ChainCache is NewS3Cache for mail-core, which holds only the public half
+// of the TLS key, from mail-front's CSR. Loaded certificates carry no private key.
+func NewS3ChainCache(blobs Blobs, pub *ecdsa.PublicKey) *S3Cache {
+	return &S3Cache{blobs: blobs, pub: pub, timeout: 15 * time.Second}
 }
 
 func (c *S3Cache) objectKey(host string) string { return "edge/certs/" + host + ".pem" }
@@ -60,10 +67,14 @@ func (c *S3Cache) Load(host string) (*tls.Certificate, bool, error) {
 		return nil, false, nil
 	}
 	leafKey, ok := leaf.PublicKey.(*ecdsa.PublicKey)
-	if !ok || !leafKey.Equal(&c.key.PublicKey) {
+	if !ok || !leafKey.Equal(c.pub) {
 		return nil, false, nil // a prior boot's chain; this boot holds a different key
 	}
-	return &tls.Certificate{Certificate: chain, PrivateKey: c.key, Leaf: leaf}, true, nil
+	cert := &tls.Certificate{Certificate: chain, Leaf: leaf}
+	if c.key != nil {
+		cert.PrivateKey = c.key
+	}
+	return cert, true, nil
 }
 
 // Store writes the certificate chain (no key) for host, overwriting any prior

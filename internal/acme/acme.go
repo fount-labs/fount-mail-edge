@@ -126,6 +126,23 @@ func NewIssuer(accountKeyPEM []byte, directory string, ch *Challenges) (*Issuer,
 // backed by certKey (the attested mail-tls key). Each name is validated, so every
 // gateway must be up for the order to pass.
 func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.PrivateKey) (*tls.Certificate, error) {
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		DNSNames: hostnames,
+	}, certKey)
+	if err != nil {
+		return nil, fmt.Errorf("csr: %w", err)
+	}
+	chainPEM, err := i.IssueCSR(ctx, hostnames, csr)
+	if err != nil {
+		return nil, err
+	}
+	return buildCert(chainPEM, certKey)
+}
+
+// IssueCSR is Issue for a CSR signed elsewhere: in a split edge, mail-front holds
+// the mail-tls key and makes the CSR, and mail-core, which holds the account key,
+// runs the order. It returns the PEM chain, with no private key.
+func (i *Issuer) IssueCSR(ctx context.Context, hostnames []string, csr []byte) ([]byte, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if err := i.loadDirectory(ctx); err != nil {
@@ -158,12 +175,6 @@ func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.P
 		}
 	}
 
-	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		DNSNames: hostnames,
-	}, certKey)
-	if err != nil {
-		return nil, fmt.Errorf("csr: %w", err)
-	}
 	if _, _, err := i.post(ctx, order.Finalize, map[string]any{"csr": b64(csr)}); err != nil {
 		return nil, fmt.Errorf("finalize: %w", err)
 	}
@@ -182,7 +193,7 @@ func (i *Issuer) Issue(ctx context.Context, hostnames []string, certKey *ecdsa.P
 	if err != nil {
 		return nil, fmt.Errorf("download cert: %w", err)
 	}
-	return buildCert(chainPEM, certKey)
+	return chainPEM, nil
 }
 
 // Register finds or creates the account without ordering a certificate, so the

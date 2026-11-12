@@ -36,6 +36,10 @@ import (
 	"github.com/fount-labs/fount-mail-vault/wire"
 )
 
+// sendTransferKeyID is the future mail-send container's key (vault wire's
+// SendTransferKeyID), which neither front nor core may hold.
+const sendTransferKeyID = "send-transfer"
+
 type Keys struct {
 	TLS        *ecdsa.PrivateKey
 	Sign       ed25519.PrivateKey
@@ -63,6 +67,50 @@ func Load(dir string) (*Keys, error) {
 		return nil, fmt.Errorf("device cert: %w", err)
 	}
 	return &Keys{TLS: tlsKey, Sign: signKey, Transfer: transfer, deviceCert: cert}, nil
+}
+
+// LoadFront reads only mail-tls, for mail-front in a split edge. It refuses to
+// run where a key that belongs to mail-core is visible, as a tripwire against a
+// config that grants front more than the TLS key.
+func LoadFront(dir string) (*Keys, error) {
+	if err := mustNotSee(dir, "transfer", "mail-sign", sendTransferKeyID); err != nil {
+		return nil, err
+	}
+	tlsKey, err := loadECDSA(filepath.Join(dir, "mail-tls", "private_key.pem"))
+	if err != nil {
+		return nil, fmt.Errorf("attested TLS key: %w", err)
+	}
+	cert, err := selfSigned(tlsKey)
+	if err != nil {
+		return nil, fmt.Errorf("device cert: %w", err)
+	}
+	return &Keys{TLS: tlsKey, deviceCert: cert}, nil
+}
+
+// LoadCore reads mail-sign and transfer, for mail-core in a split edge. TLS is
+// nil: mail-front holds it. It refuses to run where mail-tls is visible.
+func LoadCore(dir string) (*Keys, error) {
+	if err := mustNotSee(dir, "mail-tls", sendTransferKeyID); err != nil {
+		return nil, err
+	}
+	signKey, err := loadED25519(filepath.Join(dir, "mail-sign", "private_key.pem"))
+	if err != nil {
+		return nil, fmt.Errorf("attested signing key: %w", err)
+	}
+	transfer, err := wire.LoadTransferKey(filepath.Join(dir, "transfer", "private_key.pem"))
+	if err != nil {
+		return nil, fmt.Errorf("attested transfer key: %w", err)
+	}
+	return &Keys{Sign: signKey, Transfer: transfer}, nil
+}
+
+func mustNotSee(dir string, ids ...string) error {
+	for _, id := range ids {
+		if _, err := os.Stat(filepath.Join(dir, id)); err == nil {
+			return fmt.Errorf("the %s key is visible here, and this container must not hold it", id)
+		}
+	}
+	return nil
 }
 
 // DeviceAPITLSConfig serves the Device API with a self-signed leaf over the

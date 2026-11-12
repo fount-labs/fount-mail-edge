@@ -149,7 +149,13 @@ func (c *Config) BucketURL(bucket string) string {
 
 // Load reads the environment and returns a validated Config. It holds no secrets
 // until InstallVaultKeys runs, except with EDGE_DEV=1, which fills placeholders.
-func Load() (*Config, error) {
+func Load() (*Config, error) { return load(false) }
+
+// LoadCore is Load for mail-core in a split edge. mail-front terminates the
+// tunnels, so core needs no gateway pins.
+func LoadCore() (*Config, error) { return load(true) }
+
+func load(core bool) (*Config, error) {
 	dev := os.Getenv("EDGE_DEV") == "1"
 	c := &Config{
 		MailHostnames:     splitList(env("MAIL_HOSTNAMES", "mx1.fountbox.com,mx2.fountbox.com")),
@@ -187,7 +193,7 @@ func Load() (*Config, error) {
 	}
 	// A release with no pins would leave the tunnelled ports open to any tk_ key,
 	// so it's fatal. Only a dev boot may run them in the clear.
-	if v := os.Getenv("GATEWAY_CLIENT_PINS"); v != "" || !dev {
+	if v := os.Getenv("GATEWAY_CLIENT_PINS"); v != "" || (!dev && !core) {
 		pins, err := gatewaytls.ParsePins(v)
 		if err != nil {
 			return nil, fmt.Errorf("GATEWAY_CLIENT_PINS: %w", err)

@@ -56,3 +56,16 @@ func parseChainPEM(b []byte) (chain [][]byte, leaf *x509.Certificate, err error)
 	}
 	return chain, leaf, nil
 }
+
+// ChainPEM is the chain alone as PEM, which is what crosses from mail-core to
+// mail-front in a split edge.
+func ChainPEM(cert *tls.Certificate) []byte { return encodeChainPEM(cert) }
+
+// ParseChain reads a PEM chain into a certificate with no private key.
+func ParseChain(b []byte) (*tls.Certificate, error) {
+	chain, leaf, err := parseChainPEM(b)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Certificate{Certificate: chain, Leaf: leaf}, nil
+}

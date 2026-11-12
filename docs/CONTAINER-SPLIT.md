@@ -1,6 +1,9 @@
-# Edge container split: plan
+# Edge container split
 
-Status: proposal, 2026-11-11. Nothing here is built. It waits on the owner's decisions at the end.
+Status, 2026-11-11: the owner accepted all four decisions at the end. Stage 1 (`mail-front` and
+`mail-core`) is built; the vault's `send-transfer` box is vault PR #4; stage 2 (`mail-send`) waits
+for that vault release. The live release still runs one `mail-edge` container: the split goes
+live only when a release copies `docs/tinfoil-config.split.yml` over `tinfoil-config.yml`.
 
 The design says that from M3, TLS, the keyserver-delivered secrets, and DKIM signing run in
 separate containers, so one bug can't expose keys and mail in transit together (`fount-mail.md`,
@@ -54,9 +57,9 @@ vault release and held upgrades of both vaults.
           tunnel 2525/8443/8088                    shim :8080
 gateway ────────────────────────▶ mail-front      Tinfoil shim ─────▶ mail-core
                                   keys: mail-tls                       keys: transfer, mail-sign
-                                  net: front                           attestation: true
+                                  net: frontlink                       attestation: true
                                        │                               net: edge (allowlist vaults),
-                                       └──── front (closed) ──────────▶     front, internal, sendnet
+                                       └── frontlink (closed) ────────▶     frontlink, internal, sendnet
                                                                             │            │
                                                      forwarder ◀── internal ┘            │
                                                      net: internal, storage (open)       │
@@ -68,8 +71,8 @@ gateway ────────────────────────
 ```
 
 - **`mail-front`** holds `mail-tls` and nothing from the vault. It terminates gateway mutual TLS
-  on the tunnel ports, speaks SMTP including STARTTLS, serves ACME HTTP-01 answers, and passes
-  each message and each RCPT check to `mail-core`. It has no egress: its only network is `front`.
+  on the tunnel ports, speaks SMTP including STARTTLS, forwards ACME HTTP-01 requests, and passes
+  each message and each RCPT check to `mail-core`. It has no egress: its only network is `frontlink`. It serves the challenge and Device API ports by forwarding to core.
   This is the code that parses hostile input from the internet, so it's the one that most needs
   to be away from the keys.
 - **`mail-core`** holds `transfer`, `mail-sign`, the mail keyset and the S3 credentials. It runs
@@ -82,34 +85,35 @@ gateway ────────────────────────
   two vaults plus the gateway relay.
 - **`forwarder`** is unchanged.
 
-All four run the same image, with a subcommand each, as `egress-forward` does now. Every container
-keeps `read_only`, no `cap_add`, no `cvm_admin`, and gets `ipc: none`.
+All four run the same image, with a subcommand each (`front`, `core`, later `send`), as
+`egress-forward` does now. Every container keeps `read_only`, no `cap_add` and no `cvm_admin`;
+mail-front also gets `ipc: none`. Stage 1 refuses to boot on a wrong grant: front exits if it can
+see `transfer`, `mail-sign`, `send-transfer`, any vault secret, or any vault, S3 or send
+setting, and core exits if it can see `mail-tls` or `send-transfer`.
 
 ### What crosses each boundary
 
 | Link | Calls | Notes |
 |---|---|---|
-| front → core | `Status(rcpt)`, `Put(envelope, raw)`, cert cache get/put | `Put` carries the plaintext message, which front already saw when it terminated TLS. Core seals it |
-| core → front | cert status for `/ready` | Front answers `/ready` locally; core's `/ready` asks front |
-| core → send | `Send(from, to[], raw)`, status | Send answers with per-recipient results, as `send.Service` does today |
+| front → core | `POST /link/rcpt`, `POST /link/put`, `POST /link/csr`, `GET /link/cert?have=` | `put` carries the plaintext message, which front already saw when it terminated TLS. Core seals it. `have` tells core which leaf front holds, which core's `/ready` waits for |
+| front → core | the tunnelled challenge port, forwarded | Only `GET /` and `GET /.well-known/acme-challenge/…`; `/link/` is never reachable from outside |
+| front → core | the Device API's TLS port, forwarded | Only `deviceapi.Routes()`; `/operator` stays shim-only |
+| core → send | `Send(from, to[], raw)`, status | Stage 2. Send answers with per-recipient results, as `send.Service` does today |
 
-Each link is a small HTTP API on its own closed network, which admits only the two named
-containers; the measured config fixes that. If we want more than network membership, each
-container can get its own attested key for the link, and each side reads the other's public half
-from the enclave's own attestation document, giving mutual TLS with no shared secret. That costs
-an `attestation: true` on front, so it's optional.
+Front is always the client: core never dials front. The link (`internal/link`) is plain HTTP on
+the closed `frontlink` network, which admits only the two containers the measured config names
+(decision 3). Mutual TLS with per-container attested keys stays possible later, at the cost of
+`attestation: true` on front.
 
-### ACME
+### ACME (decision 2)
 
-Issuing needs the ACME account key (in the mail keyset) and a CSR signed with `mail-tls` (in
-front). Two options:
-
-1. **Core runs ACME** and asks front to sign the CSR. The account key stays with the keyset.
-   Front exposes "sign this CSR for these hostnames", which only signs CSRs, not arbitrary data.
-2. **Front runs ACME** and core hands it the account key once. Simpler, but the internet-facing
-   container would then hold a CAA-pinned issuing key.
-
-Recommendation: option 1.
+Core runs ACME and holds the account key with the keyset. Front makes the CSR for
+`MAIL_HOSTNAMES` with `mail-tls` at start and posts it to core, which takes only a P-256 CSR for
+exactly those names with a valid signature, and only one key per boot (a restarted front has
+the same attested key). Core orders with it (`acme.Issuer.IssueCSR`), holds the chain alone,
+caches it in S3 bound to the CSR's key, and front fetches the chain and pairs it with its key
+only if the leaf is for that key. Core can't check that the CSR's key is the attested one
+without tinfoil-go; a front that lied would only get a certificate for a key it holds anyway.
 
 ## What doesn't change
 
@@ -123,20 +127,35 @@ Recommendation: option 1.
 
 ## Build order
 
-1. Vault (needs the owner's go-ahead, and a vault PR): seal the send keyset to `send-transfer`
-   when the document endorses it. Merge before vault `v0.2.0`.
-2. Edge, stage 1: `mail-front` and `mail-core`, with the RPC layer and tests. `tinfoil-config.yml`
-   moves to the new layout in the same PR, so a release from `main` is always consistent. No
-   live change until the owner tags a release.
-3. Edge, stage 2: `mail-send`, after step 1's vault release is live.
+1. Vault: seal the send keyset to `send-transfer` when the document endorses it (vault PR #4).
+   Merge before vault `v0.2.0`.
+2. Edge, stage 1 (built): `edge front`, `edge core`, `internal/link`, and the proposed config
+   `docs/tinfoil-config.split.yml`. `edge` with no argument still runs everything in one
+   container, so `tinfoil-config.yml` is unchanged and a release from `main` is safe as it is.
+   Tests keep the split config in line with the live one (same settings, moved), give front only
+   `mail-tls` and `frontlink`, and keep every send setting off front and the forwarder.
+3. Edge, stage 2: `mail-send`, after step 1's vault release is live. It re-vendors `wire` for
+   `PullSendKeyset`, moves the send settings and `send.Service` to `mail-send`, and core hands it
+   messages over a second closed network.
 
-Stage 1 doesn't depend on the vault, but it's the largest change to `cmd/edge` since launch and
-moves every listener, so it waits for the owner's go-ahead too.
+### Turning stage 1 on
 
-## Decisions for the owner
+A release, so the owner's:
+
+1. Copy `docs/tinfoil-config.split.yml` over `tinfoil-config.yml`, keeping that release's
+   commitments, and pin the new image digest in all three containers.
+2. Deploy held (`--hold=true`) and check before promoting: `/operator/status` answers through
+   the shim (core), `/ready` passes after the certificate loads (core and front), and a test
+   message through a gateway lands. One thing the docs don't settle: whether Tinfoil publishes
+   `ports` for a container whose only network is `closed` (Docker doesn't for its `internal`
+   networks). If the held deploy's tunnels can't reach 2525 or 8088, give mail-front an
+   `allowlist` network with an empty `allow` list instead, and say so here.
+3. Redeploy the gateways with the new tag, as for any edge release.
+
+## Decisions for the owner (all accepted 2026-11-11)
 
 1. Accept the vault change (`send-transfer`), and fold it into the pending vault `v0.2.0` release.
-2. ACME: option 1 (core runs it, front signs CSRs) or option 2.
+2. ACME in core with the account key; front only makes the CSR and holds `mail-tls`.
 3. Accept plain TCP between containers on `closed` networks inside the enclave.
 4. Go-ahead to build stage 1 now, or wait and build both stages together.
 
