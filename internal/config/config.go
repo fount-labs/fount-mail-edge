@@ -125,6 +125,10 @@ type Config struct {
 	SendRelayAddr string           // host:port of the gateway relay's listener
 	SendRelayPins []gatewaytls.Pin // the relay's server keys
 	DKIMSelector  string           // RSA selector, e.g. "f1"; Ed25519 signs as "f1e"
+	// SendEHLOName is what the send path says EHLO as: the relay host's PTR name,
+	// so a receiver sees the HELO, the PTR and the A record agree. Empty means
+	// MailHostnames[0].
+	SendEHLOName string
 	// SendLink is mail-send's link address (host:port), on mail-core in a split
 	// edge only. Core holds no send setting; mail-send has them all.
 	SendLink string
@@ -309,6 +313,10 @@ func (c *Config) loadSend(dev bool) error {
 	}
 	c.SendRelayAddr = os.Getenv("SEND_RELAY_ADDR")
 	c.DKIMSelector = os.Getenv("DKIM_SELECTOR")
+	c.SendEHLOName = os.Getenv("SEND_EHLO_NAME")
+	if c.SendEHLOName != "" && !validHostname(c.SendEHLOName) {
+		return fmt.Errorf("SEND_EHLO_NAME %q must be a lowercase hostname with a dot", c.SendEHLOName)
+	}
 	if v := os.Getenv("SEND_RELAY_PINS"); v != "" {
 		pins, err := gatewaytls.ParsePins(v)
 		if err != nil {
@@ -336,6 +344,21 @@ func (c *Config) loadSend(dev bool) error {
 		return fmt.Errorf("SEND_RELAY_ADDR: %w", err)
 	}
 	return nil
+}
+
+// validHostname is a lowercase DNS name of at least two labels, each letters,
+// digits and inner hyphens: what an EHLO argument and a PTR target can be.
+func validHostname(s string) bool {
+	labels := strings.Split(s, ".")
+	if len(s) > 253 || len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || strings.ToLower(l) != l || !validSelector(l) {
+			return false
+		}
+	}
+	return true
 }
 
 func validSelector(s string) bool {

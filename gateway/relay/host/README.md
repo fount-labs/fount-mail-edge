@@ -85,11 +85,8 @@ Port-25 policies as of 2026-11-11, from each provider's docs:
 
 - **DNS (fount-infra `MailDnsStack`, `-c relayIp=<ip>`):** `out.fountbox.com A
   <ip>`, apex SPF `v=spf1 ip4:<ip> -all`, and the same SPF on the HELO names
-  `out`, `mx1` and `mx2`. The edge says `EHLO mx1.fountbox.com` today
-  (`MAIL_HOSTNAMES[0]`), which doesn't match the PTR `out.fountbox.com`.
-  Receivers check that the PTR and A agree, which they do, and a HELO SPF
-  pass covers `mx1`. An edge setting for the EHLO name would let it say
-  `out.fountbox.com` instead.
+  `out`, `mx1` and `mx2`. mail-send's `SEND_EHLO_NAME: "out.fountbox.com"` makes the
+  EHLO name match the PTR (it defaults to `MAIL_HOSTNAMES[0]`, `mx1.fountbox.com`).
 - **PTR** at the provider: `<ip>` → `out.fountbox.com`.
 - **Edge release (`tinfoil-config.yml`):** `out.fountbox.com` in
   `networks.edge.allow`; `SEND_RELAY_ADDR: "out.fountbox.com:443"`;

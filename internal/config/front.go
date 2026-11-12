@@ -40,6 +40,7 @@ var FrontForbidden = append([]string{
 // one container, and only mail-send in a split edge.
 var SendSettings = []string{
 	"SEND_ENABLED", "SEND_KEYSET_COMMITMENT", "SEND_RELAY_ADDR", "SEND_RELAY_PINS", "DKIM_SELECTOR",
+	"SEND_EHLO_NAME",
 }
 
 // LoadFront reads mail-front's config.
