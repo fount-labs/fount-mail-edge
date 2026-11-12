@@ -73,6 +73,7 @@ func TestSendRouteErrors(t *testing.T) {
 		send.ErrLapsed:                          http.StatusForbidden,
 		send.ErrPaused:                          http.StatusForbidden,
 		send.ErrRateLimited:                     http.StatusTooManyRequests,
+		fmt.Errorf("link: %w", send.ErrOff):     http.StatusNotImplemented,
 		fmt.Errorf("relay down"):                http.StatusInternalServerError,
 	} {
 		api, priv, keyID := sendAPI(t, &fakeSender{err: err})

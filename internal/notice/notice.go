@@ -71,10 +71,13 @@ type Deliverer interface {
 	Deliver(ctx context.Context, from string, recipients []string, data []byte) []send.Result
 }
 
-// Options is everything a Mailer needs. cmd/edge takes Signers and Deliverer from
-// the send.Service it built, so there's no second way out.
+// Options is everything a Mailer needs. cmd/edge passes the Transmitter its
+// send.Service uses, so there's no second way out: the edge's own Outbox in one
+// container, mail-send over the link in a split edge. Without Out, a Mailer
+// builds an Outbox from Signers and Deliverer.
 type Options struct {
 	MailDomain string // "@fountbox.com"
+	Out        send.Transmitter
 	Signers    []*dkim.Signer
 	Deliverer  Deliverer
 	License    func(worker []byte) ([]byte, bool) // routing.Store.LicenseOf
@@ -84,13 +87,12 @@ type Options struct {
 
 // Mailer is routing.NoticeMailer.
 type Mailer struct {
-	domain    string // "fountbox.com"
-	from      string
-	signers   []*dkim.Signer
-	deliverer Deliverer
-	license   func([]byte) ([]byte, bool)
-	limit     *limit.Limiter
-	now       func() time.Time
+	domain  string // "fountbox.com"
+	from    string
+	out     send.Transmitter
+	license func([]byte) ([]byte, bool)
+	limit   *limit.Limiter
+	now     func() time.Time
 
 	mu    sync.Mutex
 	tries map[string]*tries
@@ -108,9 +110,9 @@ func New(o Options) (*Mailer, error) {
 	switch {
 	case domain == "":
 		return nil, errors.New("notice: no mail domain")
-	case len(o.Signers) == 0:
+	case o.Out == nil && len(o.Signers) == 0:
 		return nil, errors.New("notice: no DKIM key")
-	case o.Deliverer == nil:
+	case o.Out == nil && o.Deliverer == nil:
 		return nil, errors.New("notice: no send path")
 	case o.License == nil:
 		return nil, errors.New("notice: no license lookup")
@@ -123,15 +125,18 @@ func New(o Options) (*Mailer, error) {
 	if now == nil {
 		now = time.Now
 	}
+	out := o.Out
+	if out == nil {
+		out = &send.Outbox{MailDomain: "@" + domain, Signers: o.Signers, Deliverer: o.Deliverer, Now: now}
+	}
 	return &Mailer{
-		domain:    domain,
-		from:      routing.ProofLocalPart + "@" + domain,
-		signers:   o.Signers,
-		deliverer: o.Deliverer,
-		license:   o.License,
-		limit:     limit.PerWindow(float64(per), 24*time.Hour),
-		now:       now,
-		tries:     map[string]*tries{},
+		domain:  domain,
+		from:    routing.ProofLocalPart + "@" + domain,
+		out:     out,
+		license: o.License,
+		limit:   limit.PerWindow(float64(per), 24*time.Hour),
+		now:     now,
+		tries:   map[string]*tries{},
 	}, nil
 }
 
@@ -160,13 +165,14 @@ func (m *Mailer) SendNotice(ctx context.Context, n routing.PendingNotice) error 
 	if !m.limit.Allow(key) {
 		return ErrLimited
 	}
-	signed, err := m.sign(raw, now)
-	if err != nil {
-		return err // a key problem isn't the notice's fault; keep it
-	}
 	ctx, cancel := context.WithTimeout(ctx, sendBudget)
 	defer cancel()
-	res := m.deliverer.Deliver(ctx, m.from, []string{n.To}, signed)
+	res, err := m.out.Transmit(ctx, m.from, []string{n.To}, raw)
+	if err != nil {
+		// Nothing was sent: a key problem, or mail-send off or out of reach. None
+		// is the notice's fault, so keep it, and don't count it toward GiveUp.
+		return err
+	}
 	if len(res) != 1 {
 		return m.retry(n.ID, now, "no delivery result")
 	}
@@ -218,18 +224,6 @@ func (m *Mailer) prune(now time.Time) {
 			delete(m.tries, id)
 		}
 	}
-}
-
-func (m *Mailer) sign(raw []byte, now time.Time) ([]byte, error) {
-	var out []byte
-	for _, s := range m.signers {
-		field, err := s.Sign(raw, now)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, field...)
-	}
-	return append(out, raw...), nil
 }
 
 // Run drains q through m at once and then every interval, until ctx ends. Only

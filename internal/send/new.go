@@ -26,8 +26,7 @@ type Options struct {
 	Roots      *x509.CertPool // nil is the system roots; tests set their own
 }
 
-// New builds the send path: DNS over HTTPS, MTA-STS, and SMTP, each through the
-// relay with TLS ending in the enclave.
+// New builds the send path: the edge's own checks (Policy) in front of an Outbox.
 func New(o Options) (*Service, error) {
 	switch {
 	case o.Directory == nil:
@@ -36,6 +35,27 @@ func New(o Options) (*Service, error) {
 		// The owner list is only what the licensee's device wrote, so sending
 		// needs the edge's own proof that each owner reads the address (§10).
 		return nil, errors.New("send: no owner proof check")
+	}
+	out, err := NewOutbox(o)
+	if err != nil {
+		return nil, err
+	}
+	return &Service{
+		Policy: NewPolicy(PolicyOptions{
+			Directory:  o.Directory,
+			MailDomain: o.MailDomain,
+			Proven:     o.Proven,
+		}),
+		Out: out,
+	}, nil
+}
+
+// NewOutbox builds signing and delivery alone: DNS over HTTPS, MTA-STS, and SMTP,
+// each through the relay with TLS ending in the enclave. It reads only the
+// relay, signers, hostname, mail domain, DoH and roots from o; mail-send, which
+// has no routing data, builds one with nothing else.
+func NewOutbox(o Options) (*Outbox, error) {
+	switch {
 	case o.Relay == nil || o.Relay.Addr == "" || len(o.Relay.Pins) == 0 || len(o.Relay.ClientCert.Certificate) == 0:
 		return nil, errors.New("send: the relay needs an address, pins, and a client key")
 	case len(o.Signers) == 0:
@@ -59,13 +79,9 @@ func New(o Options) (*Service, error) {
 		CheckRedirect: noRedirects,
 	}
 	resolver := &DoH{Client: client, Endpoints: endpoints}
-	return &Service{
-		Policy: NewPolicy(PolicyOptions{
-			Directory:  o.Directory,
-			MailDomain: o.MailDomain,
-			Proven:     o.Proven,
-		}),
-		Signers: o.Signers,
+	return &Outbox{
+		MailDomain: o.MailDomain,
+		Signers:    o.Signers,
 		Deliverer: &Deliverer{
 			Hostname: o.Hostname,
 			Resolver: resolver,

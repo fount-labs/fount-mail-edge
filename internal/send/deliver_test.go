@@ -197,9 +197,12 @@ func TestServiceSend(t *testing.T) {
 	dir, id := newDir("pat@smithcpa.com")
 	_, ek, _ := ed25519.GenerateKey(rand.Reader)
 	svc := &Service{
-		Policy:    NewPolicy(PolicyOptions{Directory: dir, MailDomain: "@fountbox.com"}),
-		Signers:   []*dkim.Signer{{Domain: "fountbox.com", Selector: "f1e", Key: ek}},
-		Deliverer: r.deliverer(),
+		Policy: NewPolicy(PolicyOptions{Directory: dir, MailDomain: "@fountbox.com"}),
+		Out: &Outbox{
+			MailDomain: "@fountbox.com",
+			Signers:    []*dkim.Signer{{Domain: "fountbox.com", Selector: "f1e", Key: ek}},
+			Deliverer:  r.deliverer(),
+		},
 	}
 	res, err := svc.Send(context.Background(), id, good())
 	if err != nil || len(res) != 1 || res[0].Status != Sent {

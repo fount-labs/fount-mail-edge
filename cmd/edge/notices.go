@@ -31,8 +31,7 @@ func startNotices(ctx context.Context, cfg *config.Config, sender deviceapi.Send
 	}
 	m, err := notice.New(notice.Options{
 		MailDomain: cfg.MailDomain,
-		Signers:    svc.Signers,
-		Deliverer:  svc.Deliverer,
+		Out:        svc.Out,
 		License:    q.LicenseOf,
 	})
 	if err != nil {
