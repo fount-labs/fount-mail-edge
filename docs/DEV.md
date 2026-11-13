@@ -118,6 +118,11 @@ Sending launches dark. It needs four things, and `/operator/status` says which i
 | `SEND_ENABLED: "1"` | `tinfoil-config.yml` | Unset. A release that sets it must also set `SEND_KEYSET_COMMITMENT`, `SEND_RELAY_ADDR` (the gateway relay's `host:port`, also on the egress allowlist), `SEND_RELAY_PINS` (the relay's hex SPKI pins) and `DKIM_SELECTOR` (`f1`; Ed25519 signs as `f1e`), or it doesn't boot |
 | The shim | `shim.paths` | `/send` isn't listed, and `TestShimPathsMatchDeviceAPI` keeps it off until `POST /send` is in `builtM3` |
 
+`POST /connect` sends through the same path, so it's off (503) whenever `POST /send` is. Its
+caps are 3 mails per worker and owner an hour and 20 per license a day, in memory; a connect
+isn't a new owner, so `PUT /routing`'s 5 new owners a day still applies when the proof comes
+back. The Message-ID key is derived from `ADDRESS_MAC_KEY`, so it needs no new secret.
+
 At boot the edge asks each vault in turn for both keysets. A vault without the send keyset
 still gives it the keyset, and the edge asks the next vault for the send keyset before booting
 without one. Each key is checked against its commitment inside `wire.PullKeysets`, so a fake vault

@@ -47,7 +47,8 @@ exist, and how a release gets them. Code comments cite its section numbers.
   the broker's SPF check. The edge keeps neither anywhere readable.
 - **No addresses at rest or in logs.** Routing data holds keyed hashes, and a
   failed store logs only the error class. The edge does see addresses in memory:
-  each SMTP recipient, and the addresses on `POST /address` and `PUT /routing`.
+  each SMTP recipient, and the addresses on `POST /address`, `PUT /routing` and
+  `POST /connect`.
 
 ## Status — M2 edge
 

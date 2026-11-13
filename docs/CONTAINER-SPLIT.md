@@ -162,8 +162,9 @@ without tinfoil-go; a front that lied would only get a certificate for a key it 
 - `edge core` refuses every send setting and reads `SEND_LINK` (`mail-send:7026`). With it and
   routing, `POST /send` runs the Policy in core and hands the message to mail-send. Core asks
   mail-send's status every 15 s: while it isn't `on`, `POST /send` answers 501 (`send.ErrOff`)
-  before any check, so no limit is spent; owner notices start only the first time it's `on`, and
-  a notice mail-send can't take stays queued without counting toward its give-up time.
+  before any check, so no limit is spent, and `POST /connect` answers 503; owner notices start
+  only the first time it's `on`, and a notice mail-send can't take stays queued without
+  counting toward its give-up time.
   `/operator/status` shows `off: mail-send: <why>`, `off: mail-send unreachable`, or `on`, and
   mail-send's commitment.
 - In core the vault leaves the send keyset out of the `transfer` box, because the enclave's

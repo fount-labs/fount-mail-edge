@@ -38,7 +38,8 @@ Strict MTA-STS and CAA make that visible in public logs afterwards. They don't p
 
 Routing data is one object, encrypted with a key only the vaults and the edge hold. No
 plaintext address is stored or logged. The edge does see addresses in memory: the recipient of
-each SMTP session, the address on `POST /address`, and owner addresses on `PUT /routing`.
+each SMTP session, the address on `POST /address`, and owner addresses on `PUT /routing` and
+`POST /connect`.
 
 Fount can still link things it can compute. It holds the MAC key and the licenses, so it can
 link a mailbox to a license and test guessed addresses. Owner hashes are unsalted. S3 also
@@ -89,6 +90,12 @@ and nonce. From outside, the API is reached through the Tinfoil shim, which forw
 paths `shim.paths` in `tinfoil-config.yml` lists. Timestamps must be within 5 minutes. The nonce cache lives in memory, so a request
 captured in the 5 minutes before a restart can be replayed once after it. The route table, with
 each route's signer, is `routes` in `internal/deviceapi/deviceapi.go`.
+
+`POST /connect`, signed by the owner-change key, mails a would-be owner from the worker's own
+address. Its Message-ID is a MAC the edge alone can make, over the worker, the owner and the
+time. The response gives only when it expires; the device learns the Message-ID from the
+owner's reply, and presents it on `PUT /routing` as that owner's proof. The edge never reads
+the reply. A proof is good for 24 hours, for that worker and owner only.
 
 ## §9 Stored messages
 

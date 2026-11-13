@@ -162,6 +162,15 @@ func (r remoteSender) Send(ctx context.Context, mailboxID, raw []byte) ([]send.R
 	return r.svc.Send(ctx, mailboxID, raw)
 }
 
+// sendingOn reports whether mail-send last said sending is on, for what mail-core
+// sends besides POST /send.
+func sendingOn(state *atomic.Pointer[sendState]) func() bool {
+	return func() bool {
+		s := state.Load()
+		return s != nil && s.State == "on"
+	}
+}
+
 // newCoreSender builds mail-core's Sender. It is nil, so POST /send stays 501,
 // with no mail-send to reach or no routing; otherwise it follows mail-send's state.
 func newCoreSender(cfg *config.Config, rt sendRouting, out send.Transmitter, state *atomic.Pointer[sendState]) (deviceapi.Sender, string) {
