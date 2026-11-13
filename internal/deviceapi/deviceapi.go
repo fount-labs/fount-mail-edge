@@ -180,7 +180,7 @@ type Provisioner interface {
 // stubs.
 type Mutator interface {
 	AddAddress(ctx context.Context, p routing.NewAddress) (mailboxID []byte, err error)
-	SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error
+	SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string, proofs ...routing.ConnectProof) error
 	RenewEntitlement(ctx context.Context, mailboxID, licenseHash []byte, exp int64) error
 	RotateKeys(ctx context.Context, mailboxID []byte, k routing.RotatedKeys) (newMailboxKeyHash []byte, err error)
 	PasskeyOf(mailboxID []byte) (credPubKey []byte, ok bool)
