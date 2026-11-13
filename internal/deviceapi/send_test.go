@@ -73,6 +73,8 @@ func TestSendRouteErrors(t *testing.T) {
 		send.ErrLapsed:                          http.StatusForbidden,
 		send.ErrPaused:                          http.StatusForbidden,
 		send.ErrRateLimited:                     http.StatusTooManyRequests,
+		send.ErrSendInProgress:                  http.StatusConflict,
+		send.ErrMessageIDReused:                 http.StatusConflict,
 		fmt.Errorf("link: %w", send.ErrOff):     http.StatusNotImplemented,
 		fmt.Errorf("relay down"):                http.StatusInternalServerError,
 	} {
