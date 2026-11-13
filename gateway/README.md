@@ -27,12 +27,16 @@ launch template, so changing any parameter replaces the instance, and the
 Elastic IP moves to the new one.
 
 **Each edge release means a gateway update.** Once the edge runs the new tag, a
-gateway pinned to the old one can't open new tunnels, and senders retry. Update
-gateway a, wait for its `PublicIp` to answer on port 25, then update b:
+gateway pinned to the old one can't open new tunnels, and senders retry. Update both
+gateways at once. Every release has a fresh `mail-tls` key, so it needs a new certificate, and
+that one certificate validates mx1 through gateway a and mx2 through gateway b. Updating a and
+waiting for it before b deadlocks ACME (found on v0.4.0):
 
 ```sh
-gateway/deploy.sh a v0.1.1
+gateway/deploy.sh a v0.6.0 & gateway/deploy.sh b v0.6.0 & wait
 ```
+
+Done when both `PublicIp`s answer `220` on port 25 and the edge's `/ready` is 200.
 
 ## No access, no logs
 
