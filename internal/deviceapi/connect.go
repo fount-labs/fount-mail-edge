@@ -51,6 +51,9 @@ func (a *API) connect() http.Handler {
 		case errors.Is(err, notice.ErrConnectNotWorker):
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
+		case errors.Is(err, send.ErrPaused), errors.Is(err, send.ErrLapsed):
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
 		case errors.Is(err, notice.ErrConnectBadOwner):
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return

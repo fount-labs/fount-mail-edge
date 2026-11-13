@@ -249,7 +249,7 @@ func TestConnectRouteWithSendingOff(t *testing.T) {
 func TestPutRoutingWithAConnectProof(t *testing.T) {
 	f := newConnectFixture(t)
 	id := f.connect(f.mb, "worker@fountbox.com", "Pat@SmithCPA.com")
-	f.clk.add(time.Hour)
+	f.clk.add(30 * time.Minute)
 	// The device may hand back the Message-ID with or without its brackets.
 	rec := f.put(f.mb, 1, []string{"pat@smithcpa.com"}, proofBody{"pat@smithcpa.com", strings.Trim(id, "<>")})
 	if rec.Code != http.StatusOK {
@@ -322,4 +322,18 @@ func TestPutRoutingRefusesABadConnectProof(t *testing.T) {
 
 	f.clk.add(routing.ConnectLifetime + time.Second)
 	check("expired", []proofBody{{"pat@smithcpa.com", pat}}, owners)
+}
+
+func TestConnectRouteRefusesAPausedWorker(t *testing.T) {
+	f := newConnectFixture(t)
+	if err := f.rt.SetPaused(context.Background(), f.mb.id, true); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.do(f.mb, "POST", "/connect", map[string]string{"address": "worker@fountbox.com", "owner": "pat@smithcpa.com"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.out.got) != 0 {
+		t.Fatal("a paused worker sent connect mail")
+	}
 }

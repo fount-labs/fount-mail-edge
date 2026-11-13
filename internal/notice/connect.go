@@ -61,6 +61,7 @@ func (e *ConnectLimitError) Is(target error) bool { return target == ErrConnectL
 type ConnectRouting interface {
 	MailboxID(address string) []byte
 	LicenseOf(mailboxID []byte) ([]byte, bool)
+	Snapshot(mailboxID []byte) (routing.Mailbox, bool)
 	ConnectMAC(mailboxID []byte, owner string, issuedAt int64) []byte
 }
 
@@ -119,6 +120,12 @@ func (c *Connector) Connect(ctx context.Context, mailboxID []byte, address, owne
 	worker, err := plainAddress(strings.TrimSpace(address))
 	if err != nil || !strings.HasSuffix(worker, c.domain) || len(mailboxID) == 0 || !hmac.Equal(c.rt.MailboxID(worker), mailboxID) {
 		return time.Time{}, ErrConnectNotWorker
+	}
+	// A paused or lapsed worker sends nothing, connect mail included, as POST /send refuses.
+	if mb, ok := c.rt.Snapshot(mailboxID); ok && mb.Paused {
+		return time.Time{}, send.ErrPaused
+	} else if ok && mb.EntitlementExp != 0 && c.now().Unix() >= mb.EntitlementExp {
+		return time.Time{}, send.ErrLapsed
 	}
 	to, err := plainAddress(strings.TrimSpace(owner))
 	if err != nil || strings.HasSuffix(to, c.domain) {

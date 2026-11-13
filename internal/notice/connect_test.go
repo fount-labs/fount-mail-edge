@@ -20,7 +20,7 @@ import (
 
 // fakeConnectRouting hashes addresses like routing.Store (lowercase, trimmed) and
 // stands a plain hash in for the connect MAC.
-type fakeConnectRouting struct{}
+type fakeConnectRouting struct{ mb routing.Mailbox }
 
 func (fakeConnectRouting) MailboxID(a string) []byte {
 	h := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(a))))
@@ -28,6 +28,8 @@ func (fakeConnectRouting) MailboxID(a string) []byte {
 }
 
 func (fakeConnectRouting) LicenseOf(id []byte) ([]byte, bool) { return []byte("lic"), true }
+
+func (r fakeConnectRouting) Snapshot(id []byte) (routing.Mailbox, bool) { return r.mb, true }
 
 func (r fakeConnectRouting) ConnectMAC(id []byte, owner string, issued int64) []byte {
 	h := sha256.New()
@@ -231,6 +233,30 @@ func TestNewConnectorNeedsItsParts(t *testing.T) {
 	} {
 		if _, err := NewConnector(o); err == nil {
 			t.Errorf("%s: built", name)
+		}
+	}
+}
+
+func TestConnectRefusesAPausedOrLapsedWorker(t *testing.T) {
+	clk := &clock{time.Unix(1_800_000_000, 0)}
+	id := fakeConnectRouting{}.MailboxID(worker)
+	for name, c := range map[string]struct {
+		mb   routing.Mailbox
+		want error
+	}{
+		"paused": {routing.Mailbox{Paused: true}, send.ErrPaused},
+		"lapsed": {routing.Mailbox{EntitlementExp: clk.t.Unix() - 1}, send.ErrLapsed},
+	} {
+		d := &fakeDeliverer{}
+		conn, err := NewConnector(ConnectOptions{MailDomain: "@fountbox.com", Out: signingOutbox(d, clk), Routing: fakeConnectRouting{mb: c.mb}, Now: clk.now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Connect(context.Background(), id, worker, "pat@smithcpa.com"); !errors.Is(err, c.want) {
+			t.Errorf("%s: %v, want %v", name, err, c.want)
+		}
+		if len(d.got) != 0 {
+			t.Errorf("%s: sent mail", name)
 		}
 	}
 }
