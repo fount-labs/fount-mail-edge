@@ -443,3 +443,17 @@ func TestInstallSendKeyset(t *testing.T) {
 		t.Fatal("installed a send keyset that doesn't match the commitment")
 	}
 }
+
+func TestCheckBootDomain(t *testing.T) {
+	hosts := []string{"mx1.fountbox.com", "mx2.fountbox.com"}
+	for _, d := range []string{"", "boot.fountbox.com", "b-1.example.org"} {
+		if err := checkBootDomain(d, hosts); err != nil {
+			t.Errorf("%q: %v", d, err)
+		}
+	}
+	for _, d := range []string{"boot", "Boot.fountbox.com", "*.boot.fountbox.com", ".boot.fountbox.com", "boot.fountbox.com.", "mx1.fountbox.com", "-b.fountbox.com"} {
+		if err := checkBootDomain(d, hosts); err == nil {
+			t.Errorf("%q accepted", d)
+		}
+	}
+}

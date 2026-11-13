@@ -17,8 +17,9 @@
 // the gateway, no DNS credential — see ~/Desktop/code/tinfoil-port25-test), now
 // in Go and dependency-free.
 //
-// TODO(§6, untested): add a random hostname per boot (second CA as backup) to
-// escape the 5-certs/week rate limit; required before a second edge.
+// Each boot adds one random name under BOOT_HOSTNAME_DOMAIN to its certificate
+// (bootname.go), so Let's Encrypt's 5 a week for the same set of names never
+// applies. TODO(§6): a second CA as backup, for when Let's Encrypt refuses.
 package acme
 
 import (

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/acme"
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
 	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/deviceapi"
@@ -84,7 +85,7 @@ func runFront() error {
 	go func() { errc <- smtpSrv.Serve(ctx, smtpLn) }()
 	go func() { errc <- ignoreClosed(apiSrv.ListenAndServeTLS("", "")) }()
 	go func() { errc <- ignoreClosed(acmeSrv.Serve(acmeLn)) }()
-	go frontCertLoop(ctx, core, k.TLS, certMgr, cfg.MailHostnames, frontCertTiming{})
+	go frontCertLoop(ctx, core, k.TLS, certMgr, acme.WithBootName(cfg.MailHostnames, cfg.BootDomain), frontCertTiming{})
 	log.Printf("edge: front listening smtp=%s device-api=%s acme=%s", cfg.SMTPAddr, cfg.DeviceAPIAddr, cfg.ACMEChallengeAddr)
 
 	select {
