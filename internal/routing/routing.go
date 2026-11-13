@@ -373,6 +373,38 @@ func (s *Store) keyedHash(v string) []byte {
 	return m.Sum(nil)
 }
 
+// lookupRecipient finds the mailbox an inbound recipient is for. A
+// "<local>+<tag>@domain" recipient is mail for "<local>@domain": the tag is a
+// thread's reply token (app design §13), which the broker checks and the edge
+// doesn't read. An empty tag claims no mailbox. Proof replies ("fount+…") are
+// matched before this, by proofTag.
+func (s *Store) lookupRecipient(recipient string) (Mailbox, bool) {
+	base, tagged, ok := untagged(recipient)
+	if !ok {
+		return Mailbox{}, false
+	}
+	if !tagged {
+		return s.lookup(hex.EncodeToString(s.MailboxID(recipient)))
+	}
+	return s.lookup(hex.EncodeToString(s.MailboxID(base)))
+}
+
+// untagged removes a "+tag" from the local part of an address: the tag is
+// everything from the first "+", as in send's withoutTag, so an address the edge
+// delivers to and one a worker may send From strip the same way. It reports
+// false for an empty tag.
+func untagged(addr string) (base string, tagged, ok bool) {
+	local, domain, hasAt := strings.Cut(addr, "@")
+	i := strings.IndexByte(local, '+')
+	if !hasAt || i < 0 {
+		return addr, false, true
+	}
+	if i == len(local)-1 {
+		return "", true, false
+	}
+	return local[:i] + "@" + domain, true, true
+}
+
 // lookup returns a copy, because the live record changes under s.mu.
 func (s *Store) lookup(mailboxIDHex string) (Mailbox, bool) {
 	s.mu.Lock()
@@ -451,14 +483,15 @@ func (m *Mailbox) clone() Mailbox {
 
 // Resolve maps an envelope recipient to its sealed-to address record, or
 // store.ErrNoRecipient when no mailbox claims it (no catch-all, §6).
+// A tagged recipient resolves to the untagged address's mailbox; the envelope
+// sealed with the message keeps the tag.
 func (s *Store) Resolve(_ context.Context, recipient string) (store.Address, error) {
-	id := s.MailboxID(recipient)
-	m, ok := s.lookup(hex.EncodeToString(id))
+	m, ok := s.lookupRecipient(recipient)
 	if !ok {
 		return store.Address{}, store.ErrNoRecipient
 	}
 	if len(m.DecryptionKey) != keyLen {
-		return store.Address{}, fmt.Errorf("routing: mailbox %x has no usable decryption key", id)
+		return store.Address{}, fmt.Errorf("routing: mailbox %x has no usable decryption key", m.MailboxID)
 	}
 	return store.Address{MailboxID: m.MailboxID, PublicKey: m.DecryptionKey}, nil
 }
@@ -525,11 +558,12 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 // EntitlementExp ahead of now while a license is current or in grace, so a
 // lapsed value is the signal that even the grace is over. A "fount+<token>"
 // reply to an owner-proof mail is accepting while its token matches an owner.
+// Any other "<local>+<tag>" recipient answers as "<local>" does.
 func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatus, error) {
 	if tag, ok := proofTag(recipient); ok {
 		return s.proofStatus(tag), nil
 	}
-	m, ok := s.lookup(hex.EncodeToString(s.MailboxID(recipient)))
+	m, ok := s.lookupRecipient(recipient)
 	if !ok {
 		return smtp.RecipientUnknown, nil
 	}
