@@ -62,6 +62,7 @@ func TestParseRefuses(t *testing.T) {
 		"too many":          with("From: "+worker, "Cc: "+manyAddrs(MaxRecipients)),
 		"bare LF":           []byte("From: " + worker + "\n" + strings.Join(base, "\r\n") + "\r\n\r\n"),
 		"no Message-ID":     msg("From: "+worker, "To: pat@smithcpa.com", "Subject: s", "Date: x"),
+		"empty Message-ID":  msg("From: "+worker, "To: pat@smithcpa.com", "Subject: s", "Date: x", "Message-ID: "),
 	}
 	for name, raw := range cases {
 		if _, err := Parse(raw); err == nil {

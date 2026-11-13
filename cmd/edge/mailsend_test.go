@@ -178,8 +178,15 @@ func TestCoreSendsThroughMailSend(t *testing.T) {
 	if !strings.HasPrefix(string(d.got[0]), "DKIM-Signature: v=1; a=ed25519-sha256;") {
 		t.Fatalf("delivered %q", d.got[0])
 	}
+	// Core keeps the send record: a device's retry of the same message gets the
+	// same results and never reaches mail-send.
+	again, err := sender.Send(ctx, worker, outboundMessage())
+	if err != nil || len(again) != 1 || again[0] != res[0] || len(d.got) != 1 {
+		t.Fatalf("retry: %+v %v, %d deliveries", again, err, len(d.got))
+	}
 	// Core's own checks still run: a stranger never reaches mail-send.
-	if _, err := sender.Send(ctx, worker, outboundMessage("Cc: stranger@example.net")); !errors.Is(err, send.ErrNotOwner) {
+	stranger := strings.Replace(string(outboundMessage("Cc: stranger@example.net")), "<1@", "<2@", 1)
+	if _, err := sender.Send(ctx, worker, []byte(stranger)); !errors.Is(err, send.ErrNotOwner) {
 		t.Fatalf("stranger: %v", err)
 	}
 	if len(d.got) != 1 {

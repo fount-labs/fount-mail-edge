@@ -23,6 +23,10 @@ type sendRequest struct {
 // sendMail handles POST /send. guard has verified the address key, so the caller
 // is the worker named by Fount-Key-Id; send.Policy checks the message is from
 // that worker and only to its owners.
+//
+// A retry resends the same message, Message-ID and all: send.Dedupe answers it
+// with the first send's results and re-attempts only Temporary recipients. The
+// nonce cache can't do that, as a retry is a newly signed request.
 func (a *API) sendMail() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mailboxID, ok := callerMailbox(r)
@@ -46,6 +50,14 @@ func (a *API) sendMail() http.Handler {
 			return
 		case errors.Is(err, send.ErrNoMailbox):
 			writeErr(w, http.StatusNotFound, "no such mailbox")
+			return
+		case errors.Is(err, send.ErrSendInProgress):
+			// The first send of this Message-ID is still being delivered.
+			w.Header().Set("Retry-After", "30")
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		case errors.Is(err, send.ErrMessageIDReused):
+			writeErr(w, http.StatusConflict, err.Error())
 			return
 		case errors.Is(err, send.ErrRateLimited):
 			w.Header().Set("Retry-After", "3600")

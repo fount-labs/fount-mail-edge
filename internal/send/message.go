@@ -37,6 +37,7 @@ type Message struct {
 	Raw        []byte   // exactly what the device sent; the edge only prepends DKIM
 	From       string   // the worker's address, lowercased
 	Recipients []string // To and Cc, lowercased, without repeats
+	MessageID  string   // the Message-ID field's value as written, which keys Dedupe
 }
 
 // Parse checks the message shape the edge will sign and send. It doesn't decide
@@ -72,7 +73,10 @@ func Parse(raw []byte) (*Message, error) {
 	if err != nil || len(from) != 1 {
 		return nil, errors.New("the From field must hold exactly one plain address")
 	}
-	m := &Message{Raw: raw, From: from[0]}
+	m := &Message{Raw: raw, From: from[0], MessageID: header.Get(fields, "message-id")[0].Value()}
+	if m.MessageID == "" {
+		return nil, errors.New("empty Message-ID")
+	}
 
 	if rt := header.Get(fields, "reply-to"); len(rt) == 1 {
 		addrs, err := parseMailboxList(rt[0].Value())

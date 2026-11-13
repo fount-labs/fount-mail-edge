@@ -166,6 +166,18 @@ without tinfoil-go; a front that lied would only get a certificate for a key it 
   a notice mail-send can't take stays queued without counting toward its give-up time.
   `/operator/status` shows `off: mail-send: <why>`, `off: mail-send unreachable`, or `on`, and
   mail-send's commitment.
+- Core also keeps the send record (`send.Dedupe`), because every `POST /send` passes through its
+  `send.Service`; the one-container edge keeps it in the same place. A device retries a send
+  with the same bytes, Message-ID and all. A repeat within 24 h gets the first send's
+  per-recipient results without a second delivery or a second token from the limits; a repeat
+  while the first is still being delivered waits for it, and the first keeps going if its
+  caller hangs up; only recipients whose result was `temporary` are tried again, and that
+  re-attempt passes the Policy and spends a token like any send. The same Message-ID with other
+  bytes is a 409, as is a repeat whose caller stops waiting. The record is keyed by
+  HMAC(mailbox ID, Message-ID) under a key drawn at boot, keeps no address of its own (only
+  each recipient's status and detail by position), is never logged, is capped in size, and
+  lives in memory only: like the limits, it resets on a reboot, so a retry across one is a
+  fresh send.
 - In core the vault leaves the send keyset out of the `transfer` box, because the enclave's
   document endorses `send-transfer`; core also sets no send commitment, so `InstallVaultKeys`
   would drop one anyway.
