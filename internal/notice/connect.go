@@ -32,10 +32,16 @@ const (
 	ConnectPerOwnerPerHour  = 3
 	ConnectPerLicensePerDay = 20
 
-	connectSubject = "Reply to connect your email to %s"
-	connectBody    = `Reply to this email to let %s take work from you. You don't need to write anything.
+	// %[1]s is the worker's name (its address's local part), %[2]s its address.
+	connectSubject = "Your Fount worker %[1]s is ready: reply to start"
+	connectBody    = `You asked Fount to connect this email address to your worker, %[1]s (%[2]s).
 
-If you didn't ask for this, ignore it and nothing changes.
+Reply to this email to finish. You don't need to write anything. After that, you can email work to %[2]s.
+
+If you didn't ask for this, ignore this email and nothing changes.
+
+-- 
+Fount runs AI workers you can email. fount.sh
 `
 )
 
@@ -168,9 +174,10 @@ func (c *Connector) Connect(ctx context.Context, mailboxID []byte, address, owne
 func connectMessage(worker, owner, messageID string, now time.Time) []byte {
 	var b strings.Builder
 	field := func(name, value string) { b.WriteString(name + ": " + value + "\r\n") }
-	field("From", "<"+worker+">")
+	name, _, _ := strings.Cut(worker, "@")
+	field("From", `"`+name+` at Fount" <`+worker+">")
 	field("To", "<"+owner+">")
-	field("Subject", fmt.Sprintf(connectSubject, worker))
+	field("Subject", fmt.Sprintf(connectSubject, name, worker))
 	field("Date", now.UTC().Format(time.RFC1123Z))
 	field("Message-ID", messageID)
 	field("Auto-Submitted", "auto-generated") // RFC 3834: most out-of-office replies skip it
@@ -178,6 +185,6 @@ func connectMessage(worker, owner, messageID string, now time.Time) []byte {
 	field("Content-Type", "text/plain; charset=utf-8")
 	field("Content-Transfer-Encoding", "7bit")
 	b.WriteString("\r\n")
-	b.WriteString(strings.ReplaceAll(fmt.Sprintf(connectBody, worker), "\n", "\r\n"))
+	b.WriteString(strings.ReplaceAll(fmt.Sprintf(connectBody, name, worker), "\n", "\r\n"))
 	return []byte(b.String())
 }

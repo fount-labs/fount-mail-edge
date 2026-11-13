@@ -166,7 +166,7 @@ func TestConnectRoute(t *testing.T) {
 			t.Fatalf("the response leaks %q", secret)
 		}
 	}
-	if from := strings.TrimSpace(header.Get(fields, "from")[0].Value()); from != "<worker@fountbox.com>" {
+	if from := strings.TrimSpace(header.Get(fields, "from")[0].Value()); from != `"worker at Fount" <worker@fountbox.com>` {
 		t.Fatalf("From %s", from)
 	}
 }
