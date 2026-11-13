@@ -68,6 +68,15 @@ The running edge adds it at once.
    because it's public. Fount's watcher will email on every release of this repo and the
    vault's, once it's deployed, which it isn't yet. To retire an old release, raise
    `EDGE_MIN_TAG` in a vault release.
+5. **Roll out**, held for review:
+   `tinfoil container update edge --tag vX.Y.Z --hold --yes`. The candidate answers on port
+   4443. Judge it on `/operator/status` through
+   `tinfoil http get https://edge.fount.containers.tinfoil.dev:4443/operator/status --enclave edge.fount.containers.tinfoil.dev:4443 --repo fount-labs/fount-mail-edge@vX.Y.Z`,
+   not `/ready`, which stays 503 until a gateway reaches it. Then
+   `tinfoil container promote edge`.
+6. **Update both gateways at once** (`gateway/README.md`):
+   `gateway/deploy.sh a vX.Y.Z` and `gateway/deploy.sh b vX.Y.Z` in parallel. Done when both
+   answer `220` on port 25 and `/ready` is 200.
 
 ## Verify
 
