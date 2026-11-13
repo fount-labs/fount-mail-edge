@@ -136,6 +136,7 @@ var routes = map[string]route{
 	"POST /entitlement":  {sigAddress, "M2", "Renews the mailbox's entitlement"},
 	"POST /pause":        {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
 	"POST /send":         {sigAddress, "M3", "Sends to owners"},
+	"POST /connect":      {sigOwnerChange, "M3", "Mails a would-be owner from the worker; their reply proves them on PUT /routing"},
 	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
 	"GET /pause/{id}":    {sigNone, "M3", "Issues a pause challenge bound to a worker and a state (§12)"},
 }
@@ -145,6 +146,7 @@ var builtM3 = map[string]bool{
 	"GET /pause/{id}": true,
 	"POST /pause":     true,
 	"POST /send":      true,
+	"POST /connect":   true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -208,6 +210,9 @@ type Options struct {
 	// Sender backs POST /send (M3). nil leaves it 501.
 	Sender Sender
 
+	// Connector backs POST /connect. nil, sending off, answers 503.
+	Connector Connector
+
 	// HandleLimiter throttles every route that shows whether an address is taken
 	// (§8), keyed by the caller's license so one subscription can't enumerate the
 	// namespace. nil builds a per-enclave default.
@@ -231,6 +236,7 @@ type API struct {
 	nonces        *nonceCache
 	handleLimiter *limit.Limiter
 	sender        Sender
+	connector     Connector
 }
 
 func New(o Options) *API {
@@ -248,6 +254,7 @@ func New(o Options) *API {
 		nonces:        newNonceCache(),
 		handleLimiter: o.HandleLimiter,
 		sender:        o.Sender,
+		connector:     o.Connector,
 	}
 	if a.handleLimiter == nil {
 		a.handleLimiter = limit.New(5, 30) // 5 checks/sec, burst 30, per license
@@ -298,6 +305,8 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.recover()
 	case a.sender != nil && pattern == "POST /send":
 		return a.sendMail()
+	case pattern == "POST /connect":
+		return a.connect()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h
