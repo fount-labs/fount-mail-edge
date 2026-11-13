@@ -68,9 +68,19 @@ already stored. Detecting a swapped key on the device is planned (§9), and not 
   kept in the sealed envelope. The tag is a thread's reply token, which the broker checks; the
   edge doesn't read it. An empty tag is unknown. `fount+<token>@` is the exception: it's an
   owner-proof reply, never mail for a mailbox.
-- Each message is stored whole and never parsed, sealed with HPKE to the address's key, with
-  the envelope inside the encryption: the sender, the recipient, the sending server's IP, and
-  its HELO name, so the broker can check SPF. `250` comes only after S3 confirms the write.
+- Each message is stored whole, sealed with HPKE to the address's key, with the envelope inside
+  the encryption: the sender, the recipient, the sending server's IP, and its HELO name, so the
+  broker can check SPF. `250` comes only after S3 confirms the write.
+- Before sealing, the edge checks the sender (`internal/sendercheck`): the From mailbox, each
+  DKIM signature and whether it's aligned, whether the address is in a signed To or Cc, and the
+  signed Date's skew. It doesn't check SPF or DMARC. The check is sealed with the message (§9),
+  so the broker and the Cloud coordinator read it instead of parsing the mail. Fount decides
+  what a message may do from it (fount `m4-cloud-runners.md` §3.2).
+- The check runs in a child process with no keys, as `nobody` and with no network where the
+  container allows it. Every DNS answer comes from the parent. DKIM keys are fetched over
+  mail-send's DoH (the send link), which answers only DKIM key names. Until sending is on there
+  is no DNS, so each signature is a `temperror` and the mail waits for the user. A check that
+  can't run is stored as one that says so. Mail is never refused because of it.
 - Unfetched mail expires after 30 days, with a signed expiry record. A message the sweep can't
   verify stays until a 45-day bucket rule deletes it with no record.
 - S3 traffic goes through a forwarder container with open egress, because Tinfoil's allowlist
@@ -102,6 +112,11 @@ owner's reply, and presents it on `PUT /routing` as that owner's proof. The edge
 the reply. A proof is good for 24 hours, for that worker and owner only.
 
 ## §9 Stored messages
+
+The object is `FME1` version 3 (`internal/store/message.go`). Inside the encryption are the
+envelope, the sender check's JSON, and the raw message. The check needs no signature of its own:
+the object's signature covers the ciphertext, and the version is in the HPKE AAD. Readers still
+read versions 1 and 2, which have no check.
 
 Each message is signed by that boot's attested signing key, and the boot's key is published
 under `GET /boots/{id}`, so the broker can check a message after that enclave is gone. Each

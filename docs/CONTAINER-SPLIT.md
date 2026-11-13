@@ -103,6 +103,7 @@ any keyset, S3, ACME, tunnel or link setting (`config.SendForbidden`).
 | front → core | the tunnelled challenge port, forwarded | Only `GET /` and `GET /.well-known/acme-challenge/…`; `/link/` is never reachable from outside |
 | front → core | the Device API's TLS port, forwarded | Only `deviceapi.Routes()`; `/operator` stays shim-only |
 | core → send | `POST /link/send`, `GET /link/send/status` | `send` carries `from`, `recipients` and the raw message. Send answers with per-recipient results, or 503 while sending is off. `status` is `on` or `off: <why>`, with the held send keyset's commitment |
+| core → send | `POST /link/dns/txt` | One DKIM key record for core's sender check, over send's DoH. Only DKIM key names (`sendercheck.ValidKeyName`); 503 until send has an outbox. Core has no DNS of its own |
 
 Front is always the client: core never dials front, and core is always mail-send's client. The
 links (`internal/link`) are plain HTTP on the closed `frontlink` and `sendnet` networks, each of
