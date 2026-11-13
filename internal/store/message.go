@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/hpke"
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 )
 
 // The stored-message object (design §9). This is a cross-service contract: the
@@ -19,7 +20,7 @@ import (
 // Signed region (big-endian), in order:
 //
 //	magic       4   "FME1"
-//	version     1   formatVersion (2); Parse also reads 1
+//	version     1   formatVersion (3); Parse also reads 1 and 2
 //	suite       6   HPKE suite id (kem,kdf,aead as uint16s)
 //	edgeID     16   random, assigned by the edge; never from the sender
 //	mailboxID  32   keyed MAC of the address (routing + binding)
@@ -37,11 +38,16 @@ import (
 // whose layout the version byte names.
 const (
 	magic         = "FME1"
-	formatVersion = 2
+	formatVersion = 3
 
 	// formatV1 is the framing before the sending server's IP and HELO were
-	// recorded. Objects stored then are still read.
+	// recorded, and formatV2 the framing before the sender check. Objects stored
+	// then are still read.
 	formatV1 = 1
+	formatV2 = 2
+
+	// maxCheckBytes bounds the sender check in the framing.
+	maxCheckBytes = sendercheck.MaxBytes
 
 	// hpkeInfo domain-separates this use of the suite from any other.
 	hpkeInfo = "fount-mail-edge/v1/stored-message"
@@ -129,26 +135,44 @@ const (
 	maxHELOBytes     = 255 // the longest domain RFC 5321 allows
 )
 
-var errEnvelope = errors.New("store: envelope field too long")
+var (
+	errEnvelope = errors.New("store: envelope field too long")
+	errCheck    = errors.New("store: the sender check is empty or too long")
+)
 
-// messagePlaintext frames the envelope and raw message for sealing. The
-// plaintext addresses, the client IP and the HELO name live only here, inside
-// the ciphertext (§9). Version 2, lengths big-endian:
-//
-//	senderLen 2 | sender | recipientLen 2 | recipient |
-//	clientIPFrom 1 | clientIPLen 1 | clientIP | heloLen 1 | helo | raw...
-//
-// Version 1 stopped after the recipient: senderLen 2 | sender | recipientLen 2 |
-// recipient | raw...
-func messagePlaintext(env Envelope, raw []byte) ([]byte, error) {
+// checkEnvelope reports whether env can be framed.
+func checkEnvelope(env Envelope) error {
 	if len(env.Sender) > 0xffff || len(env.Recipient) > 0xffff ||
 		len(env.ClientIP) > maxClientIPBytes || len(env.HELO) > maxHELOBytes {
-		return nil, errEnvelope
+		return errEnvelope
 	}
 	if (env.ClientIPFrom == ClientIPNone) != (env.ClientIP == "") {
-		return nil, errors.New("store: client IP and its source disagree")
+		return errors.New("store: client IP and its source disagree")
 	}
-	b := make([]byte, 0, envelopeLen(env)+len(raw))
+	return nil
+}
+
+// messagePlaintext frames the envelope, the sender check and the raw message for
+// sealing. The plaintext addresses, the client IP, the HELO name and the check
+// live only here, inside the ciphertext (§9). Version 3, lengths big-endian:
+//
+//	senderLen 2 | sender | recipientLen 2 | recipient |
+//	clientIPFrom 1 | clientIPLen 1 | clientIP | heloLen 1 | helo |
+//	checkLen 4 | check | raw...
+//
+// The check is package sendercheck's JSON, never empty. It has no signature of
+// its own: the object's signature covers the ciphertext, and the version is in
+// the AAD. Version 2 had no check: the raw message followed the HELO. Version 1
+// stopped after the recipient: senderLen 2 | sender | recipientLen 2 |
+// recipient | raw...
+func messagePlaintext(env Envelope, check, raw []byte) ([]byte, error) {
+	if err := checkEnvelope(env); err != nil {
+		return nil, err
+	}
+	if len(check) == 0 || len(check) > maxCheckBytes {
+		return nil, errCheck
+	}
+	b := make([]byte, 0, envelopeLen(env)+4+len(check)+len(raw))
 	b = binary.BigEndian.AppendUint16(b, uint16(len(env.Sender)))
 	b = append(b, env.Sender...)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(env.Recipient)))
@@ -157,19 +181,21 @@ func messagePlaintext(env Envelope, raw []byte) ([]byte, error) {
 	b = append(b, env.ClientIP...)
 	b = append(b, byte(len(env.HELO)))
 	b = append(b, env.HELO...)
+	b = binary.BigEndian.AppendUint32(b, uint32(len(check)))
+	b = append(b, check...)
 	b = append(b, raw...)
 	return b, nil
 }
 
-// envelopeLen is the framed envelope's length in version 2, before the raw message.
+// envelopeLen is the framed envelope's length, before the check.
 func envelopeLen(env Envelope) int {
 	return 2 + len(env.Sender) + 2 + len(env.Recipient) + 2 + len(env.ClientIP) + 1 + len(env.HELO)
 }
 
-// unframe splits a decrypted plaintext of the given version into its envelope and
-// raw message. The edge never decrypts; this is the broker's reference and the
-// tests' check.
-func unframe(version byte, p []byte) (Envelope, []byte, error) {
+// unframe splits a decrypted plaintext of the given version into its envelope,
+// sender check (nil before version 3) and raw message. The edge never decrypts;
+// this is the broker's reference and the tests' check.
+func unframe(version byte, p []byte) (Envelope, []byte, []byte, error) {
 	var env Envelope
 	str16 := func() (string, bool) {
 		if len(p) < 2 || len(p) < 2+int(binary.BigEndian.Uint16(p)) {
@@ -191,36 +217,49 @@ func unframe(version byte, p []byte) (Envelope, []byte, error) {
 	}
 	var ok bool
 	if env.Sender, ok = str16(); !ok {
-		return env, nil, errMalformed
+		return env, nil, nil, errMalformed
 	}
 	if env.Recipient, ok = str16(); !ok {
-		return env, nil, errMalformed
+		return env, nil, nil, errMalformed
 	}
 	switch version {
 	case formatV1:
-		return env, p, nil
-	case formatVersion:
+		return env, nil, p, nil
+	case formatV2, formatVersion:
 	default:
-		return env, nil, fmt.Errorf("%w: version %d", errMalformed, version)
+		return env, nil, nil, fmt.Errorf("%w: version %d", errMalformed, version)
 	}
 	if len(p) < 1 {
-		return env, nil, errMalformed
+		return env, nil, nil, errMalformed
 	}
 	env.ClientIPFrom = ClientIPSource(p[0])
 	p = p[1:]
 	if env.ClientIP, ok = str8(); !ok {
-		return env, nil, errMalformed
+		return env, nil, nil, errMalformed
 	}
 	if env.HELO, ok = str8(); !ok {
-		return env, nil, errMalformed
+		return env, nil, nil, errMalformed
 	}
-	return env, p, nil
+	if version == formatV2 {
+		return env, nil, p, nil
+	}
+	if len(p) < 4 {
+		return env, nil, nil, errMalformed
+	}
+	n := binary.BigEndian.Uint32(p)
+	if n == 0 || n > maxCheckBytes || uint64(len(p)-4) < uint64(n) {
+		return env, nil, nil, errMalformed
+	}
+	return env, p[4 : 4+n], p[4+n:], nil
 }
 
 // seal HPKE-encrypts the framed plaintext to recipientPub, binding the header
 // as AAD, and fills Enc/Ct.
-func (m *Message) seal(recipientPub []byte, env Envelope, raw []byte) error {
-	pt, err := messagePlaintext(env, raw)
+func (m *Message) seal(recipientPub []byte, env Envelope, check, raw []byte) error {
+	if m.version() != formatVersion {
+		return fmt.Errorf("store: can't seal version %d", m.version())
+	}
+	pt, err := messagePlaintext(env, check, raw)
 	if err != nil {
 		return err
 	}
@@ -280,7 +319,7 @@ func Parse(b []byte, signPub ed25519.PublicKey) (*Parsed, error) {
 	}
 	p := &Parsed{}
 	off := lenMagic
-	if b[off] != formatVersion && b[off] != formatV1 {
+	if b[off] != formatVersion && b[off] != formatV2 && b[off] != formatV1 {
 		return nil, fmt.Errorf("%w: version %d", errMalformed, b[off])
 	}
 	p.Version = b[off]

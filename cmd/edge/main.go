@@ -51,11 +51,20 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/operator"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/s3"
+	"github.com/fount-labs/fount-mail-edge/internal/send"
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == sendercheck.Subcommand {
+		// The sender check's child (sendercheck.Process): no config, no keys.
+		if err := sendercheck.Serve(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	log.SetFlags(log.LUTC | log.Ldate | log.Ltime | log.Lmicroseconds)
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
 		if err := healthcheck(config.HealthAddr()); err != nil {
@@ -184,7 +193,21 @@ func run(m mode) error {
 		}
 	}
 
-	st, rt, err := storage(ctx, cfg, k, ops)
+	// The sender check needs DNS, which comes from the outbox: mail-send's over
+	// the send link in a split edge, this process's own otherwise. Until there is
+	// one, every signature is a temperror and the mail waits for the user.
+	var checkDNS atomic.Pointer[sendercheck.Resolver]
+	self, err := sendercheck.SelfCommand()
+	if err != nil {
+		return fmt.Errorf("sender check: %w", err)
+	}
+	checker := &sendercheck.Process{Command: self, DNS: func() sendercheck.Resolver {
+		if r := checkDNS.Load(); r != nil {
+			return *r
+		}
+		return nil
+	}}
+	st, rt, err := storage(ctx, cfg, k, ops, checker.Check)
 	if err != nil {
 		return err
 	}
@@ -212,6 +235,10 @@ func run(m mode) error {
 	)
 	if m == modeCore {
 		sendClient = &link.SendClient{Base: "http://" + cfg.SendLink, HTTP: &http.Client{Timeout: 2 * time.Minute}}
+		if cfg.SendLink != "" {
+			var r sendercheck.Resolver = sendClient
+			checkDNS.Store(&r)
+		}
 		var why string
 		if sender, why = newCoreSender(cfg, sendRt, sendClient, &sending); sender == nil {
 			sending.Store(&sendState{State: why})
@@ -222,6 +249,10 @@ func run(m mode) error {
 		var st sendState
 		sender, st = newSender(cfg, sendRt)
 		sending.Store(&st)
+		if out, ok := transmitterOf(sender).(*send.Outbox); ok {
+			var r sendercheck.Resolver = outboxDNS{out}
+			checkDNS.Store(&r)
+		}
 	}
 	log.Printf("edge: sending %s", sending.Load().State)
 	var connector deviceapi.Connector
@@ -393,7 +424,7 @@ func tunnelListener(pins []gatewaytls.Pin, k *keys.Keys, addr string) (net.Liste
 // uses the domain suffix), and no provisioner (creation routes stay 501) —
 // enough to smoke-test the listeners. Until a mailbox is created, a production
 // edge has none, so every RCPT is correctly refused.
-func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operator.Routing) (store.Store, *routing.Store, error) {
+func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operator.Routing, check store.SenderCheck) (store.Store, *routing.Store, error) {
 	if cfg.Dev {
 		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
 		return store.NewDiscard(), nil, nil
@@ -423,7 +454,7 @@ func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operato
 		return nil, nil, err
 	}
 	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", cfg.S3EndpointURL(), bootID)
-	st := store.New(rt, blobs, k.Sign, bootID, store.WithLogBlobs(logBlobs))
+	st := store.New(rt, blobs, k.Sign, bootID, store.WithLogBlobs(logBlobs), store.WithSenderCheck(check))
 	if bs, ok := st.(store.BootStore); ok {
 		if err := publishBoot(context.Background(), bs, bootRetries); err != nil {
 			return nil, nil, fmt.Errorf("publish boot attestation (boot-id=%x): %w", bootID, err)

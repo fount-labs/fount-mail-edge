@@ -1,0 +1,543 @@
+[
+  {
+    "name": "ed25519 relaxed",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "rsa relaxed",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=YF/j8bbkheOvL808vDOn+jRjWsEr8YJOIjNmotmWkLDGEEjwL5Y+dnEwDykRC+p+GxotCjY9\r\n ZCfMHthQ6dm7eqvTP3yfOFbh4Y7uJqww/wS/DOvkuyFGza7JiHJviDII+aR0GdK707j7NJEdD8e\r\n ztQaUK2ZDhTNE+81QJAzs7rE+s6yi7ETBCFb/O/d0fnnw4Qairntf27sIW9iGy+5uhf56VArbF1\r\n VZ49nW0oFFRYFqfpJ39QJJYDcSQ6zXTsf5nbQXqyK+cN32KGOyxiuqbUMX2V35XWQHQmZPIdjb8\r\n GsLWykoBTy9DkAaRT7V32EAP0x53mVVHztzSqZSF9xPlQ==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "rsa simple",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=a4wD4UmPMZhS4Ovr7nH61qIxKazxEh7RogMUFEuwP6gM0I3Ubkg8UfUE/mzxlJUL7I8JqJar\r\n Af5gyDhsntdSHanPk6WRJVvAqF64fUaLhW6Kyg5Qq2GnsTzuYIquyTGYVTQUD7kfXCc262aCAks\r\n 2WRvbNmJiWTfQexRRDP8NA7jRcThEiiqPlzKd31VM8134sT6m08GNpC+qEPiZNLfeMjzXN/oO+4\r\n P+OAsC0uiAHBvUuYZM9l8PTFFlss7q9yEd49+MSZqe2XYdV8uVqVBwbaO7coqyC3/5lxOP/mNQm\r\n F1+QGBexicMkbGPQkGWI8rrQAYZOAA6ORjRL/z18Gs/5A==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "relaxed/simple",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=XogTVD6nHbhiq9C+R5EYHZOmOTDIznLnNaSrqs9eqwk9mZ9r/63DVvBFIbh91JRMfjqg2O1k\r\n T6pjJDfmiFVuCw==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "simple/relaxed",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=rflI5f80ZQSurykS2D5Exp8EBx7LI6QZqmHHOCGTfRPjO/rgSZxW/xFsjBYyF2o3siTHKP36\r\n Ye3tYxvQDI50Cw==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "rsa pkcs1 key",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=YF/j8bbkheOvL808vDOn+jRjWsEr8YJOIjNmotmWkLDGEEjwL5Y+dnEwDykRC+p+GxotCjY9\r\n ZCfMHthQ6dm7eqvTP3yfOFbh4Y7uJqww/wS/DOvkuyFGza7JiHJviDII+aR0GdK707j7NJEdD8e\r\n ztQaUK2ZDhTNE+81QJAzs7rE+s6yi7ETBCFb/O/d0fnnw4Qairntf27sIW9iGy+5uhf56VArbF1\r\n VZ49nW0oFFRYFqfpJ39QJJYDcSQ6zXTsf5nbQXqyK+cN32KGOyxiuqbUMX2V35XWQHQmZPIdjb8\r\n GsLWykoBTy9DkAaRT7V32EAP0x53mVVHztzSqZSF9xPlQ==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; p=MIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "rsa 1024",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=wv8pbztgmgRzIMlF5QxeevIeA5i6vqfFKn38ZDKA4rjQFjd8tQ7d3y4Q/WM475vf/Ux2TLk3\r\n vNEgXYnzzhWt8wuBs5ZxjgZocbzkUvHFjX8GmGWCZQ3eW5MacDXNbqgeGdyNV+hKcBeqtd5MtXr\r\n j/yx2LOZdFGWL2WybnAv7uKM=\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDFnfu04vs4pmM9+iJgVId1sfbJJ9JBWAPRatSrqcn3aeC9n83Xt3pUbgbFXmTGel5EPDyr6D/9g0SSK7Qsgsfd4aBTBM9JCHlVRZbiN5yodEvZJga+alPKlaMZr7E57UJJaZHvnBkM0vlHItlaNJnMXqZf2rmcqG/q3TfgZAqhsQIDAQAB"
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "tampered body",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attachment.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "fail"
+    ]
+  },
+  {
+    "name": "tampered subject",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=7z2MPWbHSEiBB4cACCe5ZGvvqbGl8khadk2/6k3YFtOAuDPxkwjylmMASlQ2UoKThq7G5r0z\r\n 6JOAXrYK5tpSCg==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q4_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "fail"
+    ]
+  },
+  {
+    "name": "relaxed survives rewrap",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject:   =?utf-8?q?Q3_numbers?=  \r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease  look at the attached.   \r\n\r\n\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "simple breaks on rewrap",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=7z2MPWbHSEiBB4cACCe5ZGvvqbGl8khadk2/6k3YFtOAuDPxkwjylmMASlQ2UoKThq7G5r0z\r\n 6JOAXrYK5tpSCg==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease  look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "fail"
+    ]
+  },
+  {
+    "name": "simple trailing blank lines",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=7z2MPWbHSEiBB4cACCe5ZGvvqbGl8khadk2/6k3YFtOAuDPxkwjylmMASlQ2UoKThq7G5r0z\r\n 6JOAXrYK5tpSCg==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n\r\n\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "folded relaxed",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=j/F95fXvjzkrPfcNdzXu8/j7HYRayfxJg211m4Yh/Q0=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=fa/LMTkssjLyGZMHoDuLrlqomawrH1ujn8NlyNWNy+Wuc30sG0ySg4scCBfUMuFSiDAq8lKP\r\n mtMeYZUf9c/mAQ==\r\nFrom: Owner\r\n <owner@example.com>\r\nTo: worker@fountbox.com,\r\n\tother@example.com\r\nSubject: a long\r\n  subject line\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\n\r\nbody\twith  tabs \r\nline two\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "folded simple",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=0f9nv6j4LbRu8u2BoucAAeD6j2j/LNgFiOwPXK1FOjI=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=Qv5XqyThNe7l1mWXhfHAjLqsqi6IgnQYa5IZBXU2UgYmVJrhooEbLPiXdXFJ+MUg1naDOyRy\r\n qDsQcezbcKH+4yGddMj0M1rCtdc8Qu27OP4Rnzruz56h6YNg8yVTh8ULLvPjZXOOqTUhUaqlSPH\r\n Zob+h9RZ+jPrj4McLL3Q3ICIe8BQfneWQ6X72eAMd5mVUvfvO2ps0V1QHZRmhYhPITG0u+eYwi5\r\n N5hc+eWTkrkcAOJ1fU199+4hlN9Yt+nVCIetmeTE0pcqiVQxTbbyg8u0MbWC/InRneQZ9XGVzCg\r\n Rxkhqv6Qk6evGlTgDgsaKu55XC2RK4VRreLZI9AWMzOAg==\r\nFrom: Owner\r\n <owner@example.com>\r\nTo: worker@fountbox.com,\r\n\tother@example.com\r\nSubject: a long\r\n  subject line\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\n\r\nbody\twith  tabs \r\nline two\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "empty body relaxed",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=;\r\n c=relaxed/relaxed; d=example.com; h=From:To; s=s1; t=1794609984; v=1;\r\n b=RVWZrA/xBs8NxZJGmDfGme3qyksBbL+Ont6ZEtepbI8LDvSIc+KtqjShA1RTk6CW9+/GtHXV\r\n RzDxlmw7eoyaAA==\r\nFrom: owner@example.com\r\nTo: worker@fountbox.com\r\n\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "empty body simple",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=frcCV1k9oG9oKj3dpUqdJg1PxRT2RSN/XKdLCPjaYaY=;\r\n c=simple/simple; d=example.com; h=From:To; s=s1; t=1794609984; v=1;\r\n b=k3Dy1JeH7CUrTn3UdX78MCwkrAKZDCe0A3Vbi0yJ3WdmkEan3DkymK3jAZVJHHiNLwz85Hns\r\n +9Yj+8wMaDz8Aw==\r\nFrom: owner@example.com\r\nTo: worker@fountbox.com\r\n\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "8-bit subject",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=8AGujxQdNMBF4rmDkGZmgdLuzXf6Y2MhLaFx7hjYFMw=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=YNBD2cpf9hTtdcNDvqnG/ucgNk+AOPRCzI30Mh8F5WB9Ib2oT5/SPFY+uodoYXsj0pabUANq\r\n S2fusTCZpgedCg==\r\nFrom: owner@example.com\r\nTo: worker@fountbox.com\r\nSubject: Grüße\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\n\r\nhé\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "oversigned",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:From:To:Subject:Date; s=s1;\r\n t=1794609984; v=1;\r\n b=yCCeWV5YaPa6tf0DAZ+W+IPeyYefbgPvAVY6dUkQt5/zSVCQ/oHowtguTF5+QGToqJbtJCvQ\r\n iG19Ijw47kDpBA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "oversigned then added From",
+    "raw": "From: Attacker <owner@example.com>\r\nDKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:From:To:Subject:Date; s=s1;\r\n t=1794609984; v=1;\r\n b=yCCeWV5YaPa6tf0DAZ+W+IPeyYefbgPvAVY6dUkQt5/zSVCQ/oHowtguTF5+QGToqJbtJCvQ\r\n iG19Ijw47kDpBA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "fail"
+    ]
+  },
+  {
+    "name": "unsigned header missing at sign time",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Cc:Subject:Date; s=s1;\r\n t=1794609984; v=1;\r\n b=KfL+meXAv++9Apqoha6aIKgyaYF26PI7qdAIiNZ4R1yqF1Ay40mQzkMpBlx74jWSfd5n4zSL\r\n O/CdkyNlkXszBQ==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "no key",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID;\r\n s=gone; t=1794609984; v=1;\r\n b=ENkpFk57TsT2fevJD41IftWc8kh6DTa6aSrFbUI0U8rg8VIpBtC+vJL4P//U8b8Tyhhz38/t\r\n npN5zr6gkOAGCg==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "revoked key",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "key type mismatch",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "testing key",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; t=y; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "bad key version",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM2; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "key hash list excludes sha256",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=YF/j8bbkheOvL808vDOn+jRjWsEr8YJOIjNmotmWkLDGEEjwL5Y+dnEwDykRC+p+GxotCjY9\r\n ZCfMHthQ6dm7eqvTP3yfOFbh4Y7uJqww/wS/DOvkuyFGza7JiHJviDII+aR0GdK707j7NJEdD8e\r\n ztQaUK2ZDhTNE+81QJAzs7rE+s6yi7ETBCFb/O/d0fnnw4Qairntf27sIW9iGy+5uhf56VArbF1\r\n VZ49nW0oFFRYFqfpJ39QJJYDcSQ6zXTsf5nbQXqyK+cN32KGOyxiuqbUMX2V35XWQHQmZPIdjb8\r\n GsLWykoBTy9DkAaRT7V32EAP0x53mVVHztzSqZSF9xPlQ==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; h=sha1; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "key service other",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; s=other; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "key service star",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; s=*; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "two key records",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ=",
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "temp DNS",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "temp": [
+      "s1._domainkey.example.com"
+    ],
+    "results": [
+      "temperror"
+    ]
+  },
+  {
+    "name": "body length",
+    "raw": "DKIM-Signature: l=10; a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "fail"
+    ]
+  },
+  {
+    "name": "expired",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1; x=1577836800;\r\n b=6rVLmGpijDy2m/Qt+Nq5A0yXIhH9i0KY8aH4fpziBnkClNPehiMxTHCw8aKWamRQkqt42FHp\r\n 89F6NljM7v/oDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "not yet expired",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1; x=4070908800;\r\n b=w7Mk6pcZj346QhbfcxGczSWAc4dJUIa8ZHmNbllzBVZkvIrgOC2vIzd79jBOTfATy5NxUdy8\r\n 9b2PIL6GY191Bw==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "i= subdomain",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID;\r\n i=owner@mail.example.com; s=s1; t=1794609984; v=1;\r\n b=EV+aJR7c2f3czZS3bdyxuzS/8XNbm1zNKf/mnOZxUxwNO7xUYiWGE8YoT7iWaOlJLHHHofdX\r\n pKpicRxzzroUCw==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass"
+    ]
+  },
+  {
+    "name": "i= elsewhere",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID;\r\n i=owner@example.org; s=s1; t=1794609984; v=1;\r\n b=1i5YPBzMtjsPUe52f+um64cN4R/fxZXMfVkRPP2ISq6ZtnApCcqNcpKvZSwrtP0P6XRizJlg\r\n NGeUGJoKDaWGCg==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "rsa-sha1",
+    "raw": "DKIM-Signature: a=rsa-sha1; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=YF/j8bbkheOvL808vDOn+jRjWsEr8YJOIjNmotmWkLDGEEjwL5Y+dnEwDykRC+p+GxotCjY9\r\n ZCfMHthQ6dm7eqvTP3yfOFbh4Y7uJqww/wS/DOvkuyFGza7JiHJviDII+aR0GdK707j7NJEdD8e\r\n ztQaUK2ZDhTNE+81QJAzs7rE+s6yi7ETBCFb/O/d0fnnw4Qairntf27sIW9iGy+5uhf56VArbF1\r\n VZ49nW0oFFRYFqfpJ39QJJYDcSQ6zXTsf5nbQXqyK+cN32KGOyxiuqbUMX2V35XWQHQmZPIdjb8\r\n GsLWykoBTy9DkAaRT7V32EAP0x53mVVHztzSqZSF9xPlQ==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "no From in h",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "version 2",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=2;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "bad base64 b",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=!!!tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "unknown query method",
+    "raw": "DKIM-Signature: q=foo; a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "unknown canonicalization",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=weird/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror"
+    ]
+  },
+  {
+    "name": "two signatures",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s2;\r\n t=1794609984; v=1;\r\n b=h/DeUYrQKoRw2aZ7mJZBhyNEnd1y/xLSwguzE9NoT9QIZPW5KGvBx+Mj5LikBaql0xFyNK4E\r\n 6YK+MCHkewfQGQqahEwjX/fxUcyG92Negywij1lxClSeV1WAy/KXTSWOJJmVyV+RInjc5fUxMpM\r\n UhI/ZdzVmPUz8YkyFBRRRPntM6LvOPjT4avePmLAvCr7FaoOd3tZlwvchWgV8HsF8U0j6j6HeuA\r\n OVtEvf3cSlwa0qFnOKr24HIGW+7N01sv8IMRpzKvYkliJiu90/ta1pCPPse6UkgKM7G8ND8z9zG\r\n M00Zk6UTZIsoQjjYJ2OvlRDMiKRFgNTsbvvfQnrZPZ3hA==\r\nDKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ],
+      "s2._domainkey.example.com": [
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl8wSWg5a036wDGnX9uTcgsprwnQT9zJseoQPoHec8lufGTYFHZCFMXx6RO2t3flyw5yORRUhkM3pBlcwGk4B5jpNK3Q2Fk3xQPHKB1soTPP8mcsmAXQjzDfRBxxWvHNV0hh78agMa41yIAWGTmiUfFR8/UaIYUV5bMl8A8gx7IWC9x6O4XeJayhufTFWAD/sw+LSixfKTfU47NQj3nvNodM/Fo3FefyW1lQWvpOGyvaiudzX+mJ6jrbzvDH70JCs5yYxg4IxX3LSbdpJWuLdxWPwF9IzcE4l8FLwN/Lso0YbIdMF6E/DVnqbSm5yFY0LUZsAnnfGvRuYFHQjy/ypmQIDAQAB"
+      ]
+    },
+    "results": [
+      "pass",
+      "pass"
+    ]
+  },
+  {
+    "name": "two signatures, one key gone",
+    "raw": "DKIM-Signature: a=rsa-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=simple/simple; d=example.com; h=From:To:Subject:Date:Message-ID; s=s2;\r\n t=1794609984; v=1;\r\n b=h/DeUYrQKoRw2aZ7mJZBhyNEnd1y/xLSwguzE9NoT9QIZPW5KGvBx+Mj5LikBaql0xFyNK4E\r\n 6YK+MCHkewfQGQqahEwjX/fxUcyG92Negywij1lxClSeV1WAy/KXTSWOJJmVyV+RInjc5fUxMpM\r\n UhI/ZdzVmPUz8YkyFBRRRPntM6LvOPjT4avePmLAvCr7FaoOd3tZlwvchWgV8HsF8U0j6j6HeuA\r\n OVtEvf3cSlwa0qFnOKr24HIGW+7N01sv8IMRpzKvYkliJiu90/ta1pCPPse6UkgKM7G8ND8z9zG\r\n M00Zk6UTZIsoQjjYJ2OvlRDMiKRFgNTsbvvfQnrZPZ3hA==\r\nDKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "permerror",
+      "pass"
+    ]
+  },
+  {
+    "name": "signature from another domain",
+    "raw": "DKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.org; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=sXHY5nqZ+jqZjzX03q5PhfiMbpbb+E5vILko8VkXXBgpFaAPcxvbwjvV2PRqUj76lnHNq35H\r\n AgmQnJr6rQMNDQ==\r\nDKIM-Signature: a=ed25519-sha256; bh=g6+g9hcqGY5msPN2LCS6R/5dZnalea07NoSwHh64/RY=;\r\n c=relaxed/relaxed; d=example.com; h=From:To:Subject:Date:Message-ID; s=s1;\r\n t=1794609984; v=1;\r\n b=tb2NAIm5BVg181J9eERCWeuKaBZcUsrIozDu/L+PM0rU9B9z0NFGUDqovvDcL0KMKZ/HrL4B\r\n y9XBpblH626yDA==\r\nFrom: Owner <owner@example.com>\r\nTo: worker@fountbox.com\r\nSubject: =?utf-8?q?Q3_numbers?=\r\nDate: Sun, 08 Nov 2026 10:00:00 +0000\r\nMessage-ID: <a1@example.com>\r\n\r\nPlease look at the attached.\r\n",
+    "txt": {
+      "s1._domainkey.example.com": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ],
+      "s1._domainkey.example.org": [
+        "v=DKIM1; k=ed25519; p=YDRgDvekBCjn5JMixI9FXPVFqF6h3FCqgzxzc4cgCjQ="
+      ]
+    },
+    "results": [
+      "pass",
+      "pass"
+    ]
+  }
+]

@@ -33,6 +33,18 @@ type Outbox struct {
 	Signers    []*dkim.Signer // RSA first, then Ed25519 (RFC 8463 §4)
 	Deliverer  deliverer
 	Now        func() time.Time
+	// DNS is the outbox's DoH resolver. The inbound sender check borrows it for
+	// DKIM key records (TXT), the one way out mail-core has to DNS.
+	DNS Resolver
+}
+
+// TXT looks up a TXT record through the outbox's resolver. ErrNoRecord means
+// there is none.
+func (o *Outbox) TXT(ctx context.Context, name string) ([]string, error) {
+	if o.DNS == nil {
+		return nil, errors.New("send: no resolver")
+	}
+	return o.DNS.TXT(ctx, name)
 }
 
 var _ Transmitter = (*Outbox)(nil)

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/dkim"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 	"github.com/fount-labs/fount-mail-edge/internal/send"
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 )
 
 // sendState is what /operator/status reports about sending. Tinfoil keeps no
@@ -127,4 +130,16 @@ func dkimSigners(domain, selector string, keys *config.SendKeys) []*dkim.Signer 
 		{Domain: domain, Selector: selector, Key: keys.DKIMRSA},
 		{Domain: domain, Selector: selector + "e", Key: keys.DKIMEd25519},
 	}
+}
+
+// outboxDNS is the one-container edge's DNS for the sender check: the outbox's
+// own resolver, with its "no record" turned into the check's.
+type outboxDNS struct{ out *send.Outbox }
+
+func (o outboxDNS) TXT(ctx context.Context, name string) ([]string, error) {
+	txt, err := o.out.TXT(ctx, name)
+	if errors.Is(err, send.ErrNoRecord) {
+		return nil, sendercheck.ErrNoRecord
+	}
+	return txt, err
 }

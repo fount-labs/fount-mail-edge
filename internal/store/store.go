@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 )
 
 // ErrNoRecipient means no mailbox has this address. SMTP turns it into a 550
@@ -201,6 +203,7 @@ type realStore struct {
 	now        func() time.Time
 	maxMailbox int64         // per-mailbox storage cap; <=0 is unlimited
 	retention  time.Duration // unfetched-mail hold; <=0 disables the sweep
+	check      SenderCheck   // nil stores a check that says there was none
 }
 
 // Option tunes a realStore built by New.
@@ -213,6 +216,13 @@ func WithMaxMailboxBytes(n int64) Option { return func(s *realStore) { s.maxMail
 // WithRetention sets how long unfetched mail is held before Sweep expires it
 // (§6). A value <= 0 disables the sweep. Without it New uses DefaultRetention.
 func WithRetention(d time.Duration) Option { return func(s *realStore) { s.retention = d } }
+
+// SenderCheck returns the sender check JSON for one message (package
+// sendercheck). It never fails: a check that couldn't run says so in the JSON.
+type SenderCheck func(ctx context.Context, raw []byte, recipient string, receivedAt time.Time) []byte
+
+// WithSenderCheck checks each message's sender before it's sealed (§9).
+func WithSenderCheck(c SenderCheck) Option { return func(s *realStore) { s.check = c } }
 
 // WithLogBlobs sends the boot log and mailbox-key log to their own bucket (§4).
 // Object Lock needs versioning, which the mail bucket must not have. Without it
@@ -232,13 +242,19 @@ func New(dir Directory, blobs Blobs, sign ed25519.PrivateKey, bootID []byte, opt
 }
 
 func (s *realStore) Put(ctx context.Context, env Envelope, raw []byte) (string, error) {
-	if _, err := messagePlaintext(env, nil); err != nil {
+	if err := checkEnvelope(env); err != nil {
 		return "", err
 	}
 	addr, err := s.dir.Resolve(ctx, env.Recipient)
 	if err != nil {
 		return "", err // ErrNoRecipient or transient; SMTP maps each distinctly
 	}
+
+	// The sender check runs before a sequence number is spent: it can take
+	// seconds, and a session that ends during it must leave no gap. Its Date skew
+	// is measured from receivedAt, which the object then carries.
+	receivedAt := s.now().UTC().Truncate(time.Millisecond) // what the object holds
+	check := s.senderCheck(ctx, env, raw, receivedAt)
 
 	// Enforce the per-mailbox storage cap (§6) before allocating a sequence
 	// number: a message rejected for a full mailbox must leave no gap in the
@@ -250,7 +266,7 @@ func (s *realStore) Put(ctx context.Context, env Envelope, raw []byte) (string, 
 		if err != nil {
 			return "", fmt.Errorf("mailbox usage: %w", err)
 		}
-		if used+storedSize(env, len(raw)) > s.maxMailbox {
+		if used+storedSize(env, len(check), len(raw)) > s.maxMailbox {
 			return "", ErrMailboxFull
 		}
 	}
@@ -274,11 +290,11 @@ func (s *realStore) Put(ctx context.Context, env Envelope, raw []byte) (string, 
 		EdgeID:     edgeID,
 		MailboxID:  addr.MailboxID,
 		PubKeyHash: pubKeyHash(addr.PublicKey),
-		ReceivedAt: s.now().UTC(),
+		ReceivedAt: receivedAt,
 		Sequence:   seq,
 		BootID:     s.bootID,
 	}
-	if err := msg.seal(addr.PublicKey, env, raw); err != nil {
+	if err := msg.seal(addr.PublicKey, env, check, raw); err != nil {
 		return "", s.void(ctx, msg, fmt.Errorf("seal: %w", err))
 	}
 
@@ -288,6 +304,20 @@ func (s *realStore) Put(ctx context.Context, env Envelope, raw []byte) (string, 
 		return "", s.void(ctx, msg, fmt.Errorf("blob put: %w", err))
 	}
 	return hex.EncodeToString(edgeID), nil
+}
+
+// senderCheck is the check sealed with a message: the checker's, or one that says
+// it couldn't run. Mail is never refused because the check failed; it's held for
+// the user instead.
+func (s *realStore) senderCheck(ctx context.Context, env Envelope, raw []byte, receivedAt time.Time) []byte {
+	if s.check == nil {
+		return sendercheck.Failed("the edge has no sender checker")
+	}
+	c := s.check(ctx, raw, env.Recipient, receivedAt)
+	if len(c) == 0 || len(c) > maxCheckBytes {
+		return sendercheck.Failed("the edge couldn't check the sender")
+	}
+	return c
 }
 
 // void records that msg's sequence will never hold a message, and returns cause
@@ -362,10 +392,10 @@ func (s *realStore) usage(ctx context.Context, mailboxID []byte) (int64, error) 
 // fixed-width (§9), the HPKE encapsulated key is a 32-byte X25519 point, and the
 // AEAD adds a 16-byte tag — so the on-disk size is known before sealing. A unit
 // test pins this against a real MarshalSigned so a suite change can't drift it.
-func storedSize(env Envelope, rawLen int) int64 {
+func storedSize(env Envelope, checkLen, rawLen int) int64 {
 	const encLen = 32 // X25519 encapsulated key
 	const aeadTag = 16
-	plaintext := envelopeLen(env) + rawLen
+	plaintext := envelopeLen(env) + 4 + checkLen + rawLen
 	ct := plaintext + aeadTag
 	// headerLen + encLen-prefix(2) + enc + ctLen-prefix(4) + ct + signature.
 	return int64(headerLen + 2 + encLen + 4 + ct + ed25519.SignatureSize)

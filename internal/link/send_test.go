@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/fount-labs/fount-mail-edge/internal/send"
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 )
 
 type fakeOut struct {
@@ -126,5 +127,52 @@ func TestSendLinkServesNothingElse(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s %s: %d", r.Method, r.URL.Path, rec.Code)
 		}
+	}
+}
+
+// dnsOut is an outbox with a resolver.
+type dnsOut struct {
+	fakeOut
+	txt   map[string][]string
+	asked []string
+}
+
+func (d *dnsOut) TXT(_ context.Context, name string) ([]string, error) {
+	d.asked = append(d.asked, name)
+	if name == "slow._domainkey.example.com" {
+		return nil, errors.New("timeout")
+	}
+	r, ok := d.txt[name]
+	if !ok {
+		return nil, send.ErrNoRecord
+	}
+	return r, nil
+}
+
+func TestSendLinkAnswersKeyRecords(t *testing.T) {
+	srv, c := sendRig(t)
+	ctx := context.Background()
+	if _, err := c.TXT(ctx, "s1._domainkey.example.com"); err == nil {
+		t.Fatal("answered before mail-send had a resolver")
+	}
+	out := &dnsOut{txt: map[string][]string{"s1._domainkey.example.com": {"v=DKIM1; p=abc"}}}
+	srv.Set(out, SendStatus{State: "on"})
+	if got, err := c.TXT(ctx, "s1._domainkey.example.com"); err != nil || len(got) != 1 || got[0] != "v=DKIM1; p=abc" {
+		t.Fatalf("%v %v", got, err)
+	}
+	if _, err := c.TXT(ctx, "gone._domainkey.example.com"); !errors.Is(err, sendercheck.ErrNoRecord) {
+		t.Fatalf("missing: %v", err)
+	}
+	if _, err := c.TXT(ctx, "slow._domainkey.example.com"); err == nil || errors.Is(err, sendercheck.ErrNoRecord) {
+		t.Fatalf("temporary: %v", err)
+	}
+	// Only DKIM key names: nothing else reaches DNS.
+	for _, name := range []string{"example.com", "_dmarc.example.com", "x._domainkey.exa mple.com"} {
+		if _, err := c.TXT(ctx, name); err == nil {
+			t.Errorf("%q answered", name)
+		}
+	}
+	if len(out.asked) != 3 {
+		t.Fatalf("asked %v", out.asked)
 	}
 }
