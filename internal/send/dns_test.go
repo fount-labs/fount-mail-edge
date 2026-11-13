@@ -33,7 +33,9 @@ func TestDoHAgreement(t *testing.T) {
 	txt := `{"Status":0,"Answer":[{"name":"x.","type":5,"data":"y."},{"name":"y.","type":16,"data":"\"v=STSv1; \" \"id=42\""}]}`
 
 	a := dohServer(t, map[string]string{"smithcpa.com/15": mx, "_mta-sts.smithcpa.com/16": txt})
-	b := dohServer(t, map[string]string{"smithcpa.com/15": mxOtherOrder, "_mta-sts.smithcpa.com/16": txt})
+	// Google's JSON API answers TXT unquoted and joined; Cloudflare's keeps the quoted strings.
+	txtUnquoted := `{"Status":0,"Answer":[{"name":"y.","type":16,"data":"v=STSv1; id=42"}]}`
+	b := dohServer(t, map[string]string{"smithcpa.com/15": mxOtherOrder, "_mta-sts.smithcpa.com/16": txtUnquoted})
 	c := dohServer(t, map[string]string{"smithcpa.com/15": forged})
 	ctx := context.Background()
 

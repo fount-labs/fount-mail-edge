@@ -65,19 +65,7 @@ func (d *DoH) MX(ctx context.Context, domain string) ([]MX, error) {
 }
 
 func (d *DoH) TXT(ctx context.Context, name string) ([]string, error) {
-	answers, err := d.agree(ctx, name, 16)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(answers))
-	for _, a := range answers {
-		s, err := joinTXT(a)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, nil
+	return d.agree(ctx, name, 16)
 }
 
 func (d *DoH) agree(ctx context.Context, name string, qtype int) ([]string, error) {
@@ -140,9 +128,18 @@ func (d *DoH) query(ctx context.Context, endpoint, name string, qtype int) ([]st
 	}
 	var out []string
 	for _, a := range ans.Answer {
-		if a.Type == qtype { // skips the CNAMEs a chain answer carries
-			out = append(out, a.Data)
+		if a.Type != qtype { // skips the CNAMEs a chain answer carries
+			continue
 		}
+		data := a.Data
+		if qtype == 16 {
+			// Google's JSON API joins and unquotes TXT strings, Cloudflare's keeps
+			// them quoted, so agreement compares the joined value.
+			if data, err = joinTXT(data); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, data)
 	}
 	return out, nil
 }
