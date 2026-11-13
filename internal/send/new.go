@@ -82,6 +82,7 @@ func NewOutbox(o Options) (*Outbox, error) {
 	return &Outbox{
 		MailDomain: o.MailDomain,
 		Signers:    o.Signers,
+		DNS:        resolver,
 		Deliverer: &Deliverer{
 			Hostname: o.Hostname,
 			Resolver: resolver,

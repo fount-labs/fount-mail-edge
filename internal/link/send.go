@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/fount-labs/fount-mail-edge/internal/send"
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 )
 
 // The send link is mail-core's to mail-send, on their own closed network
@@ -21,6 +22,11 @@ import (
 //
 //	POST /link/send         one message: its sender, its recipients, and the raw bytes
 //	GET  /link/send/status  whether sending is on, and the held send keyset's commitment
+//	POST /link/dns/txt      one DKIM key record, for core's inbound sender check
+//
+// mail-core has no way to DNS of its own, so it asks mail-send, whose DoH goes
+// through the relay. mail-send answers only DKIM key names
+// (sendercheck.ValidKeyName), and only once its outbox exists.
 //
 // Like the front link, it's plain HTTP inside the enclave.
 
@@ -73,6 +79,8 @@ func (s *SendServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.send(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/link/send/status":
 		writeJSON(w, s.state.Load().status)
+	case r.Method == http.MethodPost && r.URL.Path == "/link/dns/txt":
+		s.txt(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -108,6 +116,37 @@ func (s *SendServer) send(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "send failed", http.StatusBadGateway)
 	default:
 		writeJSON(w, sendResponse{Results: res})
+	}
+}
+
+type txtRequest struct {
+	Name string `json:"name"`
+}
+
+type txtResponse struct {
+	TXT    []string `json:"txt,omitempty"`
+	Status string   `json:"status,omitempty"` // "nxdomain" when there's no record
+}
+
+func (s *SendServer) txt(w http.ResponseWriter, r *http.Request) {
+	res, ok := s.state.Load().out.(sendercheck.Resolver)
+	if !ok {
+		http.Error(w, "no resolver", http.StatusServiceUnavailable)
+		return
+	}
+	var req txtRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&req); err != nil || !sendercheck.ValidKeyName(req.Name) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	txt, err := res.TXT(r.Context(), req.Name)
+	switch {
+	case errors.Is(err, send.ErrNoRecord):
+		writeJSON(w, txtResponse{Status: "nxdomain"})
+	case err != nil:
+		http.Error(w, "lookup failed", http.StatusBadGateway)
+	default:
+		writeJSON(w, txtResponse{TXT: txt})
 	}
 }
 
@@ -162,6 +201,36 @@ func (c *SendClient) Transmit(ctx context.Context, from string, recipients []str
 	}
 	return out.Results, nil
 }
+
+// TXT asks mail-send for a DKIM key record. It is a sendercheck.Resolver:
+// sendercheck.ErrNoRecord means there is none, and any other error is temporary.
+func (c *SendClient) TXT(ctx context.Context, name string) ([]string, error) {
+	body, err := json.Marshal(txtRequest{Name: name})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/link/dns/txt", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mail-send dns: %s", resp.Status)
+	}
+	var out txtResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxSmallBody)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("mail-send dns: %w", err)
+	}
+	if out.Status == "nxdomain" {
+		return nil, sendercheck.ErrNoRecord
+	}
+	if out.Status != "" {
+		return nil, fmt.Errorf("mail-send dns: status %q", out.Status)
+	}
+	return out.TXT, nil
+}
+
+var _ sendercheck.Resolver = (*SendClient)(nil)
 
 // Status asks mail-send whether sending is on.
 func (c *SendClient) Status(ctx context.Context) (SendStatus, error) {
