@@ -2,8 +2,8 @@
 //
 // It implements the signing half of RFC 6376 with relaxed/relaxed
 // canonicalization, for rsa-sha256 and ed25519-sha256 (RFC 8463). Sign with both:
-// some receivers only check RSA. There is no verifier here; checking inbound mail
-// is the broker's job, in its isolated verifier.
+// some receivers only check RSA. Inbound mail is verified in package sendercheck,
+// which reuses the canonicalization here.
 //
 // The keys come from the vault's send keyset (fount-mail-vault docs/SEND-KEYS.md).
 // This package takes any crypto.Signer of the right type.
