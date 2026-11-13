@@ -85,9 +85,9 @@ func TestConnectMailShape(t *testing.T) {
 	mac := fakeConnectRouting{}.ConnectMAC(id, "pat@smithcpa.com", clk.t.Unix())
 	wantID := routing.ConnectID(clk.t.Unix(), mac, "fountbox.com")
 	for name, want := range map[string]string{
-		"from":                      "<" + worker + ">",
+		"from":                      `"accountant.smithcpa at Fount" <` + worker + ">",
 		"to":                        "<pat@smithcpa.com>",
-		"subject":                   "Reply to connect your email to " + worker,
+		"subject":                   "Your Fount worker accountant.smithcpa is ready: reply to start",
 		"date":                      clk.t.UTC().Format(time.RFC1123Z),
 		"message-id":                wantID,
 		"auto-submitted":            "auto-generated",
@@ -102,8 +102,11 @@ func TestConnectMailShape(t *testing.T) {
 	if !strings.HasPrefix(wantID, fmt.Sprintf("<c.%d.", clk.t.Unix())) {
 		t.Fatalf("Message-ID %s", wantID)
 	}
-	want := "Reply to this email to let " + worker + " take work from you. You don't need to write anything.\r\n\r\n" +
-		"If you didn't ask for this, ignore it and nothing changes.\r\n"
+	want := "You asked Fount to connect this email address to your worker, accountant.smithcpa (" + worker + ").\r\n\r\n" +
+		"Reply to this email to finish. You don't need to write anything. After that, you can email work to " + worker + ".\r\n\r\n" +
+		"If you didn't ask for this, ignore this email and nothing changes.\r\n\r\n" +
+		"-- \r\n" +
+		"Fount runs AI workers you can email. fount.sh\r\n"
 	if string(body) != want {
 		t.Fatalf("body %q", body)
 	}
