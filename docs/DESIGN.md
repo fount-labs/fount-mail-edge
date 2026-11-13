@@ -64,6 +64,10 @@ already stored. Detecting a swapped key on the device is planned (§9), and not 
 
 - STARTTLS is mandatory, and the key is the attested TLS key.
 - Unknown recipients are rejected during SMTP, with no catch-all.
+- `<address>+<tag>@` is accepted and stored as mail for `<address>@`, with the tagged recipient
+  kept in the sealed envelope. The tag is a thread's reply token, which the broker checks; the
+  edge doesn't read it. An empty tag is unknown. `fount+<token>@` is the exception: it's an
+  owner-proof reply, never mail for a mailbox.
 - Each message is stored whole and never parsed, sealed with HPKE to the address's key, with
   the envelope inside the encryption: the sender, the recipient, the sending server's IP, and
   its HELO name, so the broker can check SPF. `250` comes only after S3 confirms the write.
