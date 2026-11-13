@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/hpke"
+	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
 )
 
 // memDir is an in-memory Directory: one recipient -> one X25519 keypair, with a
@@ -139,7 +140,15 @@ func TestPutRoundTrip(t *testing.T) {
 	bootID := make([]byte, lenBootID)
 	rand.Read(bootID)
 
-	s := New(dir, blobs, sign, bootID)
+	var checked struct {
+		raw        []byte
+		recipient  string
+		receivedAt time.Time
+	}
+	s := New(dir, blobs, sign, bootID, WithSenderCheck(func(_ context.Context, raw []byte, recipient string, at time.Time) []byte {
+		checked.raw, checked.recipient, checked.receivedAt = raw, recipient, at
+		return []byte(`{"v":1,"checked_by":"edge"}`)
+	}))
 	raw := []byte("From: owner@example.com\r\nSubject: hi\r\n\r\nrun the thing\r\n")
 	in := Envelope{
 		Sender: "owner@example.com", Recipient: "worker@fountbox.com",
@@ -183,9 +192,15 @@ func TestPutRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hpke.Open: %v", err)
 	}
-	env, body, err := unframe(p.Version, plain)
+	env, check, body, err := unframe(p.Version, plain)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if string(check) != `{"v":1,"checked_by":"edge"}` {
+		t.Fatalf("check = %q", check)
+	}
+	if !bytes.Equal(checked.raw, raw) || checked.recipient != in.Recipient || !checked.receivedAt.Equal(p.ReceivedAt) {
+		t.Fatalf("the checker got %q %q %v; object received_at %v", checked.raw, checked.recipient, checked.receivedAt, p.ReceivedAt)
 	}
 	if env != in {
 		t.Fatalf("envelope = %+v, want %+v", env, in)
@@ -333,11 +348,12 @@ func TestStoredSizeMatchesMarshal(t *testing.T) {
 			EdgeID: make([]byte, lenEdgeID), MailboxID: dir.mailboxID(recipient),
 			PubKeyHash: pubKeyHash(k.PublicKey().Bytes()), Sequence: 7, BootID: make([]byte, lenBootID),
 		}
-		if err := msg.seal(k.PublicKey().Bytes(), env, raw); err != nil {
+		check := []byte(`{"v":1,"checked_by":"edge","error":"x"}`)
+		if err := msg.seal(k.PublicKey().Bytes(), env, check, raw); err != nil {
 			t.Fatal(err)
 		}
 		got := int64(len(msg.MarshalSigned(mustSign(t))))
-		if want := storedSize(env, len(raw)); got != want {
+		if want := storedSize(env, len(check), len(raw)); got != want {
 			t.Fatalf("raw=%d: storedSize=%d, MarshalSigned=%d", len(raw), want, got)
 		}
 	}
@@ -356,7 +372,7 @@ func TestPutEnforcesMailboxQuota(t *testing.T) {
 
 	// Cap at exactly two messages of this shape; the third must be refused.
 	body := []byte("a short message body\r\n")
-	one := storedSize(Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, len(body))
+	one := storedSize(Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, len(noChecker), len(body))
 	s := New(dir, blobs, mustSign(t), make([]byte, lenBootID), WithMaxMailboxBytes(2*one))
 	mr := s.(MailReader)
 	mbox := dir.mailboxID("a@fountbox.com")
@@ -411,7 +427,7 @@ func TestListReportsSizes(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("list = %d, want 1", len(list))
 	}
-	if want := int(storedSize(Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, len(body))); list[0].Size != want {
+	if want := int(storedSize(Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, len(noChecker), len(body))); list[0].Size != want {
 		t.Fatalf("Size = %d, want %d", list[0].Size, want)
 	}
 }
@@ -900,26 +916,98 @@ func TestCraftedIDsStayInTheirPrefix(t *testing.T) {
 	}
 }
 
-// The version 2 framing, byte for byte. The broker decodes this layout by hand, so
+// noChecker is what a store with no checker seals.
+var noChecker = sendercheck.Failed("the edge has no sender checker")
+
+// The version 3 framing, byte for byte. The broker decodes this layout by hand, so
 // a change here must be a new version.
-func TestPlaintextV2Layout(t *testing.T) {
+func TestPlaintextV3Layout(t *testing.T) {
 	got, err := messagePlaintext(Envelope{
 		Sender: "a@b.c", Recipient: "w@f.co",
 		ClientIP: "192.0.2.1", ClientIPFrom: ClientIPProxy, HELO: "mx.b.c",
-	}, []byte("RAW"))
+	}, []byte("CHK"), []byte("RAW"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "\x00\x05a@b.c" + "\x00\x06w@f.co" + "\x01" + "\x09192.0.2.1" + "\x06mx.b.c" + "RAW"
+	want := "\x00\x05a@b.c" + "\x00\x06w@f.co" + "\x01" + "\x09192.0.2.1" + "\x06mx.b.c" + "\x00\x00\x00\x03CHK" + "RAW"
 	if string(got) != want {
 		t.Fatalf("framing = %q\n    want %q", got, want)
 	}
-	none, err := messagePlaintext(Envelope{Sender: "", Recipient: "w@f.co"}, nil)
+	none, err := messagePlaintext(Envelope{Sender: "", Recipient: "w@f.co"}, []byte("C"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "\x00\x00" + "\x00\x06w@f.co" + "\x00" + "\x00" + "\x00"; string(none) != want {
+	if want := "\x00\x00" + "\x00\x06w@f.co" + "\x00" + "\x00" + "\x00" + "\x00\x00\x00\x01C"; string(none) != want {
 		t.Fatalf("empty framing = %q, want %q", none, want)
+	}
+	for _, c := range [][]byte{nil, {}, make([]byte, maxCheckBytes+1)} {
+		if _, err := messagePlaintext(Envelope{Recipient: "w@f.co"}, c, nil); !errors.Is(err, errCheck) {
+			t.Errorf("check of %d bytes: %v", len(c), err)
+		}
+	}
+}
+
+// The store seals a check even when there's no checker, or the checker returns
+// nothing usable: never an empty one.
+func TestPutAlwaysSealsACheck(t *testing.T) {
+	for name, c := range map[string]SenderCheck{
+		"none":  nil,
+		"empty": func(context.Context, []byte, string, time.Time) []byte { return nil },
+		"huge":  func(context.Context, []byte, string, time.Time) []byte { return make([]byte, maxCheckBytes+1) },
+	} {
+		macKey := make([]byte, 32)
+		rand.Read(macKey)
+		dir := newMemDir(macKey)
+		k := dir.add(t, "a@fountbox.com")
+		blobs := newMemBlobs()
+		sign, signPub := newSignKey(t)
+		var opts []Option
+		if c != nil {
+			opts = append(opts, WithSenderCheck(c))
+		}
+		s := New(dir, blobs, sign, make([]byte, lenBootID), opts...)
+		if _, err := s.Put(context.Background(), Envelope{Recipient: "a@fountbox.com", Sender: "x@y.com"}, []byte("b")); err != nil {
+			t.Fatal(err)
+		}
+		for _, obj := range blobs.objs {
+			p, err := Parse(obj, signPub)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain, err := hpke.Open(k.Bytes(), p.Enc, []byte(hpkeInfo), p.header(), p.Ct)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, check, _, err := unframe(p.Version, plain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(check, &m); err != nil || m["v"] != float64(1) || m["checked_by"] != "edge" || m["error"] == "" || len(m) != 3 {
+				t.Errorf("%s: check %s", name, check)
+			}
+		}
+	}
+}
+
+// Mail stored as version 2, before the sender check, still reads, with no check.
+func TestVersion2ObjectStillReads(t *testing.T) {
+	plain := "\x00\x05a@b.c" + "\x00\x06w@f.co" + "\x01" + "\x09192.0.2.1" + "\x06mx.b.c" + "RAW"
+	env, check, raw, err := unframe(formatV2, []byte(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check != nil || string(raw) != "RAW" || env.HELO != "mx.b.c" || env.ClientIP != "192.0.2.1" {
+		t.Fatalf("%+v %q %q", env, check, raw)
+	}
+	sign, signPub := newSignKey(t)
+	msg := &Message{Version: formatV2, EdgeID: make([]byte, lenEdgeID), MailboxID: make([]byte, lenMailboxID),
+		PubKeyHash: make([]byte, lenPubKeyHash), BootID: make([]byte, lenBootID), Enc: make([]byte, 32)}
+	if _, err := Parse(msg.MarshalSigned(sign), signPub); err != nil {
+		t.Fatalf("Parse refused version 2: %v", err)
+	}
+	if err := msg.seal(make([]byte, 32), Envelope{}, []byte("c"), nil); err == nil {
+		t.Fatal("sealed a version 2 object")
 	}
 }
 
@@ -955,21 +1043,21 @@ func TestVersion1ObjectStillReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	env, raw, err := unframe(p.Version, plain)
+	env, check, raw, err := unframe(p.Version, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Envelope{Sender: "x@y.com", Recipient: "a@fountbox.com"}); env != want || string(raw) != "body" {
+	if want := (Envelope{Sender: "x@y.com", Recipient: "a@fountbox.com"}); env != want || string(raw) != "body" || check != nil {
 		t.Fatalf("v1 = %+v %q", env, raw)
 	}
 }
 
 func TestParseRejectsUnknownVersion(t *testing.T) {
 	sign, signPub := newSignKey(t)
-	msg := &Message{Version: 3, EdgeID: make([]byte, lenEdgeID), MailboxID: make([]byte, lenMailboxID),
+	msg := &Message{Version: 4, EdgeID: make([]byte, lenEdgeID), MailboxID: make([]byte, lenMailboxID),
 		PubKeyHash: make([]byte, lenPubKeyHash), BootID: make([]byte, lenBootID), Enc: make([]byte, 32)}
 	if _, err := Parse(msg.MarshalSigned(sign), signPub); err == nil {
-		t.Fatal("Parse accepted version 3")
+		t.Fatal("Parse accepted version 4")
 	}
 }
 
@@ -999,16 +1087,16 @@ func TestPutRefusesUnframeableEnvelope(t *testing.T) {
 
 // unframe must reject truncations rather than panic or invent fields.
 func TestUnframeRejectsTruncation(t *testing.T) {
-	full, err := messagePlaintext(Envelope{Sender: "a@b.c", Recipient: "w@f.co", ClientIP: "192.0.2.1", ClientIPFrom: ClientIPProxy, HELO: "mx.b.c"}, nil)
+	full, err := messagePlaintext(Envelope{Sender: "a@b.c", Recipient: "w@f.co", ClientIP: "192.0.2.1", ClientIPFrom: ClientIPProxy, HELO: "mx.b.c"}, []byte(`{"v":1}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for n := 0; n < len(full); n++ {
-		if _, _, err := unframe(formatVersion, full[:n]); err == nil {
+		if _, _, _, err := unframe(formatVersion, full[:n]); err == nil {
 			t.Fatalf("accepted %d of %d bytes", n, len(full))
 		}
 	}
-	if _, _, err := unframe(formatVersion, full); err != nil {
+	if _, _, _, err := unframe(formatVersion, full); err != nil {
 		t.Fatal(err)
 	}
 }
