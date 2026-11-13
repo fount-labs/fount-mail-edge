@@ -224,6 +224,14 @@ func run(m mode) error {
 		sending.Store(&st)
 	}
 	log.Printf("edge: sending %s", sending.Load().State)
+	var connector deviceapi.Connector
+	switch {
+	case rt == nil:
+	case m == modeCore && sender != nil:
+		connector = newConnector(cfg, sendClient, rt, sendingOn(&sending))
+	case m != modeCore:
+		connector = newConnector(cfg, transmitterOf(sender), rt, nil)
+	}
 	api := deviceapi.New(deviceapi.Options{
 		Store:          st,
 		Resolver:       resolver,
@@ -234,6 +242,7 @@ func run(m mode) error {
 		RecoveryRPID:   cfg.RecoveryRPID,
 		RecoveryOrigin: cfg.RecoveryOrigin,
 		Sender:         sender,
+		Connector:      connector,
 	})
 	late.set(api)
 

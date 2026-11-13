@@ -140,6 +140,7 @@ type Store struct {
 
 	ownerAEAD     cipher.AEAD // seals owner addresses (§4 "encrypted owner addresses")
 	proofKey      []byte      // keys owner-proof tokens
+	connectKey    []byte      // keys connect-mail Message-IDs (connect.go)
 	newOwnerLimit int         // new owners per license per day; <= 0 is no cap
 	now           func() time.Time
 
@@ -218,8 +219,12 @@ func New(ctx context.Context, blobs Blobs, routingDataKey, addressMACKey []byte,
 	if err != nil {
 		return nil, err
 	}
+	connectKey, err := deriveKey(addressMACKey, ownerConnectInfo)
+	if err != nil {
+		return nil, err
+	}
 	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead, ownerAEAD: ownerAEAD, proofKey: proofKey,
-		newOwnerLimit: DefaultNewOwnersPerDay, now: time.Now}
+		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, now: time.Now}
 	for _, o := range opts {
 		o(s)
 	}

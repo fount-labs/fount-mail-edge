@@ -4,6 +4,8 @@
 // top of the send path, so a notice gets the same DKIM keys, the same validated
 // TLS and the same locked relay as POST /send.
 //
+// The connect mail (connect.go) goes the same way, sent at once for POST /connect.
+//
 // cmd/edge runs it only when sending is on. With sending off nothing drains the
 // queue, so notices wait in routing data rather than being dropped.
 //

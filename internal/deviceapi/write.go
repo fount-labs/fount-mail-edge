@@ -115,9 +115,18 @@ func (a *API) createAddress() http.Handler {
 }
 
 type routingRequest struct {
-	Version uint64   `json:"version"` // device-held routing version (§4), must be >= 1
-	Owners  []string `json:"owners"`  // owner addresses; the edge stores only their keyed hashes
+	Version uint64         `json:"version"`          // device-held routing version (§4), must be >= 1
+	Owners  []string       `json:"owners"`           // owner addresses; the edge stores only their keyed hashes
+	Proofs  []connectProof `json:"proofs,omitempty"` // connect replies the device saw (POST /connect)
 }
+
+type connectProof struct {
+	Owner     string `json:"owner"`
+	MessageID string `json:"messageId"` // the connect mail's Message-ID, with or without <>
+}
+
+// errConnectProof is PUT /routing's answer to any proof that doesn't hold.
+const errConnectProof = "connect proof invalid or expired"
 
 // putRouting handles PUT /routing: the owner-change key (guard verified) writes
 // the versioned owner list. The edge keeps each owner as a keyed hash, plus a
@@ -150,8 +159,24 @@ func (a *API) putRouting() http.Handler {
 				return
 			}
 		}
-		err := a.mutator.SetOwners(r.Context(), mailboxID, req.Version, req.Owners)
+		if len(req.Proofs) > maxOwners {
+			writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
+			return
+		}
+		proofs := make([]routing.ConnectProof, 0, len(req.Proofs))
+		for _, p := range req.Proofs {
+			issued, mac, ok := routing.ParseConnectID(p.MessageID, a.mailDomain)
+			if !ok || a.mailDomain == "" {
+				writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
+				return
+			}
+			proofs = append(proofs, routing.ConnectProof{Owner: p.Owner, IssuedAt: issued, MAC: mac})
+		}
+		err := a.mutator.SetOwners(r.Context(), mailboxID, req.Version, req.Owners, proofs...)
 		switch {
+		case errors.Is(err, routing.ErrConnectProof):
+			writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
+			return
 		case errors.Is(err, routing.ErrStaleVersion):
 			writeErr(w, http.StatusConflict, "routing version did not advance")
 			return

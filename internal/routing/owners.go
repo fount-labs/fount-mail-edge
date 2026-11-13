@@ -27,6 +27,10 @@ import (
 // until OwnerWait ends, because the closed app does pairing and a bad build could
 // pair an attacker.
 //
+// A connect reply (connect.go) is the other proof: the edge mailed the owner from
+// the worker, and the device hands back that mail's Message-ID once they reply.
+// An owner proved that way gets no proof mail; the wait and the notices stand.
+//
 // The state is the license's, so it lives on the handle's record: a new worker
 // copies the first worker's owners, and copying one isn't a new owner. Each
 // record's OwnerHashes still says who owns that worker.
@@ -165,7 +169,12 @@ func (s *Store) rootOf(m *Mailbox) *Mailbox {
 // owner, and an owner-removed notice to every proved owner taken off. Those wait
 // in Notices for the send path. Once a license has had an owner, emptying the
 // list and adding one is a new owner like any other.
-func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string) error {
+//
+// proofs are connect replies (connect.go) the device saw. Each must verify for
+// this worker, be within ConnectLifetime, and name an owner in owners, or the
+// whole write is ErrConnectProof and nothing changes. An owner a proof covers is
+// proved now, so a new one gets no proof mail. Every other rule stands.
+func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64, owners []string, proofs ...ConnectProof) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refresh(ctx); err != nil {
@@ -175,9 +184,6 @@ func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64,
 	if !ok {
 		return ErrNoMailbox
 	}
-	if version < m.RoutingVersion {
-		return ErrStaleVersion
-	}
 	hashes := make([][]byte, 0, len(owners))
 	addrs := make(map[string]string, len(owners))
 	for _, o := range owners {
@@ -185,12 +191,19 @@ func (s *Store) SetOwners(ctx context.Context, mailboxID []byte, version uint64,
 		hashes = append(hashes, h)
 		addrs[string(h)] = o
 	}
+	connected, err := s.checkConnect(mailboxID, hashes, proofs)
+	if err != nil {
+		return err
+	}
+	if version < m.RoutingVersion {
+		return ErrStaleVersion
+	}
 	resend := version == m.RoutingVersion
 	if resend && !slices.EqualFunc(hashes, m.OwnerHashes, hmac.Equal) {
 		return ErrStaleVersion
 	}
 	root := s.rootOf(m)
-	next, err := s.planOwners(root, m, hashes, addrs)
+	next, err := s.planOwners(root, m, hashes, addrs, connected)
 	if err != nil {
 		return err
 	}
@@ -218,9 +231,10 @@ type ownerPlan struct {
 	notices []Notice
 }
 
-// planOwners works out the license's owner state once m's owners are hashes. It
-// returns nil when nothing would change. Caller holds s.mu.
-func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]string) (*ownerPlan, error) {
+// planOwners works out the license's owner state once m's owners are hashes.
+// connected are the owners a connect proof just proved. It returns nil when
+// nothing would change. Caller holds s.mu.
+func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]string, connected map[string]bool) (*ownerPlan, error) {
 	now := s.now().Unix()
 	present := map[string]bool{}
 	for _, r := range s.family(m) {
@@ -246,7 +260,12 @@ func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]s
 			proved = append(proved, o)
 		}
 		if present[string(o.Hash)] {
-			p.state = append(p.state, o.clone())
+			o = o.clone()
+			if connected[string(o.Hash)] && o.ProvedAt == 0 {
+				o.ProvedAt = now
+				changed = true
+			}
+			p.state = append(p.state, o)
 			continue
 		}
 		changed = true
@@ -255,8 +274,9 @@ func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]s
 		}
 	}
 	for _, n := range root.Notices {
-		// A proof mail to someone no longer an owner is moot. Other notices stay.
-		if n.Kind == NoticeOwnerProof && !present[string(n.ToHash)] {
+		// A proof mail to someone no longer an owner, or just proved by a connect
+		// reply, is moot. Other notices stay.
+		if n.Kind == NoticeOwnerProof && (!present[string(n.ToHash)] || connected[string(n.ToHash)]) {
 			changed = true
 			continue
 		}
@@ -290,8 +310,12 @@ func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]s
 				p.notices = append(p.notices, Notice{Kind: NoticeNewOwner, ToHash: r.Hash, To: r.Sealed, AboutHash: h, About: sealed})
 			}
 		}
+		if connected[string(h)] {
+			o.ProvedAt = now
+		} else {
+			p.notices = append(p.notices, Notice{Kind: NoticeOwnerProof, ToHash: h, To: sealed})
+		}
 		p.state = append(p.state, o)
-		p.notices = append(p.notices, Notice{Kind: NoticeOwnerProof, ToHash: h, To: sealed})
 	}
 	if !changed {
 		return nil, nil

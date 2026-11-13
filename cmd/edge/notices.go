@@ -42,6 +42,21 @@ func startNotices(ctx context.Context, cfg *config.Config, out send.Transmitter,
 	return true
 }
 
+// newConnector builds POST /connect's Connector on the send path notices use:
+// this container's Outbox, or mail-send over the link, which on follows. With no
+// send path it's nil, and POST /connect answers 503.
+func newConnector(cfg *config.Config, out send.Transmitter, rt notice.ConnectRouting, on func() bool) deviceapi.Connector {
+	if out == nil || rt == nil {
+		return nil
+	}
+	c, err := notice.NewConnector(notice.ConnectOptions{MailDomain: cfg.MailDomain, Out: out, Routing: rt, On: on})
+	if err != nil {
+		log.Printf("edge: POST /connect off: %v", err)
+		return nil
+	}
+	return c
+}
+
 // transmitterOf is the one-container edge's send path, or nil with sending off.
 func transmitterOf(sender deviceapi.Sender) send.Transmitter {
 	if svc, ok := sender.(*send.Service); ok && svc != nil {
