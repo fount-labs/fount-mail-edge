@@ -102,3 +102,34 @@ func TestSendRouteOffByDefault(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 }
+
+// A send carries a whole message, so it may be larger than any other request,
+// up to its own limit.
+func TestSendRouteBodyLimit(t *testing.T) {
+	s := &fakeSender{}
+	api, priv, keyID := sendAPI(t, s)
+	request := func(n int, nonce string) int {
+		raw := make([]byte, n)
+		for i := range raw {
+			raw[i] = 'a'
+		}
+		body, _ := json.Marshal(sendRequest{Message: raw})
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/send", body, time.Now(), nonce))
+		return rec.Code
+	}
+	if code := request(10<<20, "big"); code != http.StatusOK || len(s.got) != 10<<20 {
+		t.Fatalf("a 10 MiB message: status %d, sender got %d bytes", code, len(s.got))
+	}
+	if code := request(maxSendBodyBytes, "too-big"); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over the send limit: status %d", code)
+	}
+
+	// Every other route keeps the control-message limit.
+	big := []byte(fmt.Sprintf(`{"x":%q}`, make([]byte, maxBodyBytes)))
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, priv, keyID, "PUT", "/routing", big, time.Now(), "routing"))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("PUT /routing over 1 MiB: status %d", rec.Code)
+	}
+}

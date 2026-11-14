@@ -43,12 +43,15 @@ import (
 )
 
 const (
-	maxBodyBytes   = 1 << 20 // 1 MiB; the Device API carries control messages, not mail
-	timestampSkew  = 5 * time.Minute
-	nonceRetention = 10 * time.Minute
-	maxNonceBytes  = 128
-	maxNonces      = 1 << 18 // about 437 requests/sec sustained over the retention
-	noncePruneGap  = time.Second
+	maxBodyBytes = 1 << 20 // 1 MiB; the Device API carries control messages, not mail
+	// maxSendBodyBytes bounds POST /send, which carries a whole message base64 in
+	// JSON: up to 10 MiB of message, room for a reply with its files attached.
+	maxSendBodyBytes = 14 << 20
+	timestampSkew    = 5 * time.Minute
+	nonceRetention   = 10 * time.Minute
+	maxNonceBytes    = 128
+	maxNonces        = 1 << 18 // about 437 requests/sec sustained over the retention
+	noncePruneGap    = time.Second
 )
 
 var (
@@ -268,7 +271,7 @@ func New(o Options) *API {
 	a.gaps, _ = o.Store.(store.GapReader) // same
 	a.pauser, _ = o.Mutator.(Pauser)
 	for pattern, r := range routes {
-		a.mux.Handle(pattern, a.guard(r, a.handler(pattern, r, mail, boots)))
+		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), a.handler(pattern, r, mail, boots)))
 	}
 	return a
 }
@@ -328,10 +331,18 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTT
 // per-mailbox classes the signing key comes from routing data (Fount-Key-Id);
 // for the entitlement-bearing classes it comes from a signed entitlement token,
 // whose claims are attached to the request context for the handler.
-func (a *API) guard(rt route, next http.Handler) http.Handler {
+// bodyLimit is the most a route's request body may hold.
+func bodyLimit(pattern string) int {
+	if pattern == "POST /send" {
+		return maxSendBodyBytes
+	}
+	return maxBodyBytes
+}
+
+func (a *API) guard(rt route, limit int, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
-		if err != nil || len(body) > maxBodyBytes {
+		body, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
+		if err != nil || len(body) > limit {
 			writeErr(w, http.StatusRequestEntityTooLarge, "body too large")
 			return
 		}
