@@ -118,8 +118,8 @@ func TestSendRouteBodyLimit(t *testing.T) {
 		api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/send", body, time.Now(), nonce))
 		return rec.Code
 	}
-	if code := request(10<<20, "big"); code != http.StatusOK || len(s.got) != 10<<20 {
-		t.Fatalf("a 10 MiB message: status %d, sender got %d bytes", code, len(s.got))
+	if code := request(25<<20, "big"); code != http.StatusOK || len(s.got) != 25<<20 {
+		t.Fatalf("a 25 MiB message: status %d, sender got %d bytes", code, len(s.got))
 	}
 	if code := request(maxSendBodyBytes, "too-big"); code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over the send limit: status %d", code)
