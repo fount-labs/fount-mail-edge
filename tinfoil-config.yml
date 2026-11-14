@@ -78,6 +78,7 @@ containers:
       /tmp: "size=64m"
     env:
       - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
+      - BOOT_HOSTNAME_DOMAIN: "boot.fountbox.com" # one random name per boot, so each certificate is a new name set (design §6); needs *.boot.fountbox.com at the gateways
       - MAIL_DOMAIN: "@fountbox.com"
       - ACME_DIRECTORY: "https://acme-v02.api.letsencrypt.org/directory"
       - S3_BUCKET: "fount-mail-063207099341"
@@ -112,6 +113,7 @@ containers:
     ports: ["2525:2525", "8443:8443", "8088:8088"]
     env:
       - MAIL_HOSTNAMES: "mx1.fountbox.com,mx2.fountbox.com"
+      - BOOT_HOSTNAME_DOMAIN: "boot.fountbox.com" # one random name per boot, so each certificate is a new name set (design §6); needs *.boot.fountbox.com at the gateways
       - MAIL_DOMAIN: "@fountbox.com"
       - GATEWAY_CLIENT_PINS: "b19b9c3464bb8bf70a5b15ff7085d13c65217dadf4080a3132cf8a0559f86802,66d483720439bcf18d5515135f5e9405c465c66409596b4d5c0878648150c50d" # gateways a and b; a new gateway key needs a new release
       - CORE_LINK: "mail-core:7025"

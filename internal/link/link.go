@@ -35,6 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/fount-labs/fount-mail-edge/internal/acme"
 	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
@@ -58,6 +59,7 @@ type Mail struct {
 // Server is core's side.
 type Server struct {
 	hostnames  []string
+	bootDomain string
 	maxBytes   int64
 	challenges http.Handler
 
@@ -66,15 +68,17 @@ type Server struct {
 	mu       sync.Mutex
 	csrKey   *ecdsa.PublicKey
 	csr      []byte
+	csrNames []string
 	csrReady chan struct{}
 	cert     func() []byte // the chain core holds, or nil
 	frontHas string
 }
 
 // NewServer serves hostnames' CSRs and certificates, messages up to maxBytes, and
-// the ACME responder for everything off /link/.
-func NewServer(hostnames []string, maxBytes int64, challenges http.Handler) *Server {
-	return &Server{hostnames: slices.Clone(hostnames), maxBytes: maxBytes, challenges: challenges, csrReady: make(chan struct{})}
+// the ACME responder for everything off /link/. With a bootDomain, a CSR must also
+// name one boot name under it (acme.WithBootName).
+func NewServer(hostnames []string, bootDomain string, maxBytes int64, challenges http.Handler) *Server {
+	return &Server{hostnames: slices.Clone(hostnames), bootDomain: bootDomain, maxBytes: maxBytes, challenges: challenges, csrReady: make(chan struct{})}
 }
 
 // SetMail starts or, with nil, stops serving RCPT and messages.
@@ -87,16 +91,17 @@ func (s *Server) SetCert(chain func() []byte) {
 	s.cert = chain
 }
 
-// CSR waits for front's CSR and returns it with its public key.
-func (s *Server) CSR(ctx context.Context) ([]byte, *ecdsa.PublicKey, error) {
+// CSR waits for front's CSR and returns it with the names it holds, which are
+// the names to order, and its public key.
+func (s *Server) CSR(ctx context.Context) ([]byte, []string, *ecdsa.PublicKey, error) {
 	select {
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, nil, nil, ctx.Err()
 	case <-s.csrReady:
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.csr, s.csrKey, nil
+	return s.csr, slices.Clone(s.csrNames), s.csrKey, nil
 }
 
 // FrontHas reports whether front has loaded the chain whose leaf is leafDER.
@@ -202,7 +207,7 @@ func (s *Server) submitCSR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reading CSR", http.StatusBadRequest)
 		return
 	}
-	key, err := CheckCSR(der, s.hostnames)
+	key, names, err := CheckCSR(der, s.hostnames, s.bootDomain)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -219,7 +224,7 @@ func (s *Server) submitCSR(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	s.csr, s.csrKey = der, key
+	s.csr, s.csrNames, s.csrKey = der, names, key
 	close(s.csrReady)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -243,30 +248,38 @@ func (s *Server) serveCert(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(pemBytes)
 }
 
-// CheckCSR accepts a CSR only for exactly the mail hostnames, with no other
-// names, over a P-256 key, with a valid signature. It returns the key.
-func CheckCSR(der []byte, hostnames []string) (*ecdsa.PublicKey, error) {
+// CheckCSR accepts a CSR only for exactly the mail hostnames, plus one boot name
+// under bootDomain when it's set, with no other names, over a P-256 key, with a
+// valid signature. It returns the key and the CSR's names.
+func CheckCSR(der []byte, hostnames []string, bootDomain string) (*ecdsa.PublicKey, []string, error) {
 	csr, err := x509.ParseCertificateRequest(der)
 	if err != nil {
-		return nil, fmt.Errorf("parsing CSR: %w", err)
+		return nil, nil, fmt.Errorf("parsing CSR: %w", err)
 	}
 	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("CSR signature: %w", err)
+		return nil, nil, fmt.Errorf("CSR signature: %w", err)
 	}
 	key, ok := csr.PublicKey.(*ecdsa.PublicKey)
 	if !ok || key.Curve != elliptic.P256() {
-		return nil, errors.New("CSR key isn't ECDSA P-256, the mail-tls key's type")
+		return nil, nil, errors.New("CSR key isn't ECDSA P-256, the mail-tls key's type")
 	}
 	if len(csr.IPAddresses)+len(csr.EmailAddresses)+len(csr.URIs) > 0 {
-		return nil, errors.New("CSR names something other than the mail hostnames")
+		return nil, nil, errors.New("CSR names something other than the mail hostnames")
 	}
 	got, want := slices.Clone(csr.DNSNames), slices.Clone(hostnames)
+	if bootDomain != "" {
+		i := slices.IndexFunc(got, func(n string) bool { return acme.IsBootName(n, bootDomain) })
+		if i < 0 {
+			return nil, nil, fmt.Errorf("CSR names %v, with no boot name under %s", csr.DNSNames, bootDomain)
+		}
+		got = slices.Delete(got, i, i+1)
+	}
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		return nil, fmt.Errorf("CSR names %v, want %v", csr.DNSNames, hostnames)
+		return nil, nil, fmt.Errorf("CSR names %v, want %v and one boot name", csr.DNSNames, hostnames)
 	}
-	return key, nil
+	return key, slices.Clone(csr.DNSNames), nil
 }
 
 // Client is front's side. It is smtp's Storer and RecipientChecker.

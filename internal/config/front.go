@@ -14,6 +14,7 @@ import (
 // vault or S3 settings, and no send settings.
 type Front struct {
 	MailHostnames     []string
+	BootDomain        string
 	MailDomain        string
 	AttestedKeyDir    string
 	SMTPAddr          string
@@ -56,6 +57,7 @@ func LoadFront() (*Front, error) {
 	dev := os.Getenv("EDGE_DEV") == "1"
 	f := &Front{
 		MailHostnames:     splitList(env("MAIL_HOSTNAMES", "mx1.fountbox.com,mx2.fountbox.com")),
+		BootDomain:        os.Getenv("BOOT_HOSTNAME_DOMAIN"),
 		MailDomain:        env("MAIL_DOMAIN", "@fountbox.com"),
 		AttestedKeyDir:    env("ATTESTED_KEY_DIR", "/run/tinfoil/keys"),
 		SMTPAddr:          env("SMTP_ADDR", ":2525"),
@@ -76,6 +78,9 @@ func LoadFront() (*Front, error) {
 	}
 	if len(f.MailHostnames) == 0 {
 		return nil, fmt.Errorf("MAIL_HOSTNAMES is empty")
+	}
+	if err := checkBootDomain(f.BootDomain, f.MailHostnames); err != nil {
+		return nil, err
 	}
 	for name, v := range map[string]string{"CORE_LINK": f.CoreLink, "CORE_API": f.CoreAPI} {
 		if _, _, err := net.SplitHostPort(v); err != nil {

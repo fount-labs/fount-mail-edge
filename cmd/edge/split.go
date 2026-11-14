@@ -118,14 +118,14 @@ func coreListeners(cfg *config.Config, ls *link.Server, st smtp.Storer, rc smtp.
 // binds chains to the CSR's key, so a restart of core within a boot reloads it.
 func startCoreCertLoop(ctx context.Context, cfg *config.Config, mgr *certs.Manager, challenges *acme.Challenges, issuer *acme.Issuer, ls *link.Server) {
 	log.Printf("edge: waiting for mail-front's CSR")
-	csr, pub, err := ls.CSR(ctx)
+	csr, names, pub, err := ls.CSR(ctx)
 	if err != nil {
 		return
 	}
-	log.Printf("edge: ACME via %s for %v, CSR from mail-front", cfg.ACMEDirectory, cfg.MailHostnames)
+	log.Printf("edge: ACME via %s for %v, CSR from mail-front", cfg.ACMEDirectory, names)
 	certs.RunLoop(ctx, mgr, coreCertCache(cfg, pub), challenges.Reachable(), cfg.MailHostnames[0],
 		func(ctx context.Context, _ string) (*tls.Certificate, error) {
-			chain, err := issuer.IssueCSR(ctx, cfg.MailHostnames, csr)
+			chain, err := issuer.IssueCSR(ctx, names, csr)
 			if err != nil {
 				return nil, err
 			}

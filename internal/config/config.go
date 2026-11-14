@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -87,6 +88,7 @@ type SendKeys struct {
 
 type Config struct {
 	MailHostnames     []string // the MX names; the SMTP certificate covers all of them, first is the HELO name
+	BootDomain        string   // each boot's certificate adds one random name under this (acme.WithBootName); "" adds none
 	MailDomain        string   // recipient domain, e.g. @fountbox.com
 	AttestedKeyDir    string   // where the Tinfoil runtime writes per-boot attested keys
 	SMTPAddr          string
@@ -166,6 +168,7 @@ func load(core bool) (*Config, error) {
 	dev := os.Getenv("EDGE_DEV") == "1"
 	c := &Config{
 		MailHostnames:     splitList(env("MAIL_HOSTNAMES", "mx1.fountbox.com,mx2.fountbox.com")),
+		BootDomain:        os.Getenv("BOOT_HOSTNAME_DOMAIN"),
 		MailDomain:        env("MAIL_DOMAIN", "@fountbox.com"),
 		AttestedKeyDir:    env("ATTESTED_KEY_DIR", "/run/tinfoil/keys"),
 		SMTPAddr:          env("SMTP_ADDR", ":2525"),
@@ -194,6 +197,9 @@ func load(core bool) (*Config, error) {
 
 	if len(c.MailHostnames) == 0 {
 		return nil, fmt.Errorf("MAIL_HOSTNAMES is empty")
+	}
+	if err := checkBootDomain(c.BootDomain, c.MailHostnames); err != nil {
+		return nil, err
 	}
 	if !dev && c.ACMEDirectory == acmeStaging {
 		return nil, fmt.Errorf("ACME_DIRECTORY is Let's Encrypt staging: senders refuse those certificates, so a release must set the production directory")
@@ -468,6 +474,25 @@ func env(key, def string) string {
 	}
 	return def
 }
+
+// checkBootDomain accepts an empty boot domain, or a lowercase DNS name of two
+// labels or more that isn't a mail hostname.
+func checkBootDomain(domain string, hostnames []string) error {
+	if domain == "" {
+		return nil
+	}
+	if !bootDomainRE.MatchString(domain) || len(domain) > 200 {
+		return fmt.Errorf("BOOT_HOSTNAME_DOMAIN %q isn't a lowercase DNS name", domain)
+	}
+	for _, h := range hostnames {
+		if h == domain {
+			return fmt.Errorf("BOOT_HOSTNAME_DOMAIN %q is a mail hostname", domain)
+		}
+	}
+	return nil
+}
+
+var bootDomainRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 
 func splitList(s string) []string {
 	var out []string

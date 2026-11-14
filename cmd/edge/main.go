@@ -175,7 +175,7 @@ func run(m mode) error {
 	var linkSrv *link.Server
 	var ready certSource = certMgr
 	if m == modeCore {
-		linkSrv = link.NewServer(cfg.MailHostnames, cfg.MaxMessageBytes, challenges.Handler())
+		linkSrv = link.NewServer(cfg.MailHostnames, cfg.BootDomain, cfg.MaxMessageBytes, challenges.Handler())
 		linkSrv.SetCert(func() []byte {
 			if c, ok := certMgr.Current(); ok {
 				return certs.ChainPEM(c)
@@ -546,10 +546,11 @@ func registerAccount(ctx context.Context, issuer *acme.Issuer, retries []time.Du
 // correct for a dev boot with no CA.
 func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *certs.Manager, challenges *acme.Challenges, issuer *acme.Issuer) {
 	cache := certCache(cfg, k)
-	log.Printf("edge: ACME via %s for %v", cfg.ACMEDirectory, cfg.MailHostnames)
+	names := acme.WithBootName(cfg.MailHostnames, cfg.BootDomain)
+	log.Printf("edge: ACME via %s for %v", cfg.ACMEDirectory, names)
 	certs.RunLoop(ctx, mgr, cache, challenges.Reachable(), cfg.MailHostnames[0],
 		func(ctx context.Context, _ string) (*tls.Certificate, error) {
-			return issuer.Issue(ctx, cfg.MailHostnames, k.TLS)
+			return issuer.Issue(ctx, names, k.TLS)
 		})
 }
 

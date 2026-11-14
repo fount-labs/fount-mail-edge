@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,7 +49,7 @@ var hosts = []string{"mx1.example", "mx2.example"}
 
 func newPair(t *testing.T, maxBytes int64) (*Server, *Client) {
 	t.Helper()
-	s := NewServer(hosts, maxBytes, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("challenge")) }))
+	s := NewServer(hosts, "", maxBytes, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("challenge")) }))
 	ts := httptest.NewServer(s)
 	t.Cleanup(ts.Close)
 	return s, &Client{Base: ts.URL}
@@ -134,7 +135,7 @@ func TestCheckCSR(t *testing.T) {
 	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	_, ed, _ := ed25519.GenerateKey(rand.Reader)
 	good := csrFor(t, key, &x509.CertificateRequest{DNSNames: []string{"mx2.example", "mx1.example"}})
-	if got, err := CheckCSR(good, hosts); err != nil || !got.Equal(&key.PublicKey) {
+	if got, _, err := CheckCSR(good, hosts, ""); err != nil || !got.Equal(&key.PublicKey) {
 		t.Fatalf("good CSR: %v", err)
 	}
 	evil, _ := url.Parse("https://evil.example")
@@ -149,7 +150,34 @@ func TestCheckCSR(t *testing.T) {
 		"garbage":    []byte("not a csr"),
 		"bad sig":    append(append([]byte(nil), good[:len(good)-4]...), 0, 0, 0, 0),
 	} {
-		if _, err := CheckCSR(der, hosts); err == nil {
+		if _, _, err := CheckCSR(der, hosts, ""); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestCheckCSRWithBootDomain(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	boot := "abcdefghijklmnopqrstuvwxyz.boot.example"
+	good := csrFor(t, key, &x509.CertificateRequest{DNSNames: []string{"mx1.example", boot, "mx2.example"}})
+	_, names, err := CheckCSR(good, hosts, "boot.example")
+	if err != nil {
+		t.Fatalf("good CSR: %v", err)
+	}
+	if !slices.Equal(names, []string{"mx1.example", boot, "mx2.example"}) {
+		t.Fatalf("names = %v", names)
+	}
+	if _, _, err := CheckCSR(good, hosts, ""); err == nil {
+		t.Error("a boot name accepted with no boot domain")
+	}
+	for name, dns := range map[string][]string{
+		"no boot name":     hosts,
+		"two boot names":   {"mx1.example", "mx2.example", boot, "bcdefghijklmnopqrstuvwxyza.boot.example"},
+		"wrong domain":     {"mx1.example", "mx2.example", "abcdefghijklmnopqrstuvwxyz.evil.example"},
+		"not a boot label": {"mx1.example", "mx2.example", "www.boot.example"},
+		"missing mx2":      {"mx1.example", boot},
+	} {
+		if _, _, err := CheckCSR(csrFor(t, key, &x509.CertificateRequest{DNSNames: dns}), hosts, "boot.example"); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -170,7 +198,7 @@ func TestOneCSRKeyPerBoot(t *testing.T) {
 	if err := c.SubmitCSR(ctx, csrFor(t, other, &x509.CertificateRequest{DNSNames: hosts})); err == nil {
 		t.Fatal("core took a second key in one boot")
 	}
-	_, pub, err := s.CSR(ctx)
+	_, _, pub, err := s.CSR(ctx)
 	if err != nil || !pub.Equal(&key.PublicKey) {
 		t.Fatalf("core's CSR key changed: %v", err)
 	}

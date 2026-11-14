@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/acme"
 	"github.com/fount-labs/fount-mail-edge/internal/certs"
 	"github.com/fount-labs/fount-mail-edge/internal/config"
 	"github.com/fount-labs/fount-mail-edge/internal/link"
@@ -101,7 +102,7 @@ func TestSplitConfigIsolatesFront(t *testing.T) {
 			t.Errorf("mail-front has %s", k)
 		}
 	}
-	allowed := []string{"MAIL_HOSTNAMES", "MAIL_DOMAIN", "GATEWAY_CLIENT_PINS", "CORE_LINK", "CORE_API"}
+	allowed := []string{"MAIL_HOSTNAMES", "BOOT_HOSTNAME_DOMAIN", "MAIL_DOMAIN", "GATEWAY_CLIENT_PINS", "CORE_LINK", "CORE_API"}
 	for k := range envOf(front) {
 		if !slices.Contains(allowed, k) {
 			t.Errorf("mail-front sets %s", k)
@@ -314,7 +315,7 @@ func (ca *testCA) chainFor(t *testing.T, pub *ecdsa.PublicKey, hosts []string) [
 // holds that chain.
 func TestFrontAndCoreShareTheCertificate(t *testing.T) {
 	hosts := []string{"mx1.example", "mx2.example"}
-	ls := link.NewServer(hosts, 1<<20, nil)
+	ls := link.NewServer(hosts, "", 1<<20, nil)
 	coreMgr := certs.NewManager()
 	ls.SetCert(func() []byte {
 		if c, ok := coreMgr.Current(); ok {
@@ -332,7 +333,7 @@ func TestFrontAndCoreShareTheCertificate(t *testing.T) {
 	defer cancel()
 	go frontCertLoop(ctx, &link.Client{Base: srv.URL}, k.TLS, frontMgr, hosts, frontCertTiming{retry: 10 * time.Millisecond, poll: 10 * time.Millisecond})
 
-	_, pub, err := ls.CSR(ctx)
+	_, _, pub, err := ls.CSR(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +469,7 @@ func (onlyBob) Status(_ context.Context, r string) (smtp.RecipientStatus, error)
 // mail-core's store, with the envelope intact; RCPT is core's verdict.
 func TestMailGoesFromFrontToCore(t *testing.T) {
 	hosts := []string{"mx1.fountbox.com"}
-	ls := link.NewServer(hosts, 1<<20, nil)
+	ls := link.NewServer(hosts, "", 1<<20, nil)
 	st := &capture{}
 	ls.SetMail(&link.Mail{Store: st, Recipients: onlyBob{}})
 	core := httptest.NewServer(ls)
@@ -540,5 +541,41 @@ func TestMailGoesFromFrontToCore(t *testing.T) {
 	}
 	if !strings.Contains(string(st.raws[0]), "through the link") {
 		t.Fatalf("message %q", st.raws[0])
+	}
+}
+
+// With a boot domain, front adds one boot name to its CSR, and core orders
+// exactly the names the CSR holds.
+func TestFrontAndCoreAgreeOnTheBootName(t *testing.T) {
+	hosts := []string{"mx1.example", "mx2.example"}
+	ls := link.NewServer(hosts, "boot.example", 1<<20, nil)
+	srv := httptest.NewServer(ls)
+	defer srv.Close()
+
+	k := testKeys(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	names := acme.WithBootName(hosts, "boot.example")
+	go frontCertLoop(ctx, &link.Client{Base: srv.URL}, k.TLS, certs.NewManager(), names, frontCertTiming{retry: 10 * time.Millisecond, poll: 10 * time.Millisecond})
+
+	_, got, _, err := ls.CSR(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, names) {
+		t.Fatalf("core would order %v, want %v", got, names)
+	}
+	if !acme.IsBootName(got[2], "boot.example") {
+		t.Fatalf("%q isn't a boot name", got[2])
+	}
+}
+
+// Front makes the CSR with the boot name and core checks it, so both must name
+// the same boot domain.
+func TestSplitConfigBootDomainMatches(t *testing.T) {
+	text := readFile(t, splitConfig)
+	front, core := envOf(containerBlock(t, text, "mail-front")), envOf(containerBlock(t, text, "mail-core"))
+	if front["BOOT_HOSTNAME_DOMAIN"] == "" || front["BOOT_HOSTNAME_DOMAIN"] != core["BOOT_HOSTNAME_DOMAIN"] {
+		t.Errorf("BOOT_HOSTNAME_DOMAIN: front %q, core %q", front["BOOT_HOSTNAME_DOMAIN"], core["BOOT_HOSTNAME_DOMAIN"])
 	}
 }

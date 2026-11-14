@@ -26,6 +26,13 @@ match tag "v9.9.9"`, checked against the live edge 2026-11-08). User data lives 
 launch template, so changing any parameter replaces the instance, and the
 Elastic IP moves to the new one.
 
+**Each boot needs a new certificate.** The edge's TLS key is new every boot. Let's Encrypt
+allows 5 certificates a week for the same set of names, so each boot's certificate adds one
+random name under `boot.fountbox.com` (`BOOT_HOSTNAME_DOMAIN`). `*.boot.fountbox.com` must point
+at both gateways, like mx1 and mx2 (fount-infra `mail-dns-stack.ts`). Port 80 forwards any
+name, so the challenge reaches the edge. Without the record, issuance fails. The limit of 50 a
+week for `fountbox.com` still applies. The 5 a week stopped inbound mail on 2026-11-13, before boot names.
+
 **Each edge release means a gateway update.** Once the edge runs the new tag, a
 gateway pinned to the old one can't open new tunnels, and senders retry. Update both
 gateways at once. Every release has a fresh `mail-tls` key, so it needs a new certificate, and
