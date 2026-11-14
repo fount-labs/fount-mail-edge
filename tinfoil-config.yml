@@ -61,7 +61,7 @@ containers:
   # routing data. No TLS key, no send key, no tunnelled port but 8080, which the
   # shim and the gateway's /ready check reach.
   - name: mail-core
-    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:7792d3da608cdf4476382a7bdcc2df691adb9ea58d39dba1376c655523817d63" # set by release
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:cf39d9166a580f57524f2abaa308a8bc5919b72a35f08a14e2522db3d2ae9cab" # set by release
     command: ["core"]
     networks: [edge, internal, frontlink, sendnet]
     keys: [mail-sign, transfer]
@@ -98,7 +98,7 @@ containers:
   # STARTTLS, the CSR, and the tunnelled ports. Its one network is closed and
   # reaches only mail-core.
   - name: mail-front
-    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:7792d3da608cdf4476382a7bdcc2df691adb9ea58d39dba1376c655523817d63" # set by release
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:cf39d9166a580f57524f2abaa308a8bc5919b72a35f08a14e2522db3d2ae9cab" # set by release
     command: ["front"]
     networks: [frontlink]
     keys: [mail-tls]
@@ -126,7 +126,7 @@ containers:
   # 98fcffaa…3480), the relay address and pins, the DKIM selector and the
   # enable flag here, and adds the relay host to sendout.
   - name: mail-send
-    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:7792d3da608cdf4476382a7bdcc2df691adb9ea58d39dba1376c655523817d63" # set by release
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:cf39d9166a580f57524f2abaa308a8bc5919b72a35f08a14e2522db3d2ae9cab" # set by release
     command: ["send"]
     networks: [sendnet, sendout]
     keys: [send-transfer]
@@ -151,7 +151,7 @@ containers:
       - SEND_ENABLED: "1"
 
   - name: forwarder
-    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:7792d3da608cdf4476382a7bdcc2df691adb9ea58d39dba1376c655523817d63" # set by release, same digest as mail-edge
+    image: "ghcr.io/fount-labs/fount-mail-edge@sha256:cf39d9166a580f57524f2abaa308a8bc5919b72a35f08a14e2522db3d2ae9cab" # set by release, same digest as mail-edge
     networks: [internal, storage]
     command: ["egress-forward"]
     restart: always
