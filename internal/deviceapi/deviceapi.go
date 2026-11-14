@@ -45,8 +45,9 @@ import (
 const (
 	maxBodyBytes = 1 << 20 // 1 MiB; the Device API carries control messages, not mail
 	// maxSendBodyBytes bounds POST /send, which carries a whole message base64 in
-	// JSON: up to 10 MiB of message, room for a reply with its files attached.
-	maxSendBodyBytes = 14 << 20
+	// JSON: room for a message of MaxMessageBytes (25 MiB, Gmail's limit), whose
+	// base64 is a third larger. mail-send refuses a larger message.
+	maxSendBodyBytes = 34 << 20
 	timestampSkew    = 5 * time.Minute
 	nonceRetention   = 10 * time.Minute
 	maxNonceBytes    = 128
