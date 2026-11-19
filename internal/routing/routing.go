@@ -877,7 +877,8 @@ type RotatedKeys struct {
 // address, and a worker on a healthy device keeps them. The authorization — a
 // passkey assertion over an edge challenge and the new mailbox key's signature over
 // the new key chain — is the handler's job, checked before calling this.
-// ErrNoMailbox if the mailbox is absent.
+// ErrNoMailbox if the mailbox is absent, ErrCoordinated if it is enrolled under a
+// coordinator, whose keys only the coordinator changes.
 func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -887,6 +888,9 @@ func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys)
 	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
 	if !ok {
 		return nil, ErrNoMailbox
+	}
+	if m.Coordinated {
+		return nil, ErrCoordinated
 	}
 	family := s.family(m)
 	ids := make([][]byte, len(family))

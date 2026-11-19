@@ -138,6 +138,11 @@ func (a *API) pause() http.Handler {
 			writeErr(w, http.StatusUnauthorized, "passkey assertion did not verify")
 			return
 		}
+		// Checked once the passkey has spoken, so an unauthenticated caller
+		// can't learn which mailboxes are enrolled.
+		if a.refuseCoordinated(w, mid) {
+			return
+		}
 		if err := a.spendNonce(r); err != nil {
 			writeErr(w, nonceStatus(err), err.Error())
 			return

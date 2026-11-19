@@ -201,4 +201,7 @@ shim:
     - /coordinator/signing-key
     - /coordinator/changes
     - /coordinator/invite
+    - /coordinator/decryption-key
+    - /coordinator/routing
+    - /coordinator/pause
     - /sent/query

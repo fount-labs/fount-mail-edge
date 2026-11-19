@@ -159,13 +159,16 @@ var routes = map[string]route{
 	"GET /pause/{id}":    {sigNone, "M3", "Issues a pause challenge bound to a worker and a state (§12)"},
 
 	// Cloud coordinator (fount launch-plan M).
-	"PUT /coordinator":              {sigAddress, "M4", "Enrolls the mailbox under a coordinator generation (certificate in the body)"},
-	"POST /coordinator/generation":  {sigCoordinatorClaim, "M4", "Moves the edge to a newer coordinator generation"},
-	"POST /sent/query":              {sigAddress, "M4", "Says whether the worker sent each Message-ID, from durable send records"},
-	"POST /coordinator/lapse":       {sigCoordinator, "M4", "Pauses or resumes an enrolled worker for a lapsed payment: mail is held, not bounced"},
-	"POST /coordinator/signing-key": {sigCoordinator, "M4", "Rotates an enrolled worker's address signing key; the old key stops working"},
-	"POST /coordinator/changes":     {sigCoordinator, "M4", "Lists enrolled workers changed since a cursor, across all of them"},
-	"POST /coordinator/invite":      {sigCoordinator, "M4", "Mails a team invite from an enrolled worker to one address that isn't an owner"},
+	"PUT /coordinator":                 {sigAddress, "M4", "Enrolls the mailbox under a coordinator generation (certificate in the body)"},
+	"POST /coordinator/generation":     {sigCoordinatorClaim, "M4", "Moves the edge to a newer coordinator generation"},
+	"POST /sent/query":                 {sigAddress, "M4", "Says whether the worker sent each Message-ID, from durable send records"},
+	"POST /coordinator/lapse":          {sigCoordinator, "M4", "Pauses or resumes an enrolled worker for a lapsed payment: mail is held, not bounced"},
+	"POST /coordinator/signing-key":    {sigCoordinator, "M4", "Rotates an enrolled worker's address signing key; the old key stops working"},
+	"POST /coordinator/changes":        {sigCoordinator, "M4", "Lists enrolled workers changed since a cursor, across all of them"},
+	"POST /coordinator/invite":         {sigCoordinator, "M4", "Mails a team invite from an enrolled worker to one address that isn't an owner"},
+	"POST /coordinator/decryption-key": {sigCoordinator, "M4", "Rotates an enrolled worker's decryption key; new mail seals to the new key"},
+	"POST /coordinator/routing":        {sigCoordinator, "M4", "Writes an enrolled worker's versioned owner list, as PUT /routing does for a device"},
+	"POST /coordinator/pause":          {sigCoordinator, "M4", "Pauses or resumes an enrolled worker, as POST /pause does with a passkey"},
 }
 
 // built are the routes after M2 that are built, so the shim forwards them.
@@ -182,6 +185,10 @@ var built = map[string]bool{
 	"POST /coordinator/signing-key": true,
 	"POST /coordinator/changes":     true,
 	"POST /coordinator/invite":      true,
+
+	"POST /coordinator/decryption-key": true,
+	"POST /coordinator/routing":        true,
+	"POST /coordinator/pause":          true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -277,12 +284,13 @@ type API struct {
 	handleLimiter *limit.Limiter
 	sender        Sender
 	connector     Connector
-	coord         Coordination      // from the Mutator; nil leaves the coordinator routes 501
-	sentLookup    SentLookup        // from the Sender; nil leaves POST /sent/query 501
-	lapser        Lapser            // from the Mutator; nil leaves POST /coordinator/lapse 501
-	rotator       SigningKeyRotator // from the Mutator; nil leaves POST /coordinator/signing-key 501
-	changes       ChangesFeed       // from the Mutator; nil leaves POST /coordinator/changes 501
-	inviter       InviteSender      // from the Sender; nil leaves POST /coordinator/invite 501
+	coord         Coordination         // from the Mutator; nil leaves the coordinator routes 501
+	sentLookup    SentLookup           // from the Sender; nil leaves POST /sent/query 501
+	lapser        Lapser               // from the Mutator; nil leaves POST /coordinator/lapse 501
+	rotator       SigningKeyRotator    // from the Mutator; nil leaves POST /coordinator/signing-key 501
+	changes       ChangesFeed          // from the Mutator; nil leaves POST /coordinator/changes 501
+	inviter       InviteSender         // from the Sender; nil leaves POST /coordinator/invite 501
+	decRotator    DecryptionKeyRotator // from the Mutator; nil leaves POST /coordinator/decryption-key 501
 	authority     ed25519.PublicKey
 }
 
@@ -321,6 +329,7 @@ func New(o Options) *API {
 	a.rotator, _ = o.Mutator.(SigningKeyRotator)
 	a.changes, _ = o.Mutator.(ChangesFeed)
 	a.inviter, _ = o.Sender.(InviteSender)
+	a.decRotator, _ = o.Mutator.(DecryptionKeyRotator)
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), fenced(r.by) && !unfenced[pattern], a.handler(pattern, r, mail, boots)))
 	}
@@ -375,6 +384,12 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.postChanges()
 	case a.coordinationLive() && a.inviter != nil && pattern == "POST /coordinator/invite":
 		return a.postInvite()
+	case a.coordinationLive() && a.decRotator != nil && pattern == "POST /coordinator/decryption-key":
+		return a.postDecryptionKey()
+	case a.coordinationLive() && a.mutator != nil && pattern == "POST /coordinator/routing":
+		return a.postCoordinatorRouting()
+	case a.coordinationLive() && a.pauser != nil && pattern == "POST /coordinator/pause":
+		return a.postCoordinatorPause()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h
@@ -428,7 +443,7 @@ func (a *API) guard(rt route, limit int, fence bool, next http.Handler) http.Han
 			return
 		}
 		if fence {
-			if e := a.fence(r); e != nil {
+			if e := a.fence(r, rt.by); e != nil {
 				writeAPIError(w, e)
 				return
 			}

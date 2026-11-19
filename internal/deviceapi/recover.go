@@ -171,6 +171,11 @@ func (a *API) recover() http.Handler {
 			writeErr(w, http.StatusUnauthorized, "passkey assertion did not verify")
 			return
 		}
+		// Checked once the passkey has spoken, so an unauthenticated caller
+		// can't learn which mailboxes are enrolled.
+		if a.refuseCoordinated(w, mid) {
+			return
+		}
 		if err := a.spendNonce(r); err != nil {
 			writeErr(w, nonceStatus(err), err.Error())
 			return
@@ -193,6 +198,9 @@ func (a *API) recover() http.Handler {
 		switch {
 		case errors.Is(err, routing.ErrNoMailbox):
 			writeErr(w, http.StatusNotFound, "no such mailbox")
+			return
+		case errors.Is(err, routing.ErrCoordinated):
+			writeAPIError(w, coordinatorOnly())
 			return
 		case errors.Is(err, routing.ErrKeyNotLogged):
 			writeErr(w, http.StatusInternalServerError, "could not record key")

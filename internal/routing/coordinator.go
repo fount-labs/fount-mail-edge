@@ -29,6 +29,9 @@ var (
 	ErrGenerationConflict = errors.New("routing: generation already has another key")
 	// ErrNotCoordinated means the mailbox isn't enrolled under a coordinator.
 	ErrNotCoordinated = errors.New("routing: mailbox is not under a coordinator")
+	// ErrCoordinated means a device key or passkey tried to change a mailbox
+	// enrolled under a coordinator, which only the coordinator's key may.
+	ErrCoordinated = errors.New("routing: mailbox is under a coordinator")
 )
 
 // CurrentCoordinator returns the newest generation and its key, or ok=false if
@@ -88,18 +91,30 @@ func (s *Store) EnrollCoordinator(ctx context.Context, mailboxID []byte, gen uin
 	if err != nil {
 		return err
 	}
-	if !changed && m.Coordinated {
+	if !changed && m.Coordinated && !m.holdsDeviceAuthority() {
 		return nil
 	}
 	prevCoord, prevMb := s.data.Coordinator, *m
 	s.data.Coordinator = &Coordinator{Generation: gen, Key: bytes.Clone(key)}
 	m.Coordinated = true
+	// The coordinator is now the mailbox's only authority (security review
+	// 2026-11-19, H1): the owner-change key and passkey a device registered
+	// are dropped, so a device that kept them, or a synced passkey, can't
+	// re-own, pause or recover the mailbox. Enrolling again clears what an
+	// older edge left.
+	m.OwnerChangeKey, m.PasskeyKey = nil, nil
 	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		s.data.Coordinator, *m = prevCoord, prevMb
 		return err
 	}
 	return nil
+}
+
+// holdsDeviceAuthority reports whether a device-held key other than the
+// address and mailbox keys is still registered on m.
+func (m *Mailbox) holdsDeviceAuthority() bool {
+	return len(m.OwnerChangeKey) > 0 || len(m.PasskeyKey) > 0
 }
 
 // checkGeneration reports whether gen/key moves the coordinator on. Caller holds
@@ -201,4 +216,34 @@ func (s *Store) RotateSigningKey(ctx context.Context, mailboxID []byte, key ed25
 		return ErrSameSigningKey
 	}
 	return s.update(ctx, []*Mailbox{m}, func(m *Mailbox) { m.SigningKey = bytes.Clone(key) })
+}
+
+// ErrSameDecryptionKey means a rotation named the key the mailbox already has.
+var ErrSameDecryptionKey = errors.New("routing: that is already the mailbox's decryption key")
+
+// RotateDecryptionKey replaces a coordinated mailbox's X25519 decryption key
+// (security review 2026-11-19, M1: removing a team admin, who could have read
+// the old private key, rotates it). Mail stored from now on seals to the new
+// key; mail already stored stays sealed to the old one, which the coordinator
+// keeps. ErrNoMailbox if the mailbox is absent, ErrNotCoordinated if it isn't
+// enrolled.
+func (s *Store) RotateDecryptionKey(ctx context.Context, mailboxID, key []byte) error {
+	if len(key) != 32 {
+		return errors.New("routing: decryption key must be 32 bytes")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return err
+	}
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	switch {
+	case !ok:
+		return ErrNoMailbox
+	case !m.Coordinated:
+		return ErrNotCoordinated
+	case bytes.Equal(m.DecryptionKey, key):
+		return ErrSameDecryptionKey
+	}
+	return s.update(ctx, []*Mailbox{m}, func(m *Mailbox) { m.DecryptionKey = bytes.Clone(key) })
 }

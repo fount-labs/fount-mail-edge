@@ -145,54 +145,60 @@ func (a *API) putRouting() http.Handler {
 			writeErr(w, http.StatusBadRequest, "bad request body")
 			return
 		}
-		if req.Version == 0 {
-			writeErr(w, http.StatusBadRequest, "version must be >= 1")
-			return
-		}
-		if len(req.Owners) > maxOwners {
-			writeErr(w, http.StatusBadRequest, "too many owners")
-			return
-		}
-		for _, o := range req.Owners {
-			if strings.TrimSpace(o) == "" {
-				writeErr(w, http.StatusBadRequest, "empty owner address")
-				return
-			}
-		}
-		if len(req.Proofs) > maxOwners {
-			writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
-			return
-		}
-		proofs := make([]routing.ConnectProof, 0, len(req.Proofs))
-		for _, p := range req.Proofs {
-			issued, mac, ok := routing.ParseConnectID(p.MessageID, a.mailDomain)
-			if !ok || a.mailDomain == "" {
-				writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
-				return
-			}
-			proofs = append(proofs, routing.ConnectProof{Owner: p.Owner, IssuedAt: issued, MAC: mac})
-		}
-		err := a.mutator.SetOwners(r.Context(), mailboxID, req.Version, req.Owners, proofs...)
-		switch {
-		case errors.Is(err, routing.ErrConnectProof):
-			writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
-			return
-		case errors.Is(err, routing.ErrStaleVersion):
-			writeErr(w, http.StatusConflict, "routing version did not advance")
-			return
-		case errors.Is(err, routing.ErrOwnerLimit):
-			w.Header().Set("Retry-After", "3600")
-			writeErr(w, http.StatusTooManyRequests, "new-owner limit reached, retry later")
-			return
-		case errors.Is(err, routing.ErrNoMailbox):
-			writeErr(w, http.StatusNotFound, "no such mailbox")
-			return
-		case err != nil:
-			writeFailure(w, err, "write routing failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"version": req.Version, "owners": len(req.Owners)})
+		a.writeOwners(w, r, mailboxID, req)
 	})
+}
+
+// writeOwners checks and writes an owner list for PUT /routing and POST
+// /coordinator/routing, and answers the request.
+func (a *API) writeOwners(w http.ResponseWriter, r *http.Request, mailboxID []byte, req routingRequest) {
+	if req.Version == 0 {
+		writeErr(w, http.StatusBadRequest, "version must be >= 1")
+		return
+	}
+	if len(req.Owners) > maxOwners {
+		writeErr(w, http.StatusBadRequest, "too many owners")
+		return
+	}
+	for _, o := range req.Owners {
+		if strings.TrimSpace(o) == "" {
+			writeErr(w, http.StatusBadRequest, "empty owner address")
+			return
+		}
+	}
+	if len(req.Proofs) > maxOwners {
+		writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
+		return
+	}
+	proofs := make([]routing.ConnectProof, 0, len(req.Proofs))
+	for _, p := range req.Proofs {
+		issued, mac, ok := routing.ParseConnectID(p.MessageID, a.mailDomain)
+		if !ok || a.mailDomain == "" {
+			writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
+			return
+		}
+		proofs = append(proofs, routing.ConnectProof{Owner: p.Owner, IssuedAt: issued, MAC: mac})
+	}
+	err := a.mutator.SetOwners(r.Context(), mailboxID, req.Version, req.Owners, proofs...)
+	switch {
+	case errors.Is(err, routing.ErrConnectProof):
+		writeErr(w, http.StatusUnprocessableEntity, errConnectProof)
+		return
+	case errors.Is(err, routing.ErrStaleVersion):
+		writeErr(w, http.StatusConflict, "routing version did not advance")
+		return
+	case errors.Is(err, routing.ErrOwnerLimit):
+		w.Header().Set("Retry-After", "3600")
+		writeErr(w, http.StatusTooManyRequests, "new-owner limit reached, retry later")
+		return
+	case errors.Is(err, routing.ErrNoMailbox):
+		writeErr(w, http.StatusNotFound, "no such mailbox")
+		return
+	case err != nil:
+		writeFailure(w, err, "write routing failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"version": req.Version, "owners": len(req.Owners)})
 }
 
 // renewEntitlement handles POST /entitlement: the address key (guard verified)
