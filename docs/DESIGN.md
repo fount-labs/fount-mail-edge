@@ -188,6 +188,23 @@ or passkey keys). From the next request on, the old key gets 401 on every addres
   worker must be enrolled (409 `not_coordinated`); a bad proof is 403; the current key again
   is 409. Answers `{"mailbox_id", "signing_key_sha256"}` (hex).
 
+**Key custody on an enrolled mailbox** (security review 2026-11-19, H1 and M1). Once a
+mailbox is enrolled, the coordinator is its only authority. Enrolling drops the mailbox's
+owner-change key and passkey, and on an enrolled mailbox `POST /recover`, `POST /pause` (after
+the passkey verifies), `PUT /routing`, `POST /connect` and `POST /address` answer 409
+`coordinator_only`, whatever key signs them. The coordinator acts through its own routes, each
+signed by the current coordinator key with `Fount-Generation` and refusing a worker that isn't
+enrolled (409 `not_coordinated`):
+
+- `POST /coordinator/decryption-key`, body `{"mailbox_id": "<hex>", "decryption_key": "<base64
+  X25519 public key>"}`. Mail stored from then on seals to the new key; mail already stored stays
+  sealed to the old one, which the coordinator keeps. The current key again is 409. Answers
+  `{"mailbox_id", "decryption_key_sha256"}`.
+- `POST /coordinator/routing`, body `{"mailbox_id": "<hex>", "version", "owners", "proofs"}`,
+  checked and answered as `PUT /routing`.
+- `POST /coordinator/pause`, body `{"mailbox_id": "<hex>", "paused": true|false}`: the same
+  pause as `POST /pause`. Answers `{"mailbox_id", "paused"}`.
+
 **Team invites** (decision 26). `/send` goes only to a worker's proven owners, and someone being
 invited isn't one yet. So the coordinator mails an invite from a worker's address on its own
 route, where its generation key stands in for the owner proof. The edge keeps it narrow: the

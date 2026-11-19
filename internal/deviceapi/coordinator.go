@@ -53,7 +53,27 @@ const (
 	codeGenerationRequired = "generation_required" // the mailbox is enrolled; send Fount-Generation
 	codeGenerationConflict = "generation_conflict" // this generation already has another key
 	codeNotCoordinated     = "not_coordinated"     // the mailbox isn't enrolled under a coordinator
+	codeCoordinatorOnly    = "coordinator_only"    // the mailbox is enrolled; only the coordinator's key changes it
 )
+
+// coordinatorOnly is the refusal of a device-key or passkey change on an
+// enrolled mailbox. Once a mailbox is under a coordinator, the coordinator is
+// its only key holder (security review 2026-11-19, H1): a passkey, owner-change
+// key or mailbox key some device kept from before enrollment can't recover,
+// pause, re-own, connect or add addresses through it.
+func coordinatorOnly() *apiError {
+	return &apiError{http.StatusConflict, codeCoordinatorOnly, "this mailbox is under a coordinator; only the coordinator's key changes it"}
+}
+
+// refuseCoordinated answers coordinatorOnly and reports true when mid is
+// enrolled.
+func (a *API) refuseCoordinated(w http.ResponseWriter, mid []byte) bool {
+	if a.coord == nil || !a.coord.Coordinated(mid) {
+		return false
+	}
+	writeAPIError(w, coordinatorOnly())
+	return true
+}
 
 // apiError is a refusal with a status and a stable code.
 type apiError struct {
@@ -126,14 +146,19 @@ func fenced(class signer) bool {
 }
 
 // fence refuses a call on an enrolled mailbox that doesn't name the current
-// generation. guard runs it after the signature verifies.
-func (a *API) fence(r *http.Request) *apiError {
+// generation, and any owner-change or mailbox-key call on one at all: those
+// keys stay with devices, so on an enrolled mailbox they are no authority
+// (coordinatorOnly). guard runs it after the signature verifies.
+func (a *API) fence(r *http.Request, class signer) *apiError {
 	if a.coord == nil {
 		return nil
 	}
 	mid, ok := callerMailbox(r)
 	if !ok || !a.coord.Coordinated(mid) {
 		return nil
+	}
+	if class == sigOwnerChange || class == sigMailbox {
+		return coordinatorOnly()
 	}
 	cur, _, _ := a.coord.CurrentCoordinator()
 	v := r.Header.Get(generationHeader)
