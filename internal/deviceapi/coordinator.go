@@ -359,3 +359,59 @@ func (a *API) postSigningKey() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"mailbox_id": hex.EncodeToString(mid), "signing_key_sha256": hex.EncodeToString(sum[:])})
 	})
 }
+
+// ChangesFeed lists coordinated mailboxes changed since a cursor. routing.Store
+// implements it, and New picks it up from the Mutator.
+type ChangesFeed interface {
+	Changes(cursor string, limit int) (routing.ChangesPage, error)
+}
+
+// defaultChanges and maxChanges size one page of POST /coordinator/changes.
+const (
+	defaultChanges = 500
+	maxChanges     = 1000
+)
+
+type changesRequest struct {
+	Cursor string `json:"cursor"`
+	Limit  int    `json:"limit"`
+}
+
+type changeEntry struct {
+	MailboxID string `json:"mailbox_id"`
+	Changed   uint64 `json:"changed"`
+	Sequence  uint64 `json:"sequence"`
+	Paused    bool   `json:"paused"`
+	Lapsed    bool   `json:"lapsed"`
+}
+
+// postChanges handles POST /coordinator/changes: the mailboxes enrolled under a
+// coordinator that changed since the cursor, across all of them in one request
+// (new mail moves a mailbox's sequence). It's a POST so the cursor is in the
+// signed body.
+func (a *API) postChanges() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req changesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Limit < 0 || req.Limit > maxChanges || len(req.Cursor) > 64 {
+			writeErr(w, http.StatusBadRequest, "bad request body")
+			return
+		}
+		if req.Limit == 0 {
+			req.Limit = defaultChanges
+		}
+		page, err := a.changes.Changes(req.Cursor, req.Limit)
+		if errors.Is(err, routing.ErrBadCursor) {
+			writeErr(w, http.StatusBadRequest, "bad cursor")
+			return
+		}
+		if err != nil {
+			writeFailure(w, err, "changes failed")
+			return
+		}
+		out := make([]changeEntry, len(page.Changes))
+		for i, c := range page.Changes {
+			out[i] = changeEntry{MailboxID: hex.EncodeToString(c.MailboxID), Changed: c.Changed, Sequence: c.Sequence, Paused: c.Paused, Lapsed: c.Lapsed}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"changes": out, "cursor": page.Cursor, "more": page.More, "reset": page.Reset})
+	})
+}

@@ -184,6 +184,21 @@ or passkey keys). From the next request on, the old key gets 401 on every addres
   worker must be enrolled (409 `not_coordinated`); a bad proof is 403; the current key again
   is 409. Answers `{"mailbox_id", "signing_key_sha256"}` (hex).
 
+**Changes feed.** One coordinator watches all its workers in one request instead of polling
+each. Every write of the routing object bumps its version, and each mailbox record keeps the
+version of the last write that changed it: new mail (its sequence), pause, lapse, keys, owners,
+entitlement, enrollment. Both live in the routing object, so the feed survives reboots and is
+the same from any edge instance. A cursor is `<epoch hex>.<version>`; a restore from backup
+picks a new epoch, so a cursor from before it (or from ahead of the object) answers
+`reset: true` and lists from the start. Message deletions (void, expiry) aren't changes.
+
+- `POST /coordinator/changes`, signed by the current coordinator key with `Fount-Generation`,
+  body `{"cursor": "<from the last page, or empty>", "limit": n}` (default 500, max 1000).
+  Answers `{"changes": [{"mailbox_id", "changed", "sequence", "paused", "lapsed"}],
+  "cursor", "more", "reset"}`, enrolled workers only, oldest change first. One write that
+  changed several workers isn't split across pages, so a page can run past `limit`. Pass
+  `cursor` back; `more` says another page is waiting now.
+
 ## §9 Stored messages
 
 The object is `FME1` version 3 (`internal/store/message.go`). Inside the encryption are the

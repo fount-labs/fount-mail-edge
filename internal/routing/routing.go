@@ -76,6 +76,10 @@ type Data struct {
 
 	// Coordinator is the newest Cloud coordinator generation (coordinator.go).
 	Coordinator *Coordinator `json:"coordinator,omitempty"`
+
+	// Epoch names this line of versions for the changes feed (changes.go). A
+	// restore from a backup picks a new one, since versions go back.
+	Epoch []byte `json:"epoch,omitempty"`
 }
 
 // Mailbox is one mailbox's routing record (design §4 "On the server"). In M2 the
@@ -112,6 +116,10 @@ type Mailbox struct {
 	// entitlement's expiry, and the worker can't send. LapsedAt is the last change.
 	Lapsed   bool  `json:"lapsed,omitempty"`
 	LapsedAt int64 `json:"lapsed_at,omitempty"`
+
+	// Changed is the routing Version of the last write that changed this record,
+	// for the changes feed (changes.go).
+	Changed uint64 `json:"changed,omitempty"`
 
 	// The license's owner state (M3, §10), kept on the handle's record only, because
 	// an owner is the license's and a new worker copies its owners. See owners.go.
@@ -195,7 +203,7 @@ func Initialize(ctx context.Context, blobs Blobs, routingDataKey []byte) error {
 	if err != nil {
 		return err
 	}
-	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}}}
+	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}, Epoch: newEpoch()}}
 	switch _, err := blobs.Get(ctx, ObjectKey); {
 	case err == nil:
 		return ErrObjectExists
@@ -525,9 +533,12 @@ func (s *Store) NextSequence(ctx context.Context, mailboxID []byte) (uint64, err
 	if !ok {
 		return 0, fmt.Errorf("routing: no mailbox %x for sequence", mailboxID)
 	}
+	prevChanged := m.Changed
 	m.Sequence++
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		m.Sequence-- // keep memory and S3 in step if the write failed
+		m.Changed = prevChanged
 		return 0, err
 	}
 	return m.Sequence, nil
@@ -619,6 +630,7 @@ func (s *Store) put(ctx context.Context, m *Mailbox) error {
 	key := hex.EncodeToString(m.MailboxID)
 	prev := s.data.Mailboxes[key]
 	s.data.Mailboxes[key] = m
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		if prev != nil {
 			s.data.Mailboxes[key] = prev
@@ -710,6 +722,7 @@ func (s *Store) update(ctx context.Context, records []*Mailbox, change func(*Mai
 	for i, m := range records {
 		prev[i] = *m
 		change(m)
+		s.touch(m)
 	}
 	if err := s.persist(ctx); err != nil {
 		for i, m := range records {

@@ -94,6 +94,7 @@ func (s *Store) EnrollCoordinator(ctx context.Context, mailboxID []byte, gen uin
 	prevCoord, prevMb := s.data.Coordinator, *m
 	s.data.Coordinator = &Coordinator{Generation: gen, Key: bytes.Clone(key)}
 	m.Coordinated = true
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		s.data.Coordinator, *m = prevCoord, prevMb
 		return err

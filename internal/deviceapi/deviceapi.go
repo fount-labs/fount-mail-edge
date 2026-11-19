@@ -164,6 +164,7 @@ var routes = map[string]route{
 	"POST /sent/query":              {sigAddress, "M4", "Says whether the worker sent each Message-ID, from durable send records"},
 	"POST /coordinator/lapse":       {sigCoordinator, "M4", "Pauses or resumes an enrolled worker for a lapsed payment: mail is held, not bounced"},
 	"POST /coordinator/signing-key": {sigCoordinator, "M4", "Rotates an enrolled worker's address signing key; the old key stops working"},
+	"POST /coordinator/changes":     {sigCoordinator, "M4", "Lists enrolled workers changed since a cursor, across all of them"},
 }
 
 // built are the routes after M2 that are built, so the shim forwards them.
@@ -178,6 +179,7 @@ var built = map[string]bool{
 	"POST /sent/query":              true,
 	"POST /coordinator/lapse":       true,
 	"POST /coordinator/signing-key": true,
+	"POST /coordinator/changes":     true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -277,6 +279,7 @@ type API struct {
 	sentLookup    SentLookup        // from the Sender; nil leaves POST /sent/query 501
 	lapser        Lapser            // from the Mutator; nil leaves POST /coordinator/lapse 501
 	rotator       SigningKeyRotator // from the Mutator; nil leaves POST /coordinator/signing-key 501
+	changes       ChangesFeed       // from the Mutator; nil leaves POST /coordinator/changes 501
 	authority     ed25519.PublicKey
 }
 
@@ -313,6 +316,7 @@ func New(o Options) *API {
 	a.sentLookup, _ = o.Sender.(SentLookup)
 	a.lapser, _ = o.Mutator.(Lapser)
 	a.rotator, _ = o.Mutator.(SigningKeyRotator)
+	a.changes, _ = o.Mutator.(ChangesFeed)
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), fenced(r.by) && !unfenced[pattern], a.handler(pattern, r, mail, boots)))
 	}
@@ -363,6 +367,8 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.postLapse()
 	case a.coordinationLive() && a.rotator != nil && pattern == "POST /coordinator/signing-key":
 		return a.postSigningKey()
+	case a.coordinationLive() && a.changes != nil && pattern == "POST /coordinator/changes":
+		return a.postChanges()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h

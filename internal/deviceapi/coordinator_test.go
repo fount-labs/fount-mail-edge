@@ -366,3 +366,62 @@ func TestCoordinatorRotatesSigningKey(t *testing.T) {
 	other := createMbox(t, f.rt, "other@fountbox.com", "lic-2")
 	wantCode(t, rotate(c2, rotateBody(t, other.idHex, other.id, newPriv, newPub)), http.StatusConflict, codeNotCoordinated)
 }
+
+func (f *coordFixture) changes(c coordinatorKey, body string) (*httptest.ResponseRecorder, changesResponse) {
+	rec := f.serve(genRequest(f.t, c.priv, c.id, "POST", "/coordinator/changes", []byte(body), strconv.FormatUint(c.gen, 10)))
+	var out changesResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+type changesResponse struct {
+	Changes []changeEntry `json:"changes"`
+	Cursor  string        `json:"cursor"`
+	More    bool          `json:"more"`
+	Reset   bool          `json:"reset"`
+}
+
+func TestCoordinatorChanges(t *testing.T) {
+	f := newCoordFixture(t)
+	c1 := f.coordinator(1)
+	var mbs []mbox
+	for _, a := range []string{"a@fountbox.com", "b@fountbox.com", "c@fountbox.com"} {
+		mb := createMbox(t, f.rt, a, "lic-"+a)
+		wantCode(t, f.enroll(mb, c1), http.StatusOK, "")
+		mbs = append(mbs, mb)
+	}
+	loose := createMbox(t, f.rt, "loose@fountbox.com", "lic-x")
+
+	rec, p := f.changes(c1, `{"limit":2}`)
+	wantCode(t, rec, http.StatusOK, "")
+	if !p.Reset || !p.More || len(p.Changes) != 2 {
+		t.Fatalf("first page %s", rec.Body)
+	}
+	rec, p2 := f.changes(c1, `{"cursor":"`+p.Cursor+`","limit":2}`)
+	if p2.Reset || p2.More || len(p2.Changes) != 1 {
+		t.Fatalf("second page %s", rec.Body)
+	}
+
+	if _, err := f.rt.NextSequence(context.Background(), mbs[0].id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.rt.NextSequence(context.Background(), loose.id); err != nil {
+		t.Fatal(err)
+	}
+	f.reboot()
+	rec, p3 := f.changes(c1, `{"cursor":"`+p2.Cursor+`"}`)
+	if len(p3.Changes) != 1 || p3.Changes[0].MailboxID != mbs[0].idHex || p3.Changes[0].Sequence != 1 {
+		t.Fatalf("after mail %s", rec.Body)
+	}
+
+	// Only the current coordinator reads it, at its generation.
+	wantCode(t, f.serve(genRequest(t, mbs[0].sign, mbs[0].idHex, "POST", "/coordinator/changes", []byte(`{}`), "1")), http.StatusUnauthorized, "")
+	c2 := f.coordinator(2)
+	wantCode(t, f.claim(c2), http.StatusOK, "")
+	rec, _ = f.changes(c1, `{}`)
+	wantCode(t, rec, http.StatusConflict, codeStaleGeneration)
+	rec, _ = f.changes(c2, `{"cursor":"nope"}`)
+	wantCode(t, rec, http.StatusBadRequest, "")
+	rec, _ = f.changes(c2, `{"limit":5000}`)
+	wantCode(t, rec, http.StatusBadRequest, "")
+}
