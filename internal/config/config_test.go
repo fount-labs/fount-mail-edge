@@ -457,3 +457,25 @@ func TestCheckBootDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestCoordinatorAuthorityKey(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	c, err := Load()
+	if err != nil || c.CoordinatorAuthorityKey != nil {
+		t.Fatalf("unset: %v %x", err, c.CoordinatorAuthorityKey)
+	}
+	key := make([]byte, ed25519.PublicKeySize)
+	key[0] = 7
+	t.Setenv("COORDINATOR_AUTHORITY_KEY", base64.StdEncoding.EncodeToString(key))
+	if c, err = Load(); err != nil || !ed25519.PublicKey(key).Equal(c.CoordinatorAuthorityKey) {
+		t.Fatalf("set: %v %x", err, c.CoordinatorAuthorityKey)
+	}
+	for _, bad := range []string{"not base64!", base64.StdEncoding.EncodeToString(make([]byte, 44))} {
+		t.Setenv("COORDINATOR_AUTHORITY_KEY", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COORDINATOR_AUTHORITY_KEY") {
+			t.Fatalf("%q: %v", bad, err)
+		}
+	}
+}

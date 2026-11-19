@@ -274,6 +274,8 @@ func run(m mode) error {
 		RecoveryOrigin: cfg.RecoveryOrigin,
 		Sender:         sender,
 		Connector:      connector,
+
+		CoordinatorAuthority: cfg.CoordinatorAuthorityKey,
 	})
 	late.set(api)
 

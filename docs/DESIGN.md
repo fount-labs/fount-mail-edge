@@ -111,6 +111,37 @@ time. The response gives only when it expires; the device learns the Message-ID 
 owner's reply, and presents it on `PUT /routing` as that owner's proof. The edge never reads
 the reply. A proof is good for 24 hours, for that worker and owner only.
 
+### Cloud coordinator
+
+These routes serve Fount's Cloud coordinator, which runs a worker's mail in an enclave. Errors
+are `{"error": "...", "code": "..."}`, and callers branch on `code`.
+
+**Generations** (fount launch-plan decision 18). One coordinator runs at a time. The Cloud vault
+signs a certificate binding a generation number to that coordinator's own Ed25519 key, and
+moves the number on with every restore and upgrade. The certificate is
+`b64url(json) "." b64url(sig)`, where the JSON is
+`{"generation": N, "coordinator_key": "<base64 32 bytes>", "issued_at": unix}` and the
+signature is Ed25519 over `"fount-coordinator-generation/v1\n" || json`, by the key in
+`COORDINATOR_AUTHORITY_KEY`. Without that key the coordinator routes answer 501. The edge keeps
+the highest generation it has seen in the routing object, so a reboot doesn't forget it.
+
+- `POST /coordinator/generation`, body `{"certificate": "..."}`, signed by the key the
+  certificate names, with `Fount-Key-Id` set to that key's hex. It moves the edge to the
+  certificate's generation. A new coordinator calls it once at start. Answers
+  `{"generation": N}`. An older generation is 409 `stale_generation`, and the current one with
+  another key is 409 `generation_conflict`.
+- `PUT /coordinator`, the same body, signed by the mailbox's address key (`Fount-Key-Id` is the
+  mailbox id). It enrolls the mailbox under the certificate's generation, moving the edge on if
+  it's newer. Repeating it is a no-op. Answers `{"mailbox_id": "<hex>", "generation": N}`.
+
+Once a mailbox is enrolled, every call signed by its address, mailbox or owner-change key must
+carry `Fount-Generation: <N>`, and the signed string gains `"\n<N>"`. A missing header is 409
+`generation_required`, an older generation 409 `stale_generation`, a newer one than the edge has
+seen 409 `unknown_generation`. The passkey routes aren't fenced. The header stops a stale
+coordinator, not a key holder: anyone with the address key can name the generation. The
+coordinator routes below are signed by the current generation's key, `Fount-Key-Id` set to its
+hex, and any other key that signs one gets 409 `stale_generation`.
+
 ## §9 Stored messages
 
 The object is `FME1` version 3 (`internal/store/message.go`). Inside the encryption are the

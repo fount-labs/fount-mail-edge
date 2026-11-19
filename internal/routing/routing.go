@@ -73,6 +73,9 @@ const (
 type Data struct {
 	Version   int                 `json:"version"`
 	Mailboxes map[string]*Mailbox `json:"mailboxes"` // hex(mailbox id) -> record
+
+	// Coordinator is the newest Cloud coordinator generation (coordinator.go).
+	Coordinator *Coordinator `json:"coordinator,omitempty"`
 }
 
 // Mailbox is one mailbox's routing record (design §4 "On the server"). In M2 the
@@ -98,6 +101,11 @@ type Mailbox struct {
 	// (§12). Mail still arrives and can still be fetched. PausedAt is the last change.
 	Paused   bool  `json:"paused,omitempty"`
 	PausedAt int64 `json:"paused_at,omitempty"`
+
+	// Coordinated puts the mailbox under the Cloud coordinator: its per-mailbox
+	// Device API calls must name the current generation, and the coordinator's
+	// own key may act on it (coordinator.go).
+	Coordinated bool `json:"coordinated,omitempty"`
 
 	// The license's owner state (M3, §10), kept on the handle's record only, because
 	// an owner is the license's and a new worker copies its owners. See owners.go.

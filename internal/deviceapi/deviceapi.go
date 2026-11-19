@@ -14,7 +14,11 @@
 //
 //	<METHOD>\n<PATH>\n<hex sha256(body)>\n<unix-seconds timestamp>\n<nonce>
 //
-// Headers: Fount-Key-Id, Fount-Timestamp, Fount-Nonce, Fount-Signature (base64).
+// followed by "\n<generation>" when the request carries Fount-Generation
+// (coordinator.go).
+//
+// Headers: Fount-Key-Id, Fount-Timestamp, Fount-Nonce, Fount-Signature (base64),
+// and optionally Fount-Generation.
 package deviceapi
 
 import (
@@ -72,6 +76,12 @@ const (
 	sigAddress     signer = "address"
 	sigPasskey     signer = "passkey"
 	sigStripe      signer = "stripe-email-code"
+	// sigCoordinator is the current coordinator generation's key; Fount-Key-Id
+	// is that key's hex (coordinator.go).
+	sigCoordinator signer = "coordinator"
+	// sigCoordinatorClaim is any key, proving possession of the key a generation
+	// certificate in the body names.
+	sigCoordinatorClaim signer = "coordinator-claim"
 )
 
 // KeyResolver returns the Ed25519 public key registered under keyID for the given
@@ -123,6 +133,10 @@ type route struct {
 	desc  string
 }
 
+// unfenced exempts a per-mailbox route from the generation fence, because it's
+// how a generation is presented in the first place.
+var unfenced = map[string]bool{"PUT /coordinator": true}
+
 // m2routes is the authoritative Device API surface. Keep it in sync with design
 // §8's table; adding a row here is how a call's signer requirement is locked.
 var routes = map[string]route{
@@ -143,14 +157,21 @@ var routes = map[string]route{
 	"POST /connect":      {sigOwnerChange, "M3", "Mails a would-be owner from the worker; their reply proves them on PUT /routing"},
 	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
 	"GET /pause/{id}":    {sigNone, "M3", "Issues a pause challenge bound to a worker and a state (§12)"},
+
+	// Cloud coordinator (fount launch-plan M).
+	"PUT /coordinator":             {sigAddress, "M4", "Enrolls the mailbox under a coordinator generation (certificate in the body)"},
+	"POST /coordinator/generation": {sigCoordinatorClaim, "M4", "Moves the edge to a newer coordinator generation"},
 }
 
-// builtM3 are the M3 routes that are built, so the shim forwards them.
-var builtM3 = map[string]bool{
+// built are the routes after M2 that are built, so the shim forwards them.
+var built = map[string]bool{
 	"GET /pause/{id}": true,
 	"POST /pause":     true,
 	"POST /send":      true,
 	"POST /connect":   true,
+
+	"PUT /coordinator":             true,
+	"POST /coordinator/generation": true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -164,7 +185,7 @@ type Route struct {
 func Routes() []Route {
 	out := make([]Route, 0, len(routes))
 	for p, r := range routes {
-		out = append(out, Route{Pattern: p, Phase: r.phase, Public: r.phase == "M2" || builtM3[p]})
+		out = append(out, Route{Pattern: p, Phase: r.phase, Public: r.phase == "M2" || built[p]})
 	}
 	slices.SortFunc(out, func(a, b Route) int { return strings.Compare(a.Pattern, b.Pattern) })
 	return out
@@ -217,6 +238,11 @@ type Options struct {
 	// Connector backs POST /connect. nil, sending off, answers 503.
 	Connector Connector
 
+	// CoordinatorAuthority is the Cloud vault's Ed25519 public key that signs
+	// coordinator generation certificates. nil leaves the coordinator routes 501,
+	// so no mailbox can be enrolled.
+	CoordinatorAuthority ed25519.PublicKey
+
 	// HandleLimiter throttles every route that shows whether an address is taken
 	// (§8), keyed by the caller's license so one subscription can't enumerate the
 	// namespace. nil builds a per-enclave default.
@@ -241,6 +267,8 @@ type API struct {
 	handleLimiter *limit.Limiter
 	sender        Sender
 	connector     Connector
+	coord         Coordination // from the Mutator; nil leaves the coordinator routes 501
+	authority     ed25519.PublicKey
 }
 
 func New(o Options) *API {
@@ -259,6 +287,7 @@ func New(o Options) *API {
 		handleLimiter: o.HandleLimiter,
 		sender:        o.Sender,
 		connector:     o.Connector,
+		authority:     o.CoordinatorAuthority,
 	}
 	if a.handleLimiter == nil {
 		a.handleLimiter = limit.New(5, 30) // 5 checks/sec, burst 30, per license
@@ -271,8 +300,9 @@ func New(o Options) *API {
 	a.keylog, _ = o.Store.(store.KeyLog)  // same; nil leaves POST /recover 501
 	a.gaps, _ = o.Store.(store.GapReader) // same
 	a.pauser, _ = o.Mutator.(Pauser)
+	a.coord, _ = o.Mutator.(Coordination)
 	for pattern, r := range routes {
-		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), a.handler(pattern, r, mail, boots)))
+		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), fenced(r.by) && !unfenced[pattern], a.handler(pattern, r, mail, boots)))
 	}
 	return a
 }
@@ -311,6 +341,10 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.sendMail()
 	case pattern == "POST /connect":
 		return a.connect()
+	case a.coordinationLive() && pattern == "PUT /coordinator":
+		return a.putCoordinator()
+	case a.coordinationLive() && pattern == "POST /coordinator/generation":
+		return a.postGeneration()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h
@@ -340,7 +374,7 @@ func bodyLimit(pattern string) int {
 	return maxBodyBytes
 }
 
-func (a *API) guard(rt route, limit int, next http.Handler) http.Handler {
+func (a *API) guard(rt route, limit int, fence bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
 		if err != nil || len(body) > limit {
@@ -354,9 +388,20 @@ func (a *API) guard(rt route, limit int, next http.Handler) http.Handler {
 			return
 		}
 		ctx, err := a.authorize(rt.by, r, body)
-		if err != nil {
+		var ae *apiError
+		switch {
+		case errors.As(err, &ae):
+			writeAPIError(w, ae)
+			return
+		case err != nil:
 			writeErr(w, nonceStatus(err), err.Error())
 			return
+		}
+		if fence {
+			if e := a.fence(r); e != nil {
+				writeAPIError(w, e)
+				return
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -430,7 +475,13 @@ func (a *API) verifySignature(class signer, r *http.Request, body []byte, ts int
 	if err != nil {
 		return nil, fmt.Errorf("bad signature encoding")
 	}
-	canonical := []byte(canonicalString(r.Method, r.URL.Path, body, ts, nonce))
+	gen := r.Header.Get(generationHeader)
+	if gen != "" {
+		if _, err := strconv.ParseUint(gen, 10, 64); err != nil {
+			return nil, fmt.Errorf("bad %s", generationHeader)
+		}
+	}
+	canonical := []byte(canonicalString(r.Method, r.URL.Path, body, ts, nonce, gen))
 
 	if class == sigEntitlement || class == sigNewKeys {
 		claims, err := a.verifyEntitlement(r, canonical, sig)
@@ -438,6 +489,9 @@ func (a *API) verifySignature(class signer, r *http.Request, body []byte, ts int
 			return nil, err
 		}
 		return context.WithValue(r.Context(), claimsCtxKey{}, claims), nil
+	}
+	if class == sigCoordinator || class == sigCoordinatorClaim {
+		return a.verifyCoordinator(class, r, canonical, sig)
 	}
 
 	keyID := r.Header.Get("Fount-Key-Id")
@@ -478,9 +532,13 @@ func (a *API) verifyEntitlement(r *http.Request, canonical, sig []byte) (*entitl
 	return claims, nil
 }
 
-func canonicalString(method, path string, body []byte, ts int64, nonce string) string {
+func canonicalString(method, path string, body []byte, ts int64, nonce, gen string) string {
 	sum := sha256.Sum256(body)
-	return fmt.Sprintf("%s\n%s\n%s\n%d\n%s", method, path, hex.EncodeToString(sum[:]), ts, nonce)
+	s := fmt.Sprintf("%s\n%s\n%s\n%d\n%s", method, path, hex.EncodeToString(sum[:]), ts, nonce)
+	if gen != "" {
+		s += "\n" + gen
+	}
+	return s
 }
 
 func (a *API) stub(pattern string, rt route) http.Handler {
