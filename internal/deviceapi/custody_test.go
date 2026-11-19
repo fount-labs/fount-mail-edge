@@ -119,17 +119,15 @@ func TestCoordinatedMailboxRefusesPasskeyPause(t *testing.T) {
 	}
 }
 
-func TestCoordinatedMailboxRefusesOwnerChangeAndMailboxKeys(t *testing.T) {
+func TestCoordinatedMailboxRefusesOwnerChangeKey(t *testing.T) {
 	f, mb, c1 := custodyFixture(t)
 	wantCode(t, f.enroll(mb, c1), http.StatusOK, "")
 	routingBody, _ := json.Marshal(map[string]any{"version": 9, "owners": []string{"attacker@evil.example"}})
 	connect, _ := json.Marshal(map[string]string{"address": "worker@fountbox.com", "owner": "attacker@evil.example"})
-	address, _ := json.Marshal(childBody(t, "w3.worker@fountbox.com", mb.mailbox))
 	try := func(mb mbox, status int, code string) {
 		t.Helper()
 		wantCode(t, f.serve(genRequest(t, mb.owner, mb.idHex, "PUT", "/routing", routingBody, "1")), status, code)
 		wantCode(t, f.serve(genRequest(t, mb.owner, mb.idHex, "POST", "/connect", connect, "1")), status, code)
-		wantCode(t, f.serve(genRequest(t, mb.mailbox, mb.idHex, "POST", "/address", address, "1")), http.StatusConflict, codeCoordinatorOnly)
 		if snap, _ := f.rt.Snapshot(mb.id); snap.RoutingVersion == 9 {
 			t.Fatal("the owner-change key re-owned a coordinated mailbox")
 		}
@@ -204,4 +202,38 @@ func TestCoordinatorWritesRoutingAndPause(t *testing.T) {
 		t.Fatal("not paused")
 	}
 	wantCode(t, f.serve(genRequest(t, mb.sign, mb.idHex, "POST", "/coordinator/pause", pause, "1")), http.StatusUnauthorized, "")
+}
+
+// The device that made a handle keeps its mailbox key and adds more workers
+// under the handle after the handle's own address is enrolled. The key gets
+// nothing over the enrolled address: the new address is its own record, and
+// the enrolled one can't be added again.
+func TestMailboxKeyAddsWorkersUnderAnEnrolledHandle(t *testing.T) {
+	f, mb, c1 := custodyFixture(t)
+	wantCode(t, f.enroll(mb, c1), http.StatusOK, "")
+	before, _ := f.rt.Snapshot(mb.id)
+
+	child, _ := json.Marshal(childBody(t, "ap.worker@fountbox.com", mb.mailbox))
+	rec := f.serve(genRequest(t, mb.mailbox, mb.idHex, "POST", "/address", child, ""))
+	wantCode(t, rec, http.StatusCreated, "")
+	var out struct {
+		MailboxID string `json:"mailbox_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := hex.DecodeString(out.MailboxID)
+	if f.rt.Coordinated(id) {
+		t.Fatal("the new address came out enrolled")
+	}
+
+	again, _ := json.Marshal(childBody(t, "worker@fountbox.com", mb.mailbox))
+	if code := f.serve(genRequest(t, mb.mailbox, mb.idHex, "POST", "/address", again, "")).Code; code == http.StatusCreated {
+		t.Fatal("the mailbox key re-added the enrolled address")
+	}
+	after, _ := f.rt.Snapshot(mb.id)
+	if !bytes.Equal(after.SigningKey, before.SigningKey) || !bytes.Equal(after.DecryptionKey, before.DecryptionKey) ||
+		len(after.OwnerChangeKey) != 0 || len(after.PasskeyKey) != 0 || !after.Coordinated {
+		t.Fatal("adding an address changed the enrolled one")
+	}
 }
