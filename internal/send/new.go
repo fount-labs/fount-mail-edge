@@ -24,6 +24,7 @@ type Options struct {
 	Proven     ProofChecker   // required: routing.Store.OwnerProven
 	DoH        []string       // nil is DefaultDoH
 	Roots      *x509.CertPool // nil is the system roots; tests set their own
+	Records    SentRecords    // durable send records; nil keeps them in memory only
 }
 
 // New builds the send path: the edge's own checks (Policy) in front of an Outbox.
@@ -46,7 +47,8 @@ func New(o Options) (*Service, error) {
 			MailDomain: o.MailDomain,
 			Proven:     o.Proven,
 		}),
-		Out: out,
+		Out:     out,
+		Records: o.Records,
 	}, nil
 }
 

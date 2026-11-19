@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
@@ -138,8 +139,12 @@ type Config struct {
 	// coordinator generation certificates (fount launch-plan decision 18). It's
 	// public. Unset leaves the coordinator routes 501.
 	CoordinatorAuthorityKey ed25519.PublicKey
-	Dev                     bool
-	Secrets                 Secrets
+	// SentRetention is how long a worker's send records are kept after their
+	// last write (SENT_RETENTION_DAYS). It must cover how far back a Cloud
+	// coordinator restore can reach. Zero is sent.DefaultRetention.
+	SentRetention time.Duration
+	Dev           bool
+	Secrets       Secrets
 }
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
@@ -225,6 +230,13 @@ func load(core bool) (*Config, error) {
 	}
 	if err := c.loadCoordinator(); err != nil {
 		return nil, err
+	}
+	if v := os.Getenv("SENT_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 3650 {
+			return nil, fmt.Errorf("SENT_RETENTION_DAYS must be a whole number of days from 1 to 3650")
+		}
+		c.SentRetention = time.Duration(n) * 24 * time.Hour
 	}
 	if dev {
 		devSecrets(c)

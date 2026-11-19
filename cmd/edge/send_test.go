@@ -66,7 +66,7 @@ func TestSenderStaysOffUntilEveryGateOpens(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg, _ := sendConfig(t)
 			c.edit(cfg)
-			sender, st := newSender(cfg, c.rt)
+			sender, st := newSender(cfg, c.rt, nil)
 			if sender != nil || !strings.HasPrefix(st.State, c.want) {
 				t.Fatalf("sender=%v state=%q, want off %q", sender != nil, st.State, c.want)
 			}
@@ -76,7 +76,7 @@ func TestSenderStaysOffUntilEveryGateOpens(t *testing.T) {
 
 func TestSenderUsesThePulledSendKeyset(t *testing.T) {
 	cfg, sk := sendConfig(t)
-	sender, st := newSender(cfg, fakeRouting{})
+	sender, st := newSender(cfg, fakeRouting{}, nil)
 	if sender == nil || st.State != "on" || st.Commitment != sk.Commitment() {
 		t.Fatalf("sender=%v state=%+v", sender != nil, st)
 	}

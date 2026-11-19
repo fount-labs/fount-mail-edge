@@ -161,6 +161,7 @@ var routes = map[string]route{
 	// Cloud coordinator (fount launch-plan M).
 	"PUT /coordinator":             {sigAddress, "M4", "Enrolls the mailbox under a coordinator generation (certificate in the body)"},
 	"POST /coordinator/generation": {sigCoordinatorClaim, "M4", "Moves the edge to a newer coordinator generation"},
+	"POST /sent/query":             {sigAddress, "M4", "Says whether the worker sent each Message-ID, from durable send records"},
 }
 
 // built are the routes after M2 that are built, so the shim forwards them.
@@ -172,6 +173,7 @@ var built = map[string]bool{
 
 	"PUT /coordinator":             true,
 	"POST /coordinator/generation": true,
+	"POST /sent/query":             true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -268,6 +270,7 @@ type API struct {
 	sender        Sender
 	connector     Connector
 	coord         Coordination // from the Mutator; nil leaves the coordinator routes 501
+	sentLookup    SentLookup   // from the Sender; nil leaves POST /sent/query 501
 	authority     ed25519.PublicKey
 }
 
@@ -301,6 +304,7 @@ func New(o Options) *API {
 	a.gaps, _ = o.Store.(store.GapReader) // same
 	a.pauser, _ = o.Mutator.(Pauser)
 	a.coord, _ = o.Mutator.(Coordination)
+	a.sentLookup, _ = o.Sender.(SentLookup)
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), fenced(r.by) && !unfenced[pattern], a.handler(pattern, r, mail, boots)))
 	}
@@ -339,6 +343,8 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.recover()
 	case a.sender != nil && pattern == "POST /send":
 		return a.sendMail()
+	case a.sentLookup != nil && pattern == "POST /sent/query":
+		return a.querySent()
 	case pattern == "POST /connect":
 		return a.connect()
 	case a.coordinationLive() && pattern == "PUT /coordinator":

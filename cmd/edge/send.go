@@ -56,7 +56,7 @@ func heldCommitment(cfg *config.Config) string {
 // newSender builds POST /send's Sender for the one-container edge from the
 // pulled send keyset. Each gate that isn't met leaves it nil, so the route stays
 // 501, and names itself in the state.
-func newSender(cfg *config.Config, rt sendRouting) (deviceapi.Sender, sendState) {
+func newSender(cfg *config.Config, rt sendRouting, records send.SentRecords) (deviceapi.Sender, sendState) {
 	st := sendState{Commitment: heldCommitment(cfg)}
 	off := func(why string) (deviceapi.Sender, sendState) {
 		st.State = "off: " + why
@@ -72,7 +72,7 @@ func newSender(cfg *config.Config, rt sendRouting) (deviceapi.Sender, sendState)
 	if err != nil {
 		return off(err.Error())
 	}
-	o.Directory, o.Proven = rt, rt.OwnerProven
+	o.Directory, o.Proven, o.Records = rt, rt.OwnerProven, records
 	svc, err := send.New(o)
 	if err != nil {
 		return off(err.Error())

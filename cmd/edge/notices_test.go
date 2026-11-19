@@ -50,7 +50,7 @@ func TestNoticesStayQueuedWithSendingOff(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg, _ := sendConfig(t)
 			edit(cfg)
-			sender, _ := newSender(cfg, fakeRouting{})
+			sender, _ := newSender(cfg, fakeRouting{}, nil)
 			q := &countingQueue{}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -67,7 +67,7 @@ func TestNoticesStayQueuedWithSendingOff(t *testing.T) {
 
 func TestNoticesDrainWhenSendingIsOn(t *testing.T) {
 	cfg, _ := sendConfig(t)
-	sender, st := newSender(cfg, fakeRouting{})
+	sender, st := newSender(cfg, fakeRouting{}, nil)
 	if st.State != "on" {
 		t.Fatalf("sending %q", st.State)
 	}
@@ -128,7 +128,7 @@ func TestConnectReachesMailSend(t *testing.T) {
 func TestNoConnectorWithSendingOff(t *testing.T) {
 	cfg, _ := sendConfig(t)
 	cfg.SendEnabled = false
-	sender, _ := newSender(cfg, fakeRouting{})
+	sender, _ := newSender(cfg, fakeRouting{}, nil)
 	if c := newConnector(cfg, transmitterOf(sender), connectRouting{}, nil); c != nil {
 		t.Fatal("a connector with sending off")
 	}

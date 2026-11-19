@@ -142,6 +142,23 @@ coordinator, not a key holder: anyone with the address key can name the generati
 coordinator routes below are signed by the current generation's key, `Fount-Key-Id` set to its
 hex, and any other key that signs one gets 409 `stale_generation`.
 
+**Sent records** (decision 14). Every `POST /send` is recorded per worker and Message-ID in S3,
+under `edge/sent/`, sealed with a key derived from the routing data key, so S3 sees neither
+the Message-ID nor the recipients. Before delivery starts the record marks the recipients being
+tried `unknown`; afterwards it holds their outcomes. A record is kept `SENT_RETENTION_DAYS`
+(default 90) after its last write, which must be longer than a coordinator restore can reach
+back, so its backup bucket must expire old versions sooner. Retries are answered from the
+record across reboots, as within one boot. If the edge stopped mid-send, the recipients stay
+`unknown` and a retry is 409 `send_in_doubt`: the edge won't send it again, and a new
+Message-ID is a new message. If the record can't be written, nothing is sent (503).
+
+- `POST /sent/query`, signed by the address key, body `{"message_ids": ["<id@host>", ...]}`
+  (1 to 100; brackets optional). Answers `{"records": [...]}` in the order asked, each
+  `{"message_id", "state", "sha256", "first_at", "updated_at", "results": [{"recipient",
+  "status", "detail"}]}`. `state` is `none` (no record), `in_progress`, `in_doubt`, `retryable`
+  (some recipient `temporary`; posting the same bytes again re-attempts only those) or `done`
+  (each `sent` or `permanent`). `sha256` is of the message bytes as posted.
+
 ## §9 Stored messages
 
 The object is `FME1` version 3 (`internal/store/message.go`). Inside the encryption are the

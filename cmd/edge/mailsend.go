@@ -162,6 +162,12 @@ func (r remoteSender) Send(ctx context.Context, mailboxID, raw []byte) ([]send.R
 	return r.svc.Send(ctx, mailboxID, raw)
 }
 
+// Lookup answers from core's send records whatever mail-send's state, since they
+// say what was sent before.
+func (r remoteSender) Lookup(ctx context.Context, mailboxID []byte, messageID string) (send.SentStatus, error) {
+	return r.svc.Lookup(ctx, mailboxID, messageID)
+}
+
 // sendingOn reports whether mail-send last said sending is on, for what mail-core
 // sends besides POST /send.
 func sendingOn(state *atomic.Pointer[sendState]) func() bool {
@@ -173,7 +179,7 @@ func sendingOn(state *atomic.Pointer[sendState]) func() bool {
 
 // newCoreSender builds mail-core's Sender. It is nil, so POST /send stays 501,
 // with no mail-send to reach or no routing; otherwise it follows mail-send's state.
-func newCoreSender(cfg *config.Config, rt sendRouting, out send.Transmitter, state *atomic.Pointer[sendState]) (deviceapi.Sender, string) {
+func newCoreSender(cfg *config.Config, rt sendRouting, out send.Transmitter, state *atomic.Pointer[sendState], records send.SentRecords) (deviceapi.Sender, string) {
 	switch {
 	case cfg.SendLink == "":
 		return nil, "off: SEND_LINK unset, so there's no mail-send"
@@ -181,7 +187,7 @@ func newCoreSender(cfg *config.Config, rt sendRouting, out send.Transmitter, sta
 		return nil, "off: no routing"
 	}
 	pol := send.NewPolicy(send.PolicyOptions{Directory: rt, MailDomain: cfg.MailDomain, Proven: rt.OwnerProven})
-	return remoteSender{svc: &send.Service{Policy: pol, Out: out}, state: state}, ""
+	return remoteSender{svc: &send.Service{Policy: pol, Out: out, Records: records}, state: state}, ""
 }
 
 // sendWatchEvery is how often mail-core asks mail-send whether sending is on.

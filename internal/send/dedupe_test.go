@@ -323,7 +323,7 @@ func TestDedupeKeyedPerMailbox(t *testing.T) {
 	d := NewDedupe(DedupeOptions{})
 	m := parsed(t, good())
 	calls := 0
-	attempt := func(context.Context, *Message) ([]Result, error) {
+	attempt := func(context.Context, *Message, func() error) ([]Result, error) {
 		calls++
 		return []Result{{Recipient: "pat@smithcpa.com", Status: Sent}}, nil
 	}
@@ -340,7 +340,7 @@ func TestDedupeKeyedPerMailbox(t *testing.T) {
 func TestDedupeBounded(t *testing.T) {
 	d := NewDedupe(DedupeOptions{Max: 2})
 	calls := 0
-	attempt := func(context.Context, *Message) ([]Result, error) {
+	attempt := func(context.Context, *Message, func() error) ([]Result, error) {
 		calls++
 		return []Result{{Recipient: "pat@smithcpa.com", Status: Sent}}, nil
 	}
