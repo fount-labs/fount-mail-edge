@@ -46,46 +46,51 @@ func (a *API) sendMail() http.Handler {
 			return
 		}
 		results, err := a.sender.Send(r.Context(), mailboxID, req.Message)
-		switch {
-		case errors.Is(err, send.ErrBadMessage):
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		case errors.Is(err, send.ErrOff):
-			// A split edge's mail-send has sending off: the same answer as no Sender.
-			writeErr(w, http.StatusNotImplemented, "sending is off")
-			return
-		case errors.Is(err, send.ErrNoMailbox):
-			writeErr(w, http.StatusNotFound, "no such mailbox")
-			return
-		case errors.Is(err, send.ErrSendInProgress):
-			// The first send of this Message-ID is still being delivered.
-			w.Header().Set("Retry-After", "30")
-			writeErr(w, http.StatusConflict, err.Error())
-			return
-		case errors.Is(err, send.ErrMessageIDReused):
-			writeErr(w, http.StatusConflict, err.Error())
-			return
-		case errors.Is(err, send.ErrSendInDoubt):
-			writeAPIError(w, &apiError{http.StatusConflict, "send_in_doubt", err.Error()})
-			return
-		case errors.Is(err, send.ErrRecordFailed):
-			w.Header().Set("Retry-After", "5")
-			writeErr(w, http.StatusServiceUnavailable, "could not record the send; nothing was sent")
-			return
-		case errors.Is(err, send.ErrRateLimited):
-			w.Header().Set("Retry-After", "3600")
-			writeErr(w, http.StatusTooManyRequests, err.Error())
-			return
-		case errors.Is(err, send.ErrLapsed), errors.Is(err, send.ErrPaused), errors.Is(err, send.ErrNotWorker),
-			errors.Is(err, send.ErrNotOwner), errors.Is(err, send.ErrNotProven):
-			writeErr(w, http.StatusForbidden, err.Error())
-			return
-		case err != nil:
-			writeErr(w, http.StatusInternalServerError, "send failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+		writeSendResult(w, results, err)
 	})
+}
+
+// writeSendResult answers a send: its results, or the refusal for err.
+func writeSendResult(w http.ResponseWriter, results []send.Result, err error) {
+	switch {
+	case errors.Is(err, send.ErrBadMessage):
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, send.ErrOff):
+		// A split edge's mail-send has sending off: the same answer as no Sender.
+		writeErr(w, http.StatusNotImplemented, "sending is off")
+		return
+	case errors.Is(err, send.ErrNoMailbox):
+		writeErr(w, http.StatusNotFound, "no such mailbox")
+		return
+	case errors.Is(err, send.ErrSendInProgress):
+		// The first send of this Message-ID is still being delivered.
+		w.Header().Set("Retry-After", "30")
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, send.ErrMessageIDReused):
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, send.ErrSendInDoubt):
+		writeAPIError(w, &apiError{http.StatusConflict, "send_in_doubt", err.Error()})
+		return
+	case errors.Is(err, send.ErrRecordFailed):
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, http.StatusServiceUnavailable, "could not record the send; nothing was sent")
+		return
+	case errors.Is(err, send.ErrRateLimited):
+		w.Header().Set("Retry-After", "3600")
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
+	case errors.Is(err, send.ErrLapsed), errors.Is(err, send.ErrPaused), errors.Is(err, send.ErrNotWorker),
+		errors.Is(err, send.ErrNotOwner), errors.Is(err, send.ErrNotProven):
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "send failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
 // maxSentQuery bounds one POST /sent/query.

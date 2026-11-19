@@ -14,6 +14,7 @@ import (
 
 	"github.com/fount-labs/fount-mail-edge/internal/generation"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
+	"github.com/fount-labs/fount-mail-edge/internal/send"
 )
 
 // Coordination is the Cloud coordinator's state in routing data (fount
@@ -413,5 +414,57 @@ func (a *API) postChanges() http.Handler {
 			out[i] = changeEntry{MailboxID: hex.EncodeToString(c.MailboxID), Changed: c.Changed, Sequence: c.Sequence, Paused: c.Paused, Lapsed: c.Lapsed}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"changes": out, "cursor": page.Cursor, "more": page.More, "reset": page.Reset})
+	})
+}
+
+// InviteSender sends a team invite from a worker (send.Service.SendInvite).
+// The Sender implements it where it can send; nil leaves POST
+// /coordinator/invite 501.
+type InviteSender interface {
+	SendInvite(ctx context.Context, mailboxID, raw []byte) ([]send.Result, error)
+}
+
+// The codes a refused invite carries. Callers (the coordinator, and through
+// it Desktop's "Email it") branch on them, so they don't change.
+const (
+	codeInviteLimit   = "invite_limit"   // the worker's InvitesPerDay is spent
+	codeInviteRefused = "invite_refused" // not an invite's shape: one recipient, plain text, small
+)
+
+type inviteRequest struct {
+	MailboxID string `json:"mailbox_id"` // hex
+	Message   []byte `json:"message"`    // the whole RFC 5322 message, base64 in JSON
+}
+
+// postInvite handles POST /coordinator/invite: the current coordinator mails a
+// team invite from an enrolled worker to someone who isn't one of its owners
+// (fount launch-plan decision 26). /send would refuse them, since they haven't
+// proved they read anything; here the coordinator's generation key stands in,
+// and send.Policy.CheckInvite keeps it to one plain-text message to one
+// address, InvitesPerDay per worker. It goes through the same send records as
+// /send, marked "invite", so the worker's POST /sent/query finds it and a
+// retry is answered from the record.
+func (a *API) postInvite() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req inviteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Message) == 0 {
+			writeErr(w, http.StatusBadRequest, "bad request body")
+			return
+		}
+		mid, ok := a.coordinatedTarget(w, req.MailboxID)
+		if !ok {
+			return
+		}
+		results, err := a.inviter.SendInvite(r.Context(), mid, req.Message)
+		switch {
+		case errors.Is(err, send.ErrInviteLimit):
+			w.Header().Set("Retry-After", "3600")
+			writeAPIError(w, &apiError{http.StatusTooManyRequests, codeInviteLimit, err.Error()})
+			return
+		case errors.Is(err, send.ErrNotInvite), errors.Is(err, send.ErrNotOwner):
+			writeAPIError(w, &apiError{http.StatusBadRequest, codeInviteRefused, err.Error()})
+			return
+		}
+		writeSendResult(w, results, err)
 	})
 }

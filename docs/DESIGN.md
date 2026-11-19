@@ -66,7 +66,11 @@ already stored. Detecting a swapped key on the device is planned (§9), and not 
 - Unknown recipients are rejected during SMTP, with no catch-all.
 - `<address>+<tag>@` is accepted and stored as mail for `<address>@`, with the tagged recipient
   kept in the sealed envelope. The tag is a thread's reply token, which the broker checks; the
-  edge doesn't read it. An empty tag is unknown. `fount+<token>@` is the exception: it's an
+  edge doesn't read it. An empty tag is unknown. Reply tokens also ride in the Message-IDs a
+  worker sends (`fm.<26>.<token>@<domain>`), and the edge doesn't read those either: it holds no
+  token key. A Cloud worker's tokens are a MAC under a key only the Cloud coordinator holds,
+  apart from the address keys (decision 25), so rotating the address signing key never touches
+  them and a removed admin's copy of an old signing seed can't forge one. `fount+<token>@` is the exception: it's an
   owner-proof reply, never mail for a mailbox.
 - Each message is stored whole, sealed with HPKE to the address's key, with the envelope inside
   the encryption: the sender, the recipient, the sending server's IP, and its HELO name, so the
@@ -183,6 +187,24 @@ or passkey keys). From the next request on, the old key gets 401 on every addres
   `"fount-mail-edge/v1/signing-key\x00" || mailbox id (32 bytes) || new key (32 bytes)`. The
   worker must be enrolled (409 `not_coordinated`); a bad proof is 403; the current key again
   is 409. Answers `{"mailbox_id", "signing_key_sha256"}` (hex).
+
+**Team invites** (decision 26). `/send` goes only to a worker's proven owners, and someone being
+invited isn't one yet. So the coordinator mails an invite from a worker's address on its own
+route, where its generation key stands in for the owner proof. The edge keeps it narrow: the
+worker is enrolled, neither paused nor lapsed, the From is the worker's own address, exactly one
+recipient (To and Cc together) outside the mail domain, one `text/plain` part (or no
+Content-Type), at most 64 KiB, and at most 20 invites per worker per day, apart from its sending
+limits (per enclave, like every limit, so a reboot refills it). An invite goes through the same
+sent records as `/send`, marked `"kind": "invite"`, so the worker's `POST /sent/query` finds it
+(its records carry `kind`) and a retry is answered from the record. The worker's own keys can't
+call it, so `/send` to a non-owner is refused as before.
+
+- `POST /coordinator/invite`, signed by the current coordinator key with `Fount-Generation`,
+  body `{"mailbox_id": "<hex>", "message": "<base64 RFC 5322 message>"}`. Answers `/send`'s
+  `{"results": [...]}` and its refusals, and also 400 `invite_refused` (not an invite's shape),
+  429 `invite_limit` with `Retry-After` (the day's invites are spent), 409 `not_coordinated`. A
+  refused invite leaves no record. These codes are stable: Desktop offers "Copy the link" on any
+  refusal.
 
 **Changes feed.** One coordinator watches all its workers in one request instead of polling
 each. Every write of the routing object bumps its version, and each mailbox record keeps the

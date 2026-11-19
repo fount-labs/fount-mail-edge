@@ -162,6 +162,15 @@ func (r remoteSender) Send(ctx context.Context, mailboxID, raw []byte) ([]send.R
 	return r.svc.Send(ctx, mailboxID, raw)
 }
 
+// SendInvite is Send for a team invite (POST /coordinator/invite), under the
+// same state.
+func (r remoteSender) SendInvite(ctx context.Context, mailboxID, raw []byte) ([]send.Result, error) {
+	if s := r.state.Load(); s == nil || s.State != "on" {
+		return nil, send.ErrOff
+	}
+	return r.svc.SendInvite(ctx, mailboxID, raw)
+}
+
 // Lookup answers from core's send records whatever mail-send's state, since they
 // say what was sent before.
 func (r remoteSender) Lookup(ctx context.Context, mailboxID []byte, messageID string) (send.SentStatus, error) {

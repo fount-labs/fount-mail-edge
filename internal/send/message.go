@@ -38,6 +38,9 @@ type Message struct {
 	From       string   // the worker's address, lowercased
 	Recipients []string // To and Cc, lowercased, without repeats
 	MessageID  string   // the Message-ID field's value as written, which keys Dedupe
+	// Kind is "" for a send to owners and KindInvite for a team invite. It's
+	// set by the path that checked the message, not read from it.
+	Kind string
 }
 
 // Parse checks the message shape the edge will sign and send. It doesn't decide
