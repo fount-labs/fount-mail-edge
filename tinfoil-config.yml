@@ -197,4 +197,5 @@ shim:
     # Cloud coordinator (fount launch-plan M)
     - /coordinator
     - /coordinator/generation
+    - /coordinator/lapse
     - /sent/query

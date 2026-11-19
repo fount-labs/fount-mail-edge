@@ -159,6 +159,18 @@ Message-ID is a new message. If the record can't be written, nothing is sent (50
   (some recipient `temporary`; posting the same bytes again re-attempts only those) or `done`
   (each `sent` or `permanent`). `sha256` is of the message bytes as posted.
 
+**Lapse hold** (decision 11). When an account's past_due grace ends, the coordinator pauses
+each enrolled worker for lapse. A worker paused for lapse can't send (`/send` 403, as for an
+expired entitlement), but SMTP keeps accepting its mail (held, in its store as usual) until the
+entitlement's expiry plus 30 days, and only then answers 550. Without the pause, an expired
+entitlement bounces at once. The hold counts from the expiry, so setting the pause again can't
+stretch it. Reads still work, so the account can export. `GET /mail` adds `"lapsed": true` and
+`"hold_until"` (unix; 0 if the entitlement has no expiry) for a worker paused for lapse.
+
+- `POST /coordinator/lapse`, signed by the current coordinator key with `Fount-Generation`,
+  body `{"mailbox_id": "<hex>", "lapsed": true|false}`. The worker must be enrolled (else 409
+  `not_coordinated`). Answers `{"mailbox_id", "lapsed", "hold_until"}`.
+
 ## §9 Stored messages
 
 The object is `FME1` version 3 (`internal/store/message.go`). Inside the encryption are the

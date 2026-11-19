@@ -162,6 +162,7 @@ var routes = map[string]route{
 	"PUT /coordinator":             {sigAddress, "M4", "Enrolls the mailbox under a coordinator generation (certificate in the body)"},
 	"POST /coordinator/generation": {sigCoordinatorClaim, "M4", "Moves the edge to a newer coordinator generation"},
 	"POST /sent/query":             {sigAddress, "M4", "Says whether the worker sent each Message-ID, from durable send records"},
+	"POST /coordinator/lapse":      {sigCoordinator, "M4", "Pauses or resumes an enrolled worker for a lapsed payment: mail is held, not bounced"},
 }
 
 // built are the routes after M2 that are built, so the shim forwards them.
@@ -174,6 +175,7 @@ var built = map[string]bool{
 	"PUT /coordinator":             true,
 	"POST /coordinator/generation": true,
 	"POST /sent/query":             true,
+	"POST /coordinator/lapse":      true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -271,6 +273,7 @@ type API struct {
 	connector     Connector
 	coord         Coordination // from the Mutator; nil leaves the coordinator routes 501
 	sentLookup    SentLookup   // from the Sender; nil leaves POST /sent/query 501
+	lapser        Lapser       // from the Mutator; nil leaves POST /coordinator/lapse 501
 	authority     ed25519.PublicKey
 }
 
@@ -305,6 +308,7 @@ func New(o Options) *API {
 	a.pauser, _ = o.Mutator.(Pauser)
 	a.coord, _ = o.Mutator.(Coordination)
 	a.sentLookup, _ = o.Sender.(SentLookup)
+	a.lapser, _ = o.Mutator.(Lapser)
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), fenced(r.by) && !unfenced[pattern], a.handler(pattern, r, mail, boots)))
 	}
@@ -351,6 +355,8 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.putCoordinator()
 	case a.coordinationLive() && pattern == "POST /coordinator/generation":
 		return a.postGeneration()
+	case a.coordinationLive() && a.lapser != nil && pattern == "POST /coordinator/lapse":
+		return a.postLapse()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h

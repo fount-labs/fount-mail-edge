@@ -88,7 +88,8 @@ func (p *Policy) Check(mailboxID []byte, m *Message) error {
 	if mb.Paused {
 		return ErrPaused
 	}
-	if mb.EntitlementExp != 0 && p.now().Unix() >= mb.EntitlementExp {
+	// A worker paused for lapse holds its mail but sends nothing (decision 11).
+	if mb.Lapsed || mb.EntitlementExp != 0 && p.now().Unix() >= mb.EntitlementExp {
 		return ErrLapsed
 	}
 	if !strings.HasSuffix(m.From, p.domain) || !hmac.Equal(p.dir.MailboxID(m.From), mailboxID) {

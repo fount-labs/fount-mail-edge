@@ -240,3 +240,46 @@ func (a *API) coordinatedTarget(w http.ResponseWriter, hexID string) ([]byte, bo
 	}
 	return mid, true
 }
+
+// Lapser holds a worker's lapse pause (fount launch-plan decision 11).
+// routing.Store implements it, and New picks it up from the Mutator.
+type Lapser interface {
+	SetLapsed(ctx context.Context, mailboxID []byte, lapsed bool) error
+	Lapse(mailboxID []byte) (lapsed bool, holdUntil int64)
+}
+
+type lapseRequest struct {
+	MailboxID string `json:"mailbox_id"` // hex
+	Lapsed    *bool  `json:"lapsed"`     // required
+}
+
+// postLapse handles POST /coordinator/lapse: the coordinator pauses an enrolled
+// worker when its account's past_due grace ends, and resumes it when the account
+// pays. While paused for lapse the edge holds the worker's mail rather than
+// bouncing it, until the entitlement's expiry plus the hold (30 days), and refuses
+// its sends; reads still work, so the account can export. Only the current
+// coordinator key may set it: it's a billing state, not the worker's own.
+func (a *API) postLapse() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req lapseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Lapsed == nil {
+			writeErr(w, http.StatusBadRequest, "bad request body")
+			return
+		}
+		mid, ok := a.coordinatedTarget(w, req.MailboxID)
+		if !ok {
+			return
+		}
+		err := a.lapser.SetLapsed(r.Context(), mid, *req.Lapsed)
+		switch {
+		case errors.Is(err, routing.ErrNoMailbox):
+			writeErr(w, http.StatusNotFound, "no such mailbox")
+			return
+		case err != nil:
+			writeFailure(w, err, "lapse failed")
+			return
+		}
+		lapsed, until := a.lapser.Lapse(mid)
+		writeJSON(w, http.StatusOK, map[string]any{"mailbox_id": hex.EncodeToString(mid), "lapsed": lapsed, "hold_until": until})
+	})
+}

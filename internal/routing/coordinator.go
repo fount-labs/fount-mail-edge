@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"time"
 )
 
 // Coordinator is the newest Cloud coordinator generation the edge has seen
@@ -113,4 +114,61 @@ func (s *Store) checkGeneration(gen uint64, key []byte) (bool, error) {
 		return false, ErrGenerationConflict
 	}
 	return false, nil
+}
+
+// DefaultLapseHold is how long a mailbox paused for lapse keeps receiving mail
+// past its entitlement's expiry (fount launch-plan decision 11: held for 30
+// days, then it bounces).
+const DefaultLapseHold = 30 * 24 * time.Hour
+
+// WithLapseHold sets how long a lapsed mailbox holds mail past its entitlement's
+// expiry. A value <= 0 is DefaultLapseHold.
+func WithLapseHold(d time.Duration) Option {
+	return func(s *Store) {
+		if d > 0 {
+			s.lapseHold = d
+		}
+	}
+}
+
+// SetLapsed pauses or resumes a mailbox for a lapsed payment. The coordinator
+// sets it when the past_due grace ends. While it's set, SMTP holds the
+// mailbox's mail instead of bouncing it, until the entitlement's expiry plus the
+// hold, and the mailbox can't send. Its reads still work, so the account can
+// export. ErrNoMailbox if the mailbox is absent.
+func (s *Store) SetLapsed(ctx context.Context, mailboxID []byte, lapsed bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return err
+	}
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	if !ok {
+		return ErrNoMailbox
+	}
+	if m.Lapsed == lapsed {
+		return nil
+	}
+	now := s.now().Unix()
+	return s.update(ctx, []*Mailbox{m}, func(m *Mailbox) { m.Lapsed, m.LapsedAt = lapsed, now })
+}
+
+// Lapse reports whether a mailbox is paused for lapse, and until when (unix) it
+// holds mail: 0 if its entitlement has no expiry.
+func (s *Store) Lapse(mailboxID []byte) (lapsed bool, holdUntil int64) {
+	m, ok := s.Snapshot(mailboxID)
+	if !ok || !m.Lapsed {
+		return false, 0
+	}
+	return true, s.holdUntil(&m)
+}
+
+// holdUntil is when a lapsed mailbox stops holding mail. It counts from the
+// entitlement's expiry, not from when the lapse was set, so setting it again
+// can't stretch the hold.
+func (s *Store) holdUntil(m *Mailbox) int64 {
+	if m.EntitlementExp == 0 {
+		return 0
+	}
+	return m.EntitlementExp + int64(s.lapseHold/time.Second)
 }

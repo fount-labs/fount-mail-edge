@@ -107,6 +107,12 @@ type Mailbox struct {
 	// own key may act on it (coordinator.go).
 	Coordinated bool `json:"coordinated,omitempty"`
 
+	// Lapsed pauses the worker for a lapsed payment, set by the coordinator
+	// (coordinator.go): mail is held, not bounced, for the lapse hold past the
+	// entitlement's expiry, and the worker can't send. LapsedAt is the last change.
+	Lapsed   bool  `json:"lapsed,omitempty"`
+	LapsedAt int64 `json:"lapsed_at,omitempty"`
+
 	// The license's owner state (M3, §10), kept on the handle's record only, because
 	// an owner is the license's and a new worker copies its owners. See owners.go.
 	OwnersSeen bool     `json:"owners_seen,omitempty"` // the license has had owners, so the next one isn't its first
@@ -150,6 +156,7 @@ type Store struct {
 	proofKey      []byte      // keys owner-proof tokens
 	connectKey    []byte      // keys connect-mail Message-IDs (connect.go)
 	newOwnerLimit int         // new owners per license per day; <= 0 is no cap
+	lapseHold     time.Duration
 	now           func() time.Time
 
 	mu    sync.Mutex
@@ -232,7 +239,7 @@ func New(ctx context.Context, blobs Blobs, routingDataKey, addressMACKey []byte,
 		return nil, err
 	}
 	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead, ownerAEAD: ownerAEAD, proofKey: proofKey,
-		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, now: time.Now}
+		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, lapseHold: DefaultLapseHold, now: time.Now}
 	for _, o := range opts {
 		o(s)
 	}
@@ -566,6 +573,9 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 // EntitlementExp ahead of now while a license is current or in grace, so a
 // lapsed value is the signal that even the grace is over. A "fount+<token>"
 // reply to an owner-proof mail is accepting while its token matches an owner.
+// A mailbox the coordinator paused for lapse holds mail instead of bouncing it
+// (decision 11): it stays accepting until the entitlement's expiry plus the
+// lapse hold.
 // Any other "<local>+<tag>" recipient answers as "<local>" does.
 func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatus, error) {
 	if tag, ok := proofTag(recipient); ok {
@@ -575,7 +585,10 @@ func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatu
 	if !ok {
 		return smtp.RecipientUnknown, nil
 	}
-	if m.EntitlementExp > 0 && time.Now().Unix() >= m.EntitlementExp {
+	if now := s.now().Unix(); m.EntitlementExp > 0 && now >= m.EntitlementExp {
+		if m.Lapsed && now < s.holdUntil(&m) {
+			return smtp.RecipientAccepting, nil
+		}
 		return smtp.RecipientExpired, nil
 	}
 	return smtp.RecipientAccepting, nil

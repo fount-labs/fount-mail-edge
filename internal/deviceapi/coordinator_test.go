@@ -235,3 +235,63 @@ func TestCoordinatorRoutesOffWithoutAuthority(t *testing.T) {
 	wantCode(t, f.enroll(mb, f.coordinator(1)), http.StatusNotImplemented, "")
 	wantCode(t, f.claim(f.coordinator(1)), http.StatusNotImplemented, "")
 }
+
+func (f *coordFixture) lapse(c coordinatorKey, mailboxHex string, body string) *httptest.ResponseRecorder {
+	if body == "" {
+		body = `{"mailbox_id":"` + mailboxHex + `","lapsed":true}`
+	}
+	return f.serve(genRequest(f.t, c.priv, c.id, "POST", "/coordinator/lapse", []byte(body), strconv.FormatUint(c.gen, 10)))
+}
+
+// The coordinator pauses an enrolled worker for lapse; only the current
+// generation's key can, and GET /mail tells the broker.
+func TestCoordinatorLapse(t *testing.T) {
+	f := newCoordFixture(t)
+	mb := createMbox(t, f.rt, "ap@fountbox.com", "lic-1")
+	other := createMbox(t, f.rt, "other@fountbox.com", "lic-2")
+	c1, c2 := f.coordinator(1), f.coordinator(2)
+
+	// Not enrolled yet: refused.
+	wantCode(t, f.claim(c1), http.StatusOK, "")
+	wantCode(t, f.lapse(c1, mb.idHex, ""), http.StatusConflict, codeNotCoordinated)
+	wantCode(t, f.enroll(mb, c1), http.StatusOK, "")
+
+	rec := f.lapse(c1, mb.idHex, "")
+	wantCode(t, rec, http.StatusOK, "")
+	var out struct {
+		MailboxID string `json:"mailbox_id"`
+		Lapsed    bool   `json:"lapsed"`
+		HoldUntil int64  `json:"hold_until"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || !out.Lapsed || out.MailboxID != mb.idHex {
+		t.Fatalf("body %s", rec.Body)
+	}
+	if l, _ := f.rt.Lapse(mb.id); !l {
+		t.Fatal("not lapsed")
+	}
+	rec = f.list(mb, "1")
+	wantCode(t, rec, http.StatusOK, "")
+	if !strings.Contains(rec.Body.String(), `"lapsed":true`) {
+		t.Fatalf("GET /mail: %s", rec.Body)
+	}
+
+	// The worker's own key can't lift it.
+	body := []byte(`{"mailbox_id":"` + mb.idHex + `","lapsed":false}`)
+	wantCode(t, f.serve(genRequest(t, mb.sign, mb.idHex, "POST", "/coordinator/lapse", body, "1")), http.StatusUnauthorized, "")
+
+	// A stale generation can't touch it.
+	wantCode(t, f.claim(c2), http.StatusOK, "")
+	wantCode(t, f.lapse(c1, mb.idHex, `{"mailbox_id":"`+mb.idHex+`","lapsed":false}`), http.StatusConflict, codeStaleGeneration)
+	wantCode(t, f.lapse(c2, other.idHex, ""), http.StatusConflict, codeNotCoordinated)
+	wantCode(t, f.lapse(c2, mb.idHex, `{"mailbox_id":"`+mb.idHex+`"}`), http.StatusBadRequest, "")
+	wantCode(t, f.lapse(c2, mb.idHex, `{"mailbox_id":"zz","lapsed":false}`), http.StatusBadRequest, "")
+
+	f.reboot()
+	if l, _ := f.rt.Lapse(mb.id); !l {
+		t.Fatal("lapse lost in reboot")
+	}
+	wantCode(t, f.lapse(c2, mb.idHex, `{"mailbox_id":"`+mb.idHex+`","lapsed":false}`), http.StatusOK, "")
+	if l, _ := f.rt.Lapse(mb.id); l {
+		t.Fatal("still lapsed")
+	}
+}
