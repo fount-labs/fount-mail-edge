@@ -172,3 +172,32 @@ func (s *Store) holdUntil(m *Mailbox) int64 {
 	}
 	return m.EntitlementExp + int64(s.lapseHold/time.Second)
 }
+
+// ErrSameSigningKey means a rotation named the key the mailbox already has.
+var ErrSameSigningKey = errors.New("routing: that is already the mailbox's signing key")
+
+// RotateSigningKey replaces a coordinated mailbox's address signing key
+// (decision 25: removing a team admin rotates it). The old key stops verifying
+// at once, on every route that takes the address key, /send among them. Only the
+// address key changes; the mailbox key, owner-change key and passkey stay.
+// ErrNoMailbox if the mailbox is absent, ErrNotCoordinated if it isn't enrolled.
+func (s *Store) RotateSigningKey(ctx context.Context, mailboxID []byte, key ed25519.PublicKey) error {
+	if len(key) != ed25519.PublicKeySize {
+		return errors.New("routing: signing key must be 32 bytes")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refresh(ctx); err != nil {
+		return err
+	}
+	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
+	switch {
+	case !ok:
+		return ErrNoMailbox
+	case !m.Coordinated:
+		return ErrNotCoordinated
+	case bytes.Equal(m.SigningKey, key):
+		return ErrSameSigningKey
+	}
+	return s.update(ctx, []*Mailbox{m}, func(m *Mailbox) { m.SigningKey = bytes.Clone(key) })
+}

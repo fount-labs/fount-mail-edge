@@ -198,4 +198,5 @@ shim:
     - /coordinator
     - /coordinator/generation
     - /coordinator/lapse
+    - /coordinator/signing-key
     - /sent/query

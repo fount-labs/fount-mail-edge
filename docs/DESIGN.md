@@ -171,6 +171,19 @@ stretch it. Reads still work, so the account can export. `GET /mail` adds `"laps
   body `{"mailbox_id": "<hex>", "lapsed": true|false}`. The worker must be enrolled (else 409
   `not_coordinated`). Answers `{"mailbox_id", "lapsed", "hold_until"}`.
 
+**Address signing key rotation** (decision 25). Removing a team admin who held a worker's
+address key rotates it. It's the coordinator's call, since the old key is the one revoked; the
+new key proves it's held. Only the address signing key changes (not the mailbox, owner-change
+or passkey keys). From the next request on, the old key gets 401 on every address-key route,
+`/send` among them.
+
+- `POST /coordinator/signing-key`, signed by the current coordinator key with
+  `Fount-Generation`, body `{"mailbox_id": "<hex>", "signing_key": "<base64 Ed25519 public
+  key>", "proof": "<base64 signature>"}`, where `proof` is the new key's signature over
+  `"fount-mail-edge/v1/signing-key\x00" || mailbox id (32 bytes) || new key (32 bytes)`. The
+  worker must be enrolled (409 `not_coordinated`); a bad proof is 403; the current key again
+  is 409. Answers `{"mailbox_id", "signing_key_sha256"}` (hex).
+
 ## §9 Stored messages
 
 The object is `FME1` version 3 (`internal/store/message.go`). Inside the encryption are the

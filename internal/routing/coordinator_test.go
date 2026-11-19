@@ -3,6 +3,7 @@ package routing_test
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -149,5 +150,42 @@ func TestCoordinatorGeneration(t *testing.T) {
 	}
 	if err := s2.AdvanceCoordinator(ctx, 1, b1); !errors.Is(err, routing.ErrStaleGeneration) {
 		t.Fatalf("older after reboot: %v", err)
+	}
+}
+
+func TestRotateSigningKey(t *testing.T) {
+	routingKey, macKey := keys(t)
+	blobs := newMemBlobs()
+	s := newStore(t, blobs, routingKey, macKey)
+	ctx := context.Background()
+	ks := newKeyset(t)
+	m := ks.record(s.MailboxID("w@fountbox.com"))
+	if err := s.Upsert(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	k := edKey(t).Public().(ed25519.PublicKey)
+	if err := s.RotateSigningKey(ctx, m.MailboxID, k); !errors.Is(err, routing.ErrNotCoordinated) {
+		t.Fatalf("not enrolled: %v", err)
+	}
+	if err := s.EnrollCoordinator(ctx, m.MailboxID, 1, edKey(t).Public().(ed25519.PublicKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RotateSigningKey(ctx, m.MailboxID, m.SigningKey); !errors.Is(err, routing.ErrSameSigningKey) {
+		t.Fatalf("same: %v", err)
+	}
+	if err := s.RotateSigningKey(ctx, m.MailboxID, k); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := routing.New(ctx, blobs, routingKey, macKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := hex.EncodeToString(m.MailboxID)
+	got, ok := s2.AddressKey(id)
+	if !ok || !got.Equal(k) {
+		t.Fatal("rotation lost in reboot")
+	}
+	if mk, _ := s2.MailboxKey(id); !mk.Equal(ks.mailbox.Public()) {
+		t.Fatal("mailbox key changed")
 	}
 }

@@ -3,6 +3,8 @@ package deviceapi
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -281,5 +283,79 @@ func (a *API) postLapse() http.Handler {
 		}
 		lapsed, until := a.lapser.Lapse(mid)
 		writeJSON(w, http.StatusOK, map[string]any{"mailbox_id": hex.EncodeToString(mid), "lapsed": lapsed, "hold_until": until})
+	})
+}
+
+// SigningKeyRotator replaces a worker's address signing key. routing.Store
+// implements it, and New picks it up from the Mutator.
+type SigningKeyRotator interface {
+	RotateSigningKey(ctx context.Context, mailboxID []byte, key ed25519.PublicKey) error
+}
+
+// signingKeyLabel prefixes what the new key signs to prove it's held, so the
+// proof can't be lifted from any other signature.
+const signingKeyLabel = "fount-mail-edge/v1/signing-key\x00"
+
+type signingKeyRequest struct {
+	MailboxID  string `json:"mailbox_id"`  // hex
+	SigningKey string `json:"signing_key"` // base64 Ed25519 public key
+	Proof      string `json:"proof"`       // base64 signature by the new key
+}
+
+// SigningKeyProof is what the new key signs: the label, the mailbox id and the
+// key itself.
+func SigningKeyProof(mailboxID []byte, key ed25519.PublicKey) []byte {
+	msg := append([]byte(signingKeyLabel), mailboxID...)
+	return append(msg, key...)
+}
+
+// postSigningKey handles POST /coordinator/signing-key: the current coordinator
+// rotates an enrolled worker's address signing key, as when a team admin who
+// held it is removed (fount launch-plan decision 25). It's the coordinator's
+// call, not the old key's, because the old key is the one being revoked. The new
+// key proves it's held by signing SigningKeyProof. From the next request on, the
+// old key gets 401 on every address-key route, /send included.
+func (a *API) postSigningKey() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req signingKeyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad request body")
+			return
+		}
+		key, err := base64.StdEncoding.DecodeString(req.SigningKey)
+		if err != nil || len(key) != ed25519.PublicKeySize {
+			writeErr(w, http.StatusBadRequest, "signing_key must be a base64 Ed25519 public key")
+			return
+		}
+		proof, err := base64.StdEncoding.DecodeString(req.Proof)
+		if err != nil || len(proof) != ed25519.SignatureSize {
+			writeErr(w, http.StatusBadRequest, "bad proof")
+			return
+		}
+		mid, ok := a.coordinatedTarget(w, req.MailboxID)
+		if !ok {
+			return
+		}
+		if !ed25519.Verify(key, SigningKeyProof(mid, key), proof) {
+			writeErr(w, http.StatusForbidden, "the proof isn't the new key's")
+			return
+		}
+		err = a.rotator.RotateSigningKey(r.Context(), mid, key)
+		switch {
+		case errors.Is(err, routing.ErrNoMailbox):
+			writeErr(w, http.StatusNotFound, "no such mailbox")
+			return
+		case errors.Is(err, routing.ErrSameSigningKey):
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		case errors.Is(err, routing.ErrNotCoordinated):
+			writeAPIError(w, &apiError{http.StatusConflict, codeNotCoordinated, "this mailbox is not under a coordinator"})
+			return
+		case err != nil:
+			writeFailure(w, err, "rotate failed")
+			return
+		}
+		sum := sha256.Sum256(key)
+		writeJSON(w, http.StatusOK, map[string]any{"mailbox_id": hex.EncodeToString(mid), "signing_key_sha256": hex.EncodeToString(sum[:])})
 	})
 }

@@ -295,3 +295,74 @@ func TestCoordinatorLapse(t *testing.T) {
 		t.Fatal("still lapsed")
 	}
 }
+
+func rotateBody(t *testing.T, mailboxHex string, mailboxID []byte, signWith ed25519.PrivateKey, key ed25519.PublicKey) []byte {
+	t.Helper()
+	b, _ := json.Marshal(signingKeyRequest{
+		MailboxID:  mailboxHex,
+		SigningKey: base64.StdEncoding.EncodeToString(key),
+		Proof:      base64.StdEncoding.EncodeToString(ed25519.Sign(signWith, SigningKeyProof(mailboxID, key))),
+	})
+	return b
+}
+
+// The coordinator rotates a worker's address signing key: the old key then gets
+// 401 on /send, the new one sends. Only the current coordinator can, and the new
+// key must prove it's held.
+func TestCoordinatorRotatesSigningKey(t *testing.T) {
+	f := newCoordFixture(t)
+	sender := &fakeSender{}
+	f.opts.Sender = sender
+	f.api = New(f.opts)
+	mb := createMbox(t, f.rt, "ap@fountbox.com", "lic-1")
+	c1 := f.coordinator(1)
+	wantCode(t, f.enroll(mb, c1), http.StatusOK, "")
+	sendWith := func(priv ed25519.PrivateKey) *httptest.ResponseRecorder {
+		return f.serve(genRequest(t, priv, mb.idHex, "POST", "/send", []byte(`{"message":"RnJvbTogYQ0KDQo="}`), "1"))
+	}
+	wantCode(t, sendWith(mb.sign), http.StatusOK, "")
+
+	newPub, newPriv, _ := ed25519.GenerateKey(nil)
+	rotate := func(signer coordinatorKey, body []byte) *httptest.ResponseRecorder {
+		return f.serve(genRequest(t, signer.priv, signer.id, "POST", "/coordinator/signing-key", body, strconv.FormatUint(signer.gen, 10)))
+	}
+
+	// The proof must be the new key's.
+	_, wrong, _ := ed25519.GenerateKey(nil)
+	wantCode(t, rotate(c1, rotateBody(t, mb.idHex, mb.id, wrong, newPub)), http.StatusForbidden, "")
+	// The old address key can't rotate itself away.
+	wantCode(t, f.serve(genRequest(t, mb.sign, mb.idHex, "POST", "/coordinator/signing-key", rotateBody(t, mb.idHex, mb.id, newPriv, newPub), "1")), http.StatusUnauthorized, "")
+	// Nor a stale generation.
+	c2 := f.coordinator(2)
+	wantCode(t, f.claim(c2), http.StatusOK, "")
+	wantCode(t, rotate(c1, rotateBody(t, mb.idHex, mb.id, newPriv, newPub)), http.StatusConflict, codeStaleGeneration)
+	// The same key isn't a rotation.
+	same := mb.sign.Public().(ed25519.PublicKey)
+	wantCode(t, rotate(c2, rotateBody(t, mb.idHex, mb.id, mb.sign, same)), http.StatusConflict, "")
+
+	rec := rotate(c2, rotateBody(t, mb.idHex, mb.id, newPriv, newPub))
+	wantCode(t, rec, http.StatusOK, "")
+	sum := sha256.Sum256(newPub)
+	if !strings.Contains(rec.Body.String(), hex.EncodeToString(sum[:])) {
+		t.Fatalf("body %s", rec.Body)
+	}
+	sendWith = func(priv ed25519.PrivateKey) *httptest.ResponseRecorder {
+		return f.serve(genRequest(t, priv, mb.idHex, "POST", "/send", []byte(`{"message":"RnJvbTogYQ0KDQo="}`), "2"))
+	}
+	sender.got = nil
+	wantCode(t, sendWith(mb.sign), http.StatusUnauthorized, "")
+	if sender.got != nil {
+		t.Fatal("the old key sent")
+	}
+	wantCode(t, sendWith(newPriv), http.StatusOK, "")
+
+	// And after a reboot.
+	f.opts.Sender = sender
+	f.reboot()
+	wantCode(t, sendWith(mb.sign), http.StatusUnauthorized, "")
+	wantCode(t, sendWith(newPriv), http.StatusOK, "")
+
+	// A worker that isn't enrolled can't be rotated by the coordinator.
+	other := createMbox(t, f.rt, "other@fountbox.com", "lic-2")
+	wantCode(t, rotate(c2, rotateBody(t, other.idHex, other.id, newPriv, newPub)), http.StatusConflict, codeNotCoordinated)
+}
