@@ -33,7 +33,10 @@ type deliverer interface {
 type Service struct {
 	Policy *Policy
 	Out    Transmitter // an *Outbox in one container; mail-send over the link in a split edge
-	Dedupe *Dedupe     // nil is a NewDedupe with the defaults, made on first use
+	Dedupe *Dedupe     // nil is a NewDedupe with the defaults and Records, made on first use
+	// Records keeps send records across reboots for the Dedupe made on first use.
+	// nil keeps them in memory only.
+	Records SentRecords
 
 	once sync.Once
 }
@@ -47,15 +50,28 @@ func (s *Service) Send(ctx context.Context, mailboxID, raw []byte) ([]Result, er
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadMessage, err)
 	}
-	s.once.Do(func() {
-		if s.Dedupe == nil {
-			s.Dedupe = NewDedupe(DedupeOptions{})
-		}
-	})
-	return s.Dedupe.Do(ctx, mailboxID, m, func(ctx context.Context, sub *Message) ([]Result, error) {
+	return s.dedupe().Do(ctx, mailboxID, m, func(ctx context.Context, sub *Message, commit func() error) ([]Result, error) {
 		if err := s.Policy.Check(mailboxID, sub); err != nil {
+			return nil, err
+		}
+		if err := commit(); err != nil {
 			return nil, err
 		}
 		return s.Out.Transmit(ctx, sub.From, sub.Recipients, sub.Raw)
 	})
+}
+
+// Lookup answers "was this Message-ID sent?" for the worker mailboxID, from this
+// boot's record or the durable one (Dedupe.Lookup).
+func (s *Service) Lookup(ctx context.Context, mailboxID []byte, messageID string) (SentStatus, error) {
+	return s.dedupe().Lookup(ctx, mailboxID, messageID)
+}
+
+func (s *Service) dedupe() *Dedupe {
+	s.once.Do(func() {
+		if s.Dedupe == nil {
+			s.Dedupe = NewDedupe(DedupeOptions{Records: s.Records})
+		}
+	})
+	return s.Dedupe
 }

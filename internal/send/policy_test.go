@@ -81,6 +81,16 @@ func TestPolicyLapsedAndProof(t *testing.T) {
 		t.Fatalf("lapsed: %v", err)
 	}
 
+	// Paused for lapse by the coordinator, before the entitlement ends.
+	dir, id = newDir("pat@smithcpa.com")
+	m = dir.boxes[hex.EncodeToString(id)]
+	m.EntitlementExp, m.Lapsed = time.Now().Add(time.Hour).Unix(), true
+	dir.boxes[hex.EncodeToString(id)] = m
+	p = NewPolicy(PolicyOptions{Directory: dir, MailDomain: "@fountbox.com"})
+	if err := p.Check(id, parsed(t, good())); !errors.Is(err, ErrLapsed) {
+		t.Fatalf("paused for lapse: %v", err)
+	}
+
 	dir, id = newDir("pat@smithcpa.com")
 	p = NewPolicy(PolicyOptions{Directory: dir, MailDomain: "@fountbox.com",
 		Proven: func(_, _ []byte) bool { return false }})

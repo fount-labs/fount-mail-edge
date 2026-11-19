@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fount-labs/fount-mail-edge/internal/egress"
 	"github.com/fount-labs/fount-mail-edge/internal/gatewaytls"
@@ -134,8 +135,16 @@ type Config struct {
 	// SendLink is mail-send's link address (host:port), on mail-core in a split
 	// edge only. Core holds no send setting; mail-send has them all.
 	SendLink string
-	Dev      bool
-	Secrets  Secrets
+	// CoordinatorAuthorityKey is the Cloud vault's Ed25519 public key that signs
+	// coordinator generation certificates (fount launch-plan decision 18). It's
+	// public. Unset leaves the coordinator routes 501.
+	CoordinatorAuthorityKey ed25519.PublicKey
+	// SentRetention is how long a worker's send records are kept after their
+	// last write (SENT_RETENTION_DAYS). It must cover how far back a Cloud
+	// coordinator restore can reach. Zero is sent.DefaultRetention.
+	SentRetention time.Duration
+	Dev           bool
+	Secrets       Secrets
 }
 
 // S3EndpointURL is the mail bucket root the S3 client talks to. An explicit
@@ -219,6 +228,16 @@ func load(core bool) (*Config, error) {
 	if err := c.loadSend(dev); err != nil {
 		return nil, err
 	}
+	if err := c.loadCoordinator(); err != nil {
+		return nil, err
+	}
+	if v := os.Getenv("SENT_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 3650 {
+			return nil, fmt.Errorf("SENT_RETENTION_DAYS must be a whole number of days from 1 to 3650")
+		}
+		c.SentRetention = time.Duration(n) * 24 * time.Hour
+	}
 	if dev {
 		devSecrets(c)
 		return c, nil
@@ -298,6 +317,21 @@ func (c *Config) loadVault() error {
 		return fmt.Errorf("OPERATOR_KEY must be a hex Ed25519 public key, from vaultctl operator-keygen")
 	}
 	c.OperatorKey = operator
+	return nil
+}
+
+// loadCoordinator reads the key that signs coordinator generation certificates.
+// It's optional: without it no mailbox can be put under a coordinator.
+func (c *Config) loadCoordinator() error {
+	v := os.Getenv("COORDINATOR_AUTHORITY_KEY")
+	if v == "" {
+		return nil
+	}
+	k, err := base64.StdEncoding.DecodeString(v)
+	if err != nil || len(k) != ed25519.PublicKeySize {
+		return fmt.Errorf("COORDINATOR_AUTHORITY_KEY must be a base64 raw Ed25519 public key")
+	}
+	c.CoordinatorAuthorityKey = k
 	return nil
 }
 

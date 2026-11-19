@@ -194,3 +194,10 @@ shim:
     - /pause/*
     - /send
     - /connect
+    # Cloud coordinator (fount launch-plan M)
+    - /coordinator
+    - /coordinator/generation
+    - /coordinator/lapse
+    - /coordinator/signing-key
+    - /coordinator/changes
+    - /sent/query

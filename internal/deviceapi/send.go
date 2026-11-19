@@ -16,6 +16,12 @@ type Sender interface {
 	Send(ctx context.Context, mailboxID, raw []byte) ([]send.Result, error)
 }
 
+// SentLookup answers "was this Message-ID sent?" (POST /sent/query). The
+// Sender implements it where it keeps send records; nil leaves the route 501.
+type SentLookup interface {
+	Lookup(ctx context.Context, mailboxID []byte, messageID string) (send.SentStatus, error)
+}
+
 type sendRequest struct {
 	Message []byte `json:"message"` // the whole RFC 5322 message, base64 in JSON
 }
@@ -59,6 +65,13 @@ func (a *API) sendMail() http.Handler {
 		case errors.Is(err, send.ErrMessageIDReused):
 			writeErr(w, http.StatusConflict, err.Error())
 			return
+		case errors.Is(err, send.ErrSendInDoubt):
+			writeAPIError(w, &apiError{http.StatusConflict, "send_in_doubt", err.Error()})
+			return
+		case errors.Is(err, send.ErrRecordFailed):
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, http.StatusServiceUnavailable, "could not record the send; nothing was sent")
+			return
 		case errors.Is(err, send.ErrRateLimited):
 			w.Header().Set("Retry-After", "3600")
 			writeErr(w, http.StatusTooManyRequests, err.Error())
@@ -72,5 +85,46 @@ func (a *API) sendMail() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	})
+}
+
+// maxSentQuery bounds one POST /sent/query.
+const maxSentQuery = 100
+
+type sentQuery struct {
+	MessageIDs []string `json:"message_ids"`
+}
+
+// querySent handles POST /sent/query: for each Message-ID, what the edge knows of
+// its send from the calling worker (send.SentStatus), in the order asked. It's a
+// POST so the Message-IDs are in the signed body. A coordinator asks before it
+// retries a send whose outcome it didn't record (fount launch-plan decision 14).
+func (a *API) querySent() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mailboxID, ok := callerMailbox(r)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "bad key id")
+			return
+		}
+		var q sentQuery
+		if err := json.NewDecoder(r.Body).Decode(&q); err != nil || len(q.MessageIDs) == 0 || len(q.MessageIDs) > maxSentQuery {
+			writeErr(w, http.StatusBadRequest, "message_ids must list 1 to 100 Message-IDs")
+			return
+		}
+		out := make([]send.SentStatus, 0, len(q.MessageIDs))
+		for _, id := range q.MessageIDs {
+			if id == "" || len(id) > 998 {
+				writeErr(w, http.StatusBadRequest, "bad Message-ID")
+				return
+			}
+			st, err := a.sentLookup.Lookup(r.Context(), mailboxID, id)
+			if err != nil {
+				w.Header().Set("Retry-After", "5")
+				writeErr(w, http.StatusServiceUnavailable, "could not read send records")
+				return
+			}
+			out = append(out, st)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"records": out})
 	})
 }

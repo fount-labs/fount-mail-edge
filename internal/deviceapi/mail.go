@@ -36,9 +36,18 @@ func (a *API) listMail(mail store.MailReader) http.Handler {
 			return
 		}
 		// The broker starts no job for a paused worker (§12); it still fetches.
+		// A worker paused for lapse is held the same way, until hold_until.
 		paused := a.pauser != nil && a.pauser.Paused(mailboxID)
+		out := map[string]any{"messages": msgs, "paused": paused}
+		if a.lapser != nil {
+			lapsed, until := a.lapser.Lapse(mailboxID)
+			out["lapsed"] = lapsed
+			if lapsed {
+				out["hold_until"] = until
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "paused": paused})
+		_ = json.NewEncoder(w).Encode(out)
 	})
 }
 

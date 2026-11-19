@@ -73,6 +73,13 @@ const (
 type Data struct {
 	Version   int                 `json:"version"`
 	Mailboxes map[string]*Mailbox `json:"mailboxes"` // hex(mailbox id) -> record
+
+	// Coordinator is the newest Cloud coordinator generation (coordinator.go).
+	Coordinator *Coordinator `json:"coordinator,omitempty"`
+
+	// Epoch names this line of versions for the changes feed (changes.go). A
+	// restore from a backup picks a new one, since versions go back.
+	Epoch []byte `json:"epoch,omitempty"`
 }
 
 // Mailbox is one mailbox's routing record (design §4 "On the server"). In M2 the
@@ -98,6 +105,21 @@ type Mailbox struct {
 	// (§12). Mail still arrives and can still be fetched. PausedAt is the last change.
 	Paused   bool  `json:"paused,omitempty"`
 	PausedAt int64 `json:"paused_at,omitempty"`
+
+	// Coordinated puts the mailbox under the Cloud coordinator: its per-mailbox
+	// Device API calls must name the current generation, and the coordinator's
+	// own key may act on it (coordinator.go).
+	Coordinated bool `json:"coordinated,omitempty"`
+
+	// Lapsed pauses the worker for a lapsed payment, set by the coordinator
+	// (coordinator.go): mail is held, not bounced, for the lapse hold past the
+	// entitlement's expiry, and the worker can't send. LapsedAt is the last change.
+	Lapsed   bool  `json:"lapsed,omitempty"`
+	LapsedAt int64 `json:"lapsed_at,omitempty"`
+
+	// Changed is the routing Version of the last write that changed this record,
+	// for the changes feed (changes.go).
+	Changed uint64 `json:"changed,omitempty"`
 
 	// The license's owner state (M3, §10), kept on the handle's record only, because
 	// an owner is the license's and a new worker copies its owners. See owners.go.
@@ -142,6 +164,7 @@ type Store struct {
 	proofKey      []byte      // keys owner-proof tokens
 	connectKey    []byte      // keys connect-mail Message-IDs (connect.go)
 	newOwnerLimit int         // new owners per license per day; <= 0 is no cap
+	lapseHold     time.Duration
 	now           func() time.Time
 
 	mu    sync.Mutex
@@ -180,7 +203,7 @@ func Initialize(ctx context.Context, blobs Blobs, routingDataKey []byte) error {
 	if err != nil {
 		return err
 	}
-	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}}}
+	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}, Epoch: newEpoch()}}
 	switch _, err := blobs.Get(ctx, ObjectKey); {
 	case err == nil:
 		return ErrObjectExists
@@ -224,7 +247,7 @@ func New(ctx context.Context, blobs Blobs, routingDataKey, addressMACKey []byte,
 		return nil, err
 	}
 	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead, ownerAEAD: ownerAEAD, proofKey: proofKey,
-		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, now: time.Now}
+		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, lapseHold: DefaultLapseHold, now: time.Now}
 	for _, o := range opts {
 		o(s)
 	}
@@ -510,9 +533,12 @@ func (s *Store) NextSequence(ctx context.Context, mailboxID []byte) (uint64, err
 	if !ok {
 		return 0, fmt.Errorf("routing: no mailbox %x for sequence", mailboxID)
 	}
+	prevChanged := m.Changed
 	m.Sequence++
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		m.Sequence-- // keep memory and S3 in step if the write failed
+		m.Changed = prevChanged
 		return 0, err
 	}
 	return m.Sequence, nil
@@ -558,6 +584,9 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 // EntitlementExp ahead of now while a license is current or in grace, so a
 // lapsed value is the signal that even the grace is over. A "fount+<token>"
 // reply to an owner-proof mail is accepting while its token matches an owner.
+// A mailbox the coordinator paused for lapse holds mail instead of bouncing it
+// (decision 11): it stays accepting until the entitlement's expiry plus the
+// lapse hold.
 // Any other "<local>+<tag>" recipient answers as "<local>" does.
 func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatus, error) {
 	if tag, ok := proofTag(recipient); ok {
@@ -567,7 +596,10 @@ func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatu
 	if !ok {
 		return smtp.RecipientUnknown, nil
 	}
-	if m.EntitlementExp > 0 && time.Now().Unix() >= m.EntitlementExp {
+	if now := s.now().Unix(); m.EntitlementExp > 0 && now >= m.EntitlementExp {
+		if m.Lapsed && now < s.holdUntil(&m) {
+			return smtp.RecipientAccepting, nil
+		}
 		return smtp.RecipientExpired, nil
 	}
 	return smtp.RecipientAccepting, nil
@@ -598,6 +630,7 @@ func (s *Store) put(ctx context.Context, m *Mailbox) error {
 	key := hex.EncodeToString(m.MailboxID)
 	prev := s.data.Mailboxes[key]
 	s.data.Mailboxes[key] = m
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		if prev != nil {
 			s.data.Mailboxes[key] = prev
@@ -689,6 +722,7 @@ func (s *Store) update(ctx context.Context, records []*Mailbox, change func(*Mai
 	for i, m := range records {
 		prev[i] = *m
 		change(m)
+		s.touch(m)
 	}
 	if err := s.persist(ctx); err != nil {
 		for i, m := range records {

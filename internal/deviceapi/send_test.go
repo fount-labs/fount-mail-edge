@@ -75,6 +75,8 @@ func TestSendRouteErrors(t *testing.T) {
 		send.ErrRateLimited:                     http.StatusTooManyRequests,
 		send.ErrSendInProgress:                  http.StatusConflict,
 		send.ErrMessageIDReused:                 http.StatusConflict,
+		send.ErrSendInDoubt:                     http.StatusConflict,
+		send.ErrRecordFailed:                    http.StatusServiceUnavailable,
 		fmt.Errorf("link: %w", send.ErrOff):     http.StatusNotImplemented,
 		fmt.Errorf("relay down"):                http.StatusInternalServerError,
 	} {
@@ -131,5 +133,72 @@ func TestSendRouteBodyLimit(t *testing.T) {
 	api.ServeHTTP(rec, signedRequest(t, priv, keyID, "PUT", "/routing", big, time.Now(), "routing"))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("PUT /routing over 1 MiB: status %d", rec.Code)
+	}
+}
+
+// lookupSender is a Sender that keeps send records.
+type lookupSender struct {
+	fakeSender
+	asked [][]byte
+	err   error
+}
+
+func (l *lookupSender) Lookup(_ context.Context, mailboxID []byte, id string) (send.SentStatus, error) {
+	l.asked = append(l.asked, mailboxID)
+	if l.err != nil {
+		return send.SentStatus{}, l.err
+	}
+	if id == "<sent@fountbox.com>" {
+		return send.SentStatus{MessageID: id, State: send.SentDone, Results: []send.Result{{Recipient: "pat@smithcpa.com", Status: send.Sent}}}, nil
+	}
+	return send.SentStatus{MessageID: id, State: send.SentNone}, nil
+}
+
+func TestSentQueryRoute(t *testing.T) {
+	l := &lookupSender{}
+	api, priv, keyID := sendAPI(t, l)
+	query := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/sent/query", []byte(body), time.Now(), nextNonce()))
+		return rec
+	}
+	rec := query(`{"message_ids":["<sent@fountbox.com>","<new@fountbox.com>"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var out struct{ Records []send.SentStatus }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.Records) != 2 ||
+		out.Records[0].State != send.SentDone || out.Records[0].Results[0].Status != send.Sent || out.Records[1].State != send.SentNone {
+		t.Fatalf("body %s", rec.Body)
+	}
+	if hex.EncodeToString(l.asked[0]) != keyID {
+		t.Fatalf("asked for %x", l.asked[0])
+	}
+
+	many, _ := json.Marshal(sentQuery{MessageIDs: make([]string, maxSentQuery+1)})
+	for _, bad := range []string{`{}`, `{"message_ids":[]}`, `{"message_ids":[""]}`, string(many)} {
+		if rec := query(bad); rec.Code != http.StatusBadRequest {
+			t.Errorf("%.40s: %d", bad, rec.Code)
+		}
+	}
+	l.err = fmt.Errorf("s3 down")
+	if rec := query(`{"message_ids":["<x@y>"]}`); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("store down: %d", rec.Code)
+	}
+
+	// Another key can't ask about this worker's sends.
+	_, other, _ := ed25519.GenerateKey(nil)
+	rec = httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, other, keyID, "POST", "/sent/query", []byte(`{"message_ids":["<x@y>"]}`), time.Now(), nextNonce()))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong key: %d", rec.Code)
+	}
+
+	// A Sender that keeps no records leaves the route a stub.
+	api, priv, keyID = sendAPI(t, &fakeSender{})
+	rec = httptest.NewRecorder()
+	api.ServeHTTP(rec, signedRequest(t, priv, keyID, "POST", "/sent/query", []byte(`{"message_ids":["<x@y>"]}`), time.Now(), nextNonce()))
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("no records: %d", rec.Code)
 	}
 }
