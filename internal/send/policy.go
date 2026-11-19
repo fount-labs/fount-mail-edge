@@ -3,9 +3,12 @@ package send
 import (
 	"crypto/hmac"
 	"errors"
+	"fmt"
+	"mime"
 	"strings"
 	"time"
 
+	"github.com/fount-labs/fount-mail-edge/internal/header"
 	"github.com/fount-labs/fount-mail-edge/internal/limit"
 	"github.com/fount-labs/fount-mail-edge/internal/routing"
 )
@@ -47,6 +50,7 @@ type Policy struct {
 	proven  ProofChecker
 	worker  *limit.Limiter
 	license *limit.Limiter
+	invites *limit.Limiter
 	now     func() time.Time
 }
 
@@ -72,6 +76,7 @@ func NewPolicy(o PolicyOptions) *Policy {
 		proven:  o.Proven,
 		worker:  limit.PerWindow(float64(perWorker), 24*time.Hour),
 		license: limit.PerWindow(float64(perLicense), 24*time.Hour),
+		invites: limit.PerWindow(InvitesPerDay, 24*time.Hour),
 		now:     time.Now,
 	}
 }
@@ -125,4 +130,77 @@ func hasHash(list [][]byte, h []byte) bool {
 		}
 	}
 	return false
+}
+
+// Team invites (fount launch-plan decision 26, design §8 "Invites"). The Cloud
+// coordinator mails an invite from a worker's address to someone who isn't an
+// owner yet, so they can't have proved they read anything. What stands in for
+// the owner list is the coordinator's own key: POST /coordinator/invite is
+// signed by the current generation's key, which no device holds. The edge
+// keeps the rest narrow, so that key can't become a way to send arbitrary mail
+// from a worker: one recipient, plain text, small, and a per-worker budget.
+const (
+	// InvitesPerDay is each worker's invite budget, apart from its sending
+	// limits. Per enclave, like every other limit.
+	InvitesPerDay = 20
+	// MaxInviteBytes bounds an invite message: a few lines and a link.
+	MaxInviteBytes = 64 << 10
+	// KindInvite marks an invite's send record.
+	KindInvite = "invite"
+)
+
+var (
+	// ErrInviteLimit is a worker past InvitesPerDay.
+	ErrInviteLimit = errors.New("this worker's invite limit for the day is reached")
+	// ErrNotInvite is a message that isn't the shape of an invite.
+	ErrNotInvite = errors.New("not an invite")
+)
+
+// CheckInvite returns nil if mailboxID may mail m as a team invite: m is from
+// the worker, which is neither paused nor lapsed, to exactly one address
+// outside the mail domain, as a single text/plain part of at most
+// MaxInviteBytes. The invite budget is spent last.
+func (p *Policy) CheckInvite(mailboxID []byte, m *Message) error {
+	mb, ok := p.dir.Snapshot(mailboxID)
+	if !ok {
+		return ErrNoMailbox
+	}
+	if mb.Paused {
+		return ErrPaused
+	}
+	if mb.Lapsed || mb.EntitlementExp != 0 && p.now().Unix() >= mb.EntitlementExp {
+		return ErrLapsed
+	}
+	if !strings.HasSuffix(m.From, p.domain) || !hmac.Equal(p.dir.MailboxID(m.From), mailboxID) {
+		return ErrNotWorker
+	}
+	switch {
+	case len(m.Raw) > MaxInviteBytes:
+		return fmt.Errorf("%w: over %d bytes", ErrNotInvite, MaxInviteBytes)
+	case len(m.Recipients) != 1:
+		return fmt.Errorf("%w: an invite has exactly one recipient", ErrNotInvite)
+	case strings.HasSuffix(m.Recipients[0], p.domain):
+		return fmt.Errorf("%w: the recipient is a worker", ErrNotInvite)
+	case !plainText(m.Raw):
+		return fmt.Errorf("%w: an invite is a single text/plain part", ErrNotInvite)
+	}
+	if !p.invites.Allow(string(mailboxID)) {
+		return ErrInviteLimit
+	}
+	return nil
+}
+
+// plainText reports whether raw's one part is text/plain: no Content-Type
+// (RFC 2045's default) or text/plain with any parameters.
+func plainText(raw []byte) bool {
+	fields, _, err := header.Split(raw)
+	if err != nil {
+		return false
+	}
+	ct := header.Get(fields, "content-type")
+	if len(ct) == 0 {
+		return true
+	}
+	mt, _, err := mime.ParseMediaType(ct[0].Value())
+	return err == nil && mt == "text/plain"
 }

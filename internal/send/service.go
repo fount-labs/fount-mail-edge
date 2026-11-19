@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -57,6 +58,29 @@ func (s *Service) Send(ctx context.Context, mailboxID, raw []byte) ([]Result, er
 		if err := commit(); err != nil {
 			return nil, err
 		}
+		return s.Out.Transmit(ctx, sub.From, sub.Recipients, sub.Raw)
+	})
+}
+
+// SendInvite delivers raw from the worker mailboxID as a team invite: the same
+// send records and retry rules as Send, but Policy.CheckInvite instead of the
+// owner check, and the record marked KindInvite. Its caller has checked the
+// coordinator's signature (POST /coordinator/invite).
+func (s *Service) SendInvite(ctx context.Context, mailboxID, raw []byte) ([]Result, error) {
+	m, err := Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadMessage, err)
+	}
+	m.Kind = KindInvite
+	return s.dedupe().Do(ctx, mailboxID, m, func(ctx context.Context, sub *Message, commit func() error) ([]Result, error) {
+		if err := s.Policy.CheckInvite(mailboxID, sub); err != nil {
+			return nil, err
+		}
+		if err := commit(); err != nil {
+			return nil, err
+		}
+		// Counts only, as Outbox logs: never the address.
+		log.Printf("send: a team invite, %d recipient", len(sub.Recipients))
 		return s.Out.Transmit(ctx, sub.From, sub.Recipients, sub.Raw)
 	})
 }

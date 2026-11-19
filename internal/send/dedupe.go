@@ -63,6 +63,9 @@ type SentRecord struct {
 	UpdatedAt  int64    `json:"updated_at"`
 	Recipients []string `json:"recipients"`
 	Outcomes   []Result `json:"outcomes"` // Recipient unset
+	// Kind is KindInvite for a team invite (POST /coordinator/invite), else
+	// empty. It's set on the first send and kept.
+	Kind string `json:"kind,omitempty"`
 }
 
 // SentRecords keeps send records across reboots (package sent, over S3). Load
@@ -124,6 +127,7 @@ type sendRecord struct {
 	busy     chan struct{} // non-nil while a delivery or a durable read runs; closed when it ends
 	outcomes []Result      // by position in the message's Recipients; Recipient unset
 	rcpts    []string      // the message's Recipients, for Lookup
+	kind     string        // the first send's Message.Kind
 	elem     *list.Element
 }
 
@@ -193,6 +197,7 @@ func (d *Dedupe) Do(ctx context.Context, mailboxID []byte, m *Message, attempt a
 		if rec == nil {
 			rec = d.add(k, digest, now)
 			rec.rcpts = slices.Clone(m.Recipients)
+			rec.kind = m.Kind
 			d.mu.Unlock()
 			return d.first(ctx, k, rec, mailboxID, m, attempt)
 		}
@@ -235,7 +240,7 @@ func (d *Dedupe) first(ctx context.Context, k string, rec *sendRecord, mailboxID
 		return nil, ErrMessageIDReused
 	}
 	d.mu.Lock()
-	rec.firstAt = prev.FirstAt
+	rec.firstAt, rec.kind = prev.FirstAt, prev.Kind
 	rec.outcomes = make([]Result, len(m.Recipients))
 	for i := range rec.outcomes {
 		rec.outcomes[i] = Result{Status: Unknown}
@@ -375,6 +380,7 @@ func (d *Dedupe) durable(rec *sendRecord, m *Message, pending []int) *SentRecord
 		UpdatedAt:  d.now().Unix(),
 		Recipients: slices.Clone(m.Recipients),
 		Outcomes:   make([]Result, len(m.Recipients)),
+		Kind:       rec.kind,
 	}
 	for i := range out.Outcomes {
 		out.Outcomes[i] = Result{Status: Unknown}
@@ -492,6 +498,7 @@ type SentStatus struct {
 	FirstAt   int64     `json:"first_at,omitempty"`
 	UpdatedAt int64     `json:"updated_at,omitempty"`
 	Results   []Result  `json:"results,omitempty"` // by recipient, in the message's order
+	Kind      string    `json:"kind,omitempty"`    // KindInvite for a team invite
 }
 
 // Lookup reports what the edge knows of messageID from mailboxID: this boot's
@@ -501,7 +508,7 @@ func (d *Dedupe) Lookup(ctx context.Context, mailboxID []byte, messageID string)
 	d.mu.Lock()
 	rec := d.entries[d.recordKey(mailboxID, messageID)]
 	if rec != nil && (rec.busy != nil || d.now().Before(rec.expires)) && (rec.busy != nil || rec.outcomes != nil) {
-		st.SHA256, st.FirstAt = hex.EncodeToString(rec.digest), rec.firstAt
+		st.SHA256, st.FirstAt, st.Kind = hex.EncodeToString(rec.digest), rec.firstAt, rec.kind
 		st.Results = make([]Result, len(rec.outcomes))
 		for i, o := range rec.outcomes {
 			st.Results[i] = Result{Recipient: rec.rcpts[i], Status: o.Status, Detail: o.Detail}
@@ -521,7 +528,7 @@ func (d *Dedupe) Lookup(ctx context.Context, mailboxID []byte, messageID string)
 	if err != nil || prev == nil {
 		return st, err
 	}
-	st.SHA256, st.FirstAt, st.UpdatedAt = hex.EncodeToString(prev.SHA256), prev.FirstAt, prev.UpdatedAt
+	st.SHA256, st.FirstAt, st.UpdatedAt, st.Kind = hex.EncodeToString(prev.SHA256), prev.FirstAt, prev.UpdatedAt, prev.Kind
 	st.Results = make([]Result, len(prev.Outcomes))
 	for i, o := range prev.Outcomes {
 		st.Results[i] = Result{Status: o.Status, Detail: o.Detail}
