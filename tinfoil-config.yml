@@ -182,6 +182,7 @@ shim:
     - /mailbox
     - /handle/*
     - /address
+    - /address/remove
     - /routing
     - /entitlement
     - /mail
@@ -204,4 +205,5 @@ shim:
     - /coordinator/decryption-key
     - /coordinator/routing
     - /coordinator/pause
+    - /coordinator/remove
     - /sent/query

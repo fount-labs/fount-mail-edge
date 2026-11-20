@@ -77,6 +77,10 @@ type Data struct {
 	// Coordinator is the newest Cloud coordinator generation (coordinator.go).
 	Coordinator *Coordinator `json:"coordinator,omitempty"`
 
+	// Removed holds removed worker addresses' tombstones, by hex mailbox id
+	// (remove.go).
+	Removed map[string]*Removed `json:"removed,omitempty"`
+
 	// Epoch names this line of versions for the changes feed (changes.go). A
 	// restore from a backup picks a new one, since versions go back.
 	Epoch []byte `json:"epoch,omitempty"`
@@ -550,7 +554,10 @@ func (s *Store) AddressKey(keyID string) (ed25519.PublicKey, bool) {
 	return s.key(keyID, (*Mailbox).signingKey)
 }
 func (s *Store) MailboxKey(keyID string) (ed25519.PublicKey, bool) {
-	return s.key(keyID, (*Mailbox).mailboxKey)
+	if k, ok := s.key(keyID, (*Mailbox).mailboxKey); ok {
+		return k, true
+	}
+	return s.removedMailboxKey(keyID)
 }
 func (s *Store) OwnerChangeKey(keyID string) (ed25519.PublicKey, bool) {
 	return s.key(keyID, (*Mailbox).ownerChangeKey)
@@ -621,17 +628,25 @@ func (s *Store) Upsert(ctx context.Context, m *Mailbox) error {
 	if err := s.refresh(ctx); err != nil {
 		return err
 	}
-	return s.put(ctx, m)
+	return s.put(ctx, m, false)
 }
 
 // put stores a record and persists, rolling back memory on a write failure.
-// Caller holds s.mu.
-func (s *Store) put(ctx context.Context, m *Mailbox) error {
+// With untomb it also drops the address's tombstone, in the same write. Caller
+// holds s.mu.
+func (s *Store) put(ctx context.Context, m *Mailbox, untomb bool) error {
 	key := hex.EncodeToString(m.MailboxID)
 	prev := s.data.Mailboxes[key]
+	tomb := s.data.Removed[key]
+	if untomb {
+		delete(s.data.Removed, key)
+	}
 	s.data.Mailboxes[key] = m
 	s.touch(m)
 	if err := s.persist(ctx); err != nil {
+		if untomb && tomb != nil {
+			s.data.Removed[key] = tomb
+		}
 		if prev != nil {
 			s.data.Mailboxes[key] = prev
 		} else {
@@ -750,7 +765,11 @@ type NewMailbox struct {
 
 // Available reports whether a handle address is free to register.
 func (s *Store) Available(_ context.Context, address string) (bool, error) {
-	_, taken := s.lookup(hex.EncodeToString(s.MailboxID(address)))
+	id := s.MailboxID(address)
+	_, taken := s.lookup(hex.EncodeToString(id))
+	if !taken {
+		_, taken = s.RemovedOf(id)
+	}
 	return !taken, nil
 }
 
@@ -766,6 +785,9 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 		return nil, err
 	}
 	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
+		return nil, ErrHandleTaken
+	}
+	if _, taken := s.removed(id); taken {
 		return nil, ErrHandleTaken
 	}
 	for _, m := range s.data.Mailboxes {
@@ -786,7 +808,7 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 		LicenseHash:    p.LicenseHash,
 		EntitlementExp: p.EntitlementExp,
 		Sequence:       0,
-	}); err != nil {
+	}, false); err != nil {
 		return nil, err
 	}
 	return id, nil
@@ -831,8 +853,9 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 		return nil, ErrNotHandle
 	}
 	id := s.keyedHash(p.Address)
-	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
-		return nil, ErrHandleTaken
+	seq, tomb, err := s.reuse(id, root)
+	if err != nil {
+		return nil, err
 	}
 	if len(s.family(parent)) > MaxWorkers { // the handle's own record is in there too
 		return nil, ErrWorkerLimit
@@ -850,8 +873,8 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 		PasskeyKey:     p.PasskeyKey,
 		LicenseHash:    parent.LicenseHash,
 		EntitlementExp: parent.EntitlementExp,
-		Sequence:       0,
-	}); err != nil {
+		Sequence:       seq,
+	}, tomb); err != nil {
 		return nil, err
 	}
 	return id, nil

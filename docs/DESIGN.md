@@ -209,6 +209,25 @@ enrolled (409 `not_coordinated`):
 - `POST /coordinator/pause`, body `{"mailbox_id": "<hex>", "paused": true|false}`: the same
   pause as `POST /pause`. Answers `{"mailbox_id", "paused"}`.
 
+**Removing a worker address** (fount launch-plan X4). A deleted worker's address leaves the live
+records: it stops resolving (RCPT 550), its keys sign nothing, and it stops counting toward the
+500 workers a handle may have. A tombstone stays, holding the handle it was under, its last mail
+sequence and when it went. Only the same handle can name the address again (`POST /address`
+checks the handle), and only 30 days later, the mail retention, so mail held for the old worker
+has expired by then; before that it's 409. The new worker's sequence carries on from the old
+one, so their message, expiry and gap records never collide. A handle's own address is never
+removed (409 `handle`): it holds the license's mailbox key and owners, and a released handle
+isn't reissued. A handle keeps at most 5,000 tombstones; naming a removed address again reuses
+its own. Removing an address already removed is 200, so a lost answer is safe to retry.
+
+- `POST /address/remove`, signed by the mailbox key, body `{"mailbox_id": "<hex>"}`.
+  `Fount-Key-Id` may be any address under the handle, or the removed address itself (a
+  tombstone resolves to the handle's current mailbox key, for this route only). An enrolled
+  worker is 409 `coordinator_only`; an address under another handle is 404, as one that doesn't
+  exist. Answers `{"mailbox_id", "removed": true}`.
+- `POST /coordinator/remove`, signed by the current coordinator key with `Fount-Generation`,
+  same body and answer. The worker must be enrolled (409 `not_coordinated`).
+
 **Team invites** (decision 26). `/send` goes only to a worker's proven owners, and someone being
 invited isn't one yet. So the coordinator mails an invite from a worker's address on its own
 route, where its generation key stands in for the owner proof. The edge keeps it narrow: the

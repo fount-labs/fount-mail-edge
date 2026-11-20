@@ -140,23 +140,24 @@ var unfenced = map[string]bool{"PUT /coordinator": true}
 // m2routes is the authoritative Device API surface. Keep it in sync with design
 // §8's table; adding a row here is how a call's signer requirement is locked.
 var routes = map[string]route{
-	"POST /mailbox":      {sigNewKeys, "M2", "Creates a mailbox and handle"},
-	"GET /handle/{name}": {sigEntitlement, "M2", "Checks handle availability (rate limited)"},
-	"POST /address":      {sigMailbox, "M2", "Adds an address + public key signed by the mailbox key"},
-	"PUT /routing":       {sigOwnerChange, "M2", "Writes the versioned owner list"},
-	"GET /mail":          {sigAddress, "M2", "Lists waiting messages"},
-	"GET /mail/{id}":     {sigAddress, "M2", "Returns a message and its signature"},
-	"DELETE /mail/{id}":  {sigAddress, "M2", "Confirms receipt and deletes"},
-	"GET /gaps":          {sigAddress, "M2", "Lists signed records for sequence numbers with no message"},
-	"GET /boots/{id}":    {sigNone, "M2", "Returns a boot's attestation"},
-	"GET /recover/{id}":  {sigNone, "M2", "Issues a recovery challenge bound to a mailbox and new keys (§5)"},
-	"POST /recover":      {sigPasskey, "M2", "Accepts a new mailbox key after a lost device (§5)"},
-	"POST /entitlement":  {sigAddress, "M2", "Renews the mailbox's entitlement"},
-	"POST /pause":        {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
-	"POST /send":         {sigAddress, "M3", "Sends to owners"},
-	"POST /connect":      {sigOwnerChange, "M3", "Mails a would-be owner from the worker; their reply proves them on PUT /routing"},
-	"POST /reset":        {sigStripe, "M3", "Starts a new mailbox on the same handle"},
-	"GET /pause/{id}":    {sigNone, "M3", "Issues a pause challenge bound to a worker and a state (§12)"},
+	"POST /mailbox":        {sigNewKeys, "M2", "Creates a mailbox and handle"},
+	"GET /handle/{name}":   {sigEntitlement, "M2", "Checks handle availability (rate limited)"},
+	"POST /address":        {sigMailbox, "M2", "Adds an address + public key signed by the mailbox key"},
+	"POST /address/remove": {sigMailbox, "M4", "Removes a worker address under the mailbox key's handle"},
+	"PUT /routing":         {sigOwnerChange, "M2", "Writes the versioned owner list"},
+	"GET /mail":            {sigAddress, "M2", "Lists waiting messages"},
+	"GET /mail/{id}":       {sigAddress, "M2", "Returns a message and its signature"},
+	"DELETE /mail/{id}":    {sigAddress, "M2", "Confirms receipt and deletes"},
+	"GET /gaps":            {sigAddress, "M2", "Lists signed records for sequence numbers with no message"},
+	"GET /boots/{id}":      {sigNone, "M2", "Returns a boot's attestation"},
+	"GET /recover/{id}":    {sigNone, "M2", "Issues a recovery challenge bound to a mailbox and new keys (§5)"},
+	"POST /recover":        {sigPasskey, "M2", "Accepts a new mailbox key after a lost device (§5)"},
+	"POST /entitlement":    {sigAddress, "M2", "Renews the mailbox's entitlement"},
+	"POST /pause":          {sigPasskey, "M3", "Pauses or resumes a worker from another device"},
+	"POST /send":           {sigAddress, "M3", "Sends to owners"},
+	"POST /connect":        {sigOwnerChange, "M3", "Mails a would-be owner from the worker; their reply proves them on PUT /routing"},
+	"POST /reset":          {sigStripe, "M3", "Starts a new mailbox on the same handle"},
+	"GET /pause/{id}":      {sigNone, "M3", "Issues a pause challenge bound to a worker and a state (§12)"},
 
 	// Cloud coordinator (fount launch-plan M).
 	"PUT /coordinator":                 {sigAddress, "M4", "Enrolls the mailbox under a coordinator generation (certificate in the body)"},
@@ -169,6 +170,7 @@ var routes = map[string]route{
 	"POST /coordinator/decryption-key": {sigCoordinator, "M4", "Rotates an enrolled worker's decryption key; new mail seals to the new key"},
 	"POST /coordinator/routing":        {sigCoordinator, "M4", "Writes an enrolled worker's versioned owner list, as PUT /routing does for a device"},
 	"POST /coordinator/pause":          {sigCoordinator, "M4", "Pauses or resumes an enrolled worker, as POST /pause does with a passkey"},
+	"POST /coordinator/remove":         {sigCoordinator, "M4", "Removes an enrolled worker's address, as POST /address/remove does with the mailbox key"},
 }
 
 // built are the routes after M2 that are built, so the shim forwards them.
@@ -189,6 +191,9 @@ var built = map[string]bool{
 	"POST /coordinator/decryption-key": true,
 	"POST /coordinator/routing":        true,
 	"POST /coordinator/pause":          true,
+
+	"POST /address/remove":     true,
+	"POST /coordinator/remove": true,
 }
 
 // Route is one row of the route table, for callers that mount or expose the API.
@@ -291,6 +296,7 @@ type API struct {
 	changes       ChangesFeed          // from the Mutator; nil leaves POST /coordinator/changes 501
 	inviter       InviteSender         // from the Sender; nil leaves POST /coordinator/invite 501
 	decRotator    DecryptionKeyRotator // from the Mutator; nil leaves POST /coordinator/decryption-key 501
+	remover       Remover              // from the Mutator; nil leaves the remove routes 501
 	authority     ed25519.PublicKey
 }
 
@@ -330,6 +336,7 @@ func New(o Options) *API {
 	a.changes, _ = o.Mutator.(ChangesFeed)
 	a.inviter, _ = o.Sender.(InviteSender)
 	a.decRotator, _ = o.Mutator.(DecryptionKeyRotator)
+	a.remover, _ = o.Mutator.(Remover)
 	for pattern, r := range routes {
 		a.mux.Handle(pattern, a.guard(r, bodyLimit(pattern), fenced(r.by) && !unfenced[pattern], a.handler(pattern, r, mail, boots)))
 	}
@@ -390,6 +397,10 @@ func (a *API) handler(pattern string, rt route, mail store.MailReader, boots sto
 		return a.postCoordinatorRouting()
 	case a.coordinationLive() && a.pauser != nil && pattern == "POST /coordinator/pause":
 		return a.postCoordinatorPause()
+	case a.remover != nil && pattern == "POST /address/remove":
+		return a.postAddressRemove()
+	case a.coordinationLive() && a.remover != nil && pattern == "POST /coordinator/remove":
+		return a.postCoordinatorRemove()
 	}
 	if h := a.ownerControl(pattern); h != nil {
 		return h
