@@ -9,7 +9,7 @@
 # BuildKit reads the syntax line only at the very top of the file.
 # Bump the frontend, base image, and go.mod's Go version on purpose, together.
 
-FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 WORKDIR /src
 # No third-party code: go.mod plus the vendored vault/wire module is the full
 # dependency set, so the build needs no network and no go.sum.

@@ -13,7 +13,7 @@
 # vault, which verifies this release first, and accepts only the keyset that
 # KEYSET_COMMITMENT names (see fount-mail-vault).
 
-cvm-version: 0.14.17 # https://github.com/tinfoilsh/cvmimage/releases/latest, no `v`
+cvm-version: 0.14.19 # https://github.com/tinfoilsh/cvmimage/releases/latest, no `v`
 cpus: 2
 memory: 8192
 
