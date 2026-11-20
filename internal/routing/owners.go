@@ -22,14 +22,14 @@ import (
 // device wrote, so before the edge mails an owner it proves the owner reads that
 // address itself: each new owner gets one fixed "Reply to turn on email updates"
 // mail whose reply address carries an edge token, and the edge records the proof
-// when the reply arrives. A license can have more than one owner. Every proved
-// owner hears about a new one, and a new owner gets nothing but the proof mail
-// until OwnerWait ends, because the closed app does pairing and a bad build could
-// pair an attacker.
+// when the reply arrives. A new owner gets nothing but the proof mail until then,
+// and is mailable as soon as it arrives. A license can have more than one owner.
+// Every proved owner hears about a new one, because the closed app does pairing
+// and a bad build could pair an attacker.
 //
 // A connect reply (connect.go) is the other proof: the edge mailed the owner from
 // the worker, and the device hands back that mail's Message-ID once they reply.
-// An owner proved that way gets no proof mail; the wait and the notices stand.
+// An owner proved that way gets no proof mail; the notices stand.
 //
 // The state is the license's, so it lives on the handle's record: a new worker
 // copies the first worker's owners, and copying one isn't a new owner. Each
@@ -38,11 +38,6 @@ import (
 const (
 	ownerAddressInfo = "fount-mail-edge/v1/owner-addresses"
 	ownerProofInfo   = "fount-mail-edge/v1/owner-proof"
-
-	// OwnerWait is how long a new owner waits before the edge mails them anything
-	// but the proof mail. **Proposed** (§10); the license's first owners don't wait,
-	// because nobody could be told about them.
-	OwnerWait = 72 * time.Hour
 
 	// DefaultNewOwnersPerDay caps new owners per license per rolling day (§14
 	// "daily caps on new owners"). **Proposed**; the M3 test sets the real value.
@@ -71,7 +66,6 @@ type Owner struct {
 	Hash     []byte `json:"hash"`   // the address MAC, as in OwnerHashes
 	Sealed   []byte `json:"sealed"` // the address, sealed by sealOwner
 	AddedAt  int64  `json:"added_at"`
-	ActiveAt int64  `json:"active_at,omitempty"` // when OwnerWait ends; 0 for the license's first owners
 	ProvedAt int64  `json:"proved_at,omitempty"` // when the edge saw the proof reply; 0 until then
 }
 
@@ -158,7 +152,7 @@ func (s *Store) rootOf(m *Mailbox) *Mailbox {
 
 // SetOwners writes the versioned owner list (design §8 PUT /routing). Each record
 // keeps its owners as keyed hashes; the license's owner state on the handle's
-// record keeps a sealed copy of each address, the proof, and the wait (§10). The
+// record keeps a sealed copy of each address and the proof (§10). The
 // version must not go backwards: the device re-asserts its current version on each
 // sync, which overwrites a rolled-back object, and only a strictly greater version
 // changes the list. Resending the stored version with the same list changes
@@ -304,7 +298,6 @@ func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]s
 		}
 		o := Owner{Hash: h, Sealed: sealed, AddedAt: now}
 		if !first {
-			o.ActiveAt = now + int64(OwnerWait/time.Second)
 			p.adds = append(p.adds, now)
 			for _, r := range proved {
 				p.notices = append(p.notices, Notice{Kind: NoticeNewOwner, ToHash: r.Hash, To: r.Sealed, AboutHash: h, About: sealed})
@@ -339,8 +332,8 @@ func (s *Store) planOwners(root, m *Mailbox, hashes [][]byte, addrs map[string]s
 }
 
 // OwnerProven reports whether the edge may mail ownerHash on mailboxID's behalf:
-// it's an owner of that worker, the edge has seen their proof reply, and their
-// wait is over (§10, §14 "mail goes only to owners with the edge's own proof").
+// it's an owner of that worker and the edge has seen their proof reply (§10, §14
+// "mail goes only to owners with the edge's own proof").
 // It is send.ProofChecker.
 func (s *Store) OwnerProven(mailboxID, ownerHash []byte) bool {
 	s.mu.Lock()
@@ -351,7 +344,7 @@ func (s *Store) OwnerProven(mailboxID, ownerHash []byte) bool {
 	}
 	for _, o := range s.rootOf(m).OwnerState {
 		if hmac.Equal(o.Hash, ownerHash) {
-			return o.ProvedAt > 0 && s.now().Unix() >= o.ActiveAt
+			return o.ProvedAt > 0
 		}
 	}
 	return false

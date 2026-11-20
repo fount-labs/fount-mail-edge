@@ -133,15 +133,11 @@ func TestConnectProofKeepsTheOtherOwnerRules(t *testing.T) {
 	if n, ok := find(ns, routing.NoticeNewOwner, "jane@example.com"); !ok || n.About != "bob@example.com" {
 		t.Fatalf("jane wasn't told about bob: %+v", ns)
 	}
-	if o := f.state(t, "bob@example.com"); o.ProvedAt != f.clk.t.Unix() || o.ActiveAt != f.clk.t.Add(routing.OwnerWait).Unix() {
+	if o := f.state(t, "bob@example.com"); o.ProvedAt != f.clk.t.Unix() {
 		t.Fatalf("bob: %+v", o)
 	}
-	if f.s.OwnerProven(f.id, f.hash("bob@example.com")) {
-		t.Fatal("a connected new owner skipped the wait")
-	}
-	f.clk.t = f.clk.t.Add(routing.OwnerWait)
 	if !f.s.OwnerProven(f.id, f.hash("bob@example.com")) {
-		t.Fatal("still waiting after OwnerWait")
+		t.Fatal("a connected new owner wasn't mailable at once")
 	}
 	m, _ := f.s.Snapshot(f.id)
 	if len(m.OwnerAdds) != 1 {
