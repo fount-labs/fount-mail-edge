@@ -103,6 +103,12 @@ func (a *API) createAddress() http.Handler {
 		case errors.Is(err, routing.ErrHandleTaken):
 			writeErr(w, http.StatusConflict, "address already registered")
 			return
+		case errors.Is(err, routing.ErrRecentlyRemoved):
+			writeErr(w, http.StatusConflict, "address was removed recently; it can be added again 30 days after")
+			return
+		case errors.Is(err, routing.ErrRemovedLimit):
+			writeErr(w, http.StatusForbidden, "too many removed addresses under this handle")
+			return
 		case errors.Is(err, routing.ErrNoMailbox):
 			writeErr(w, http.StatusNotFound, "no such mailbox")
 			return
