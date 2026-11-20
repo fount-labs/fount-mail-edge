@@ -59,8 +59,9 @@ const (
 // coordinatorOnly is the refusal of a device-key or passkey change on an
 // enrolled mailbox. Once a mailbox is under a coordinator, the coordinator is
 // its only key holder (security review 2026-11-19, H1): a passkey, owner-change
-// key or mailbox key some device kept from before enrollment can't recover,
-// pause, re-own, connect or add addresses through it.
+// key some device kept from before enrollment can't recover, pause, re-own or
+// connect through it. The mailbox key still adds new addresses under the
+// handle (fenced), which gives it nothing over the enrolled one.
 func coordinatorOnly() *apiError {
 	return &apiError{http.StatusConflict, codeCoordinatorOnly, "this mailbox is under a coordinator; only the coordinator's key changes it"}
 }
@@ -140,15 +141,20 @@ func (a *API) verifyCoordinator(class signer, r *http.Request, canonical, sig []
 }
 
 // fenced reports whether a signer class is held to the generation fence: the
-// per-mailbox device keys, which a coordinator also holds.
+// per-mailbox device keys, which a coordinator also holds. The mailbox key
+// isn't: it stays with the device that made the handle, it only signs POST
+// /address, and a new address is a record of its own with its own keys, so
+// it's no authority over an enrolled address it's named under. Fencing it
+// would only stop that device adding workers under its handle once the
+// handle's own address moved to a coordinator.
 func fenced(class signer) bool {
-	return class == sigAddress || class == sigMailbox || class == sigOwnerChange
+	return class == sigAddress || class == sigOwnerChange
 }
 
 // fence refuses a call on an enrolled mailbox that doesn't name the current
-// generation, and any owner-change or mailbox-key call on one at all: those
-// keys stay with devices, so on an enrolled mailbox they are no authority
-// (coordinatorOnly). guard runs it after the signature verifies.
+// generation, and any owner-change call on one at all: that key stays with
+// devices, so on an enrolled mailbox it's no authority (coordinatorOnly).
+// guard runs it after the signature verifies.
 func (a *API) fence(r *http.Request, class signer) *apiError {
 	if a.coord == nil {
 		return nil
@@ -157,7 +163,7 @@ func (a *API) fence(r *http.Request, class signer) *apiError {
 	if !ok || !a.coord.Coordinated(mid) {
 		return nil
 	}
-	if class == sigOwnerChange || class == sigMailbox {
+	if class == sigOwnerChange {
 		return coordinatorOnly()
 	}
 	cur, _, _ := a.coord.CurrentCoordinator()

@@ -138,7 +138,7 @@ the highest generation it has seen in the routing object, so a reboot doesn't fo
   mailbox id). It enrolls the mailbox under the certificate's generation, moving the edge on if
   it's newer. Repeating it is a no-op. Answers `{"mailbox_id": "<hex>", "generation": N}`.
 
-Once a mailbox is enrolled, every call signed by its address, mailbox or owner-change key must
+Once a mailbox is enrolled, every call signed by its address or owner-change key must
 carry `Fount-Generation: <N>`, and the signed string gains `"\n<N>"`. A missing header is 409
 `generation_required`, an older generation 409 `stale_generation`, a newer one than the edge has
 seen 409 `unknown_generation`. The passkey routes aren't fenced. The header stops a stale
@@ -191,8 +191,12 @@ or passkey keys). From the next request on, the old key gets 401 on every addres
 **Key custody on an enrolled mailbox** (security review 2026-11-19, H1 and M1). Once a
 mailbox is enrolled, the coordinator is its only authority. Enrolling drops the mailbox's
 owner-change key and passkey, and on an enrolled mailbox `POST /recover`, `POST /pause` (after
-the passkey verifies), `PUT /routing`, `POST /connect` and `POST /address` answer 409
-`coordinator_only`, whatever key signs them. The coordinator acts through its own routes, each
+the passkey verifies), `PUT /routing` and `POST /connect` answer 409 `coordinator_only`,
+whatever key signs them. `POST /address` named under an enrolled mailbox still takes the
+mailbox key, with no `Fount-Generation`: the mailbox key stays with the device that made the
+handle so it can add more workers under it, and a new address is its own record with its own
+keys, so it gives that device nothing over the enrolled one (an address already taken is 409).
+The coordinator acts through its own routes, each
 signed by the current coordinator key with `Fount-Generation` and refusing a worker that isn't
 enrolled (409 `not_coordinated`):
 
