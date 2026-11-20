@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fount-labs/fount-mail-vault/wire"
 )
@@ -454,6 +455,48 @@ func TestCheckBootDomain(t *testing.T) {
 	for _, d := range []string{"boot", "Boot.fountbox.com", "*.boot.fountbox.com", ".boot.fountbox.com", "boot.fountbox.com.", "mx1.fountbox.com", "-b.fountbox.com"} {
 		if err := checkBootDomain(d, hosts); err == nil {
 			t.Errorf("%q accepted", d)
+		}
+	}
+}
+
+func TestCoordinatorAuthorityKey(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	c, err := Load()
+	if err != nil || c.CoordinatorAuthorityKey != nil {
+		t.Fatalf("unset: %v %x", err, c.CoordinatorAuthorityKey)
+	}
+	key := make([]byte, ed25519.PublicKeySize)
+	key[0] = 7
+	t.Setenv("COORDINATOR_AUTHORITY_KEY", base64.StdEncoding.EncodeToString(key))
+	if c, err = Load(); err != nil || !ed25519.PublicKey(key).Equal(c.CoordinatorAuthorityKey) {
+		t.Fatalf("set: %v %x", err, c.CoordinatorAuthorityKey)
+	}
+	for _, bad := range []string{"not base64!", base64.StdEncoding.EncodeToString(make([]byte, 44))} {
+		t.Setenv("COORDINATOR_AUTHORITY_KEY", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COORDINATOR_AUTHORITY_KEY") {
+			t.Fatalf("%q: %v", bad, err)
+		}
+	}
+}
+
+func TestSentRetentionDays(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("EDGE_DEV", "")
+	t.Setenv("GATEWAY_CLIENT_PINS", strings.Repeat("ab", 32))
+	t.Setenv("SENT_RETENTION_DAYS", "")
+	if c, err := Load(); err != nil || c.SentRetention != 0 {
+		t.Fatalf("unset: %v %v", err, c.SentRetention)
+	}
+	t.Setenv("SENT_RETENTION_DAYS", "120")
+	if c, err := Load(); err != nil || c.SentRetention != 120*24*time.Hour {
+		t.Fatalf("120: %v %v", err, c.SentRetention)
+	}
+	for _, bad := range []string{"0", "-1", "1.5", "x", "3651"} {
+		t.Setenv("SENT_RETENTION_DAYS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SENT_RETENTION_DAYS") {
+			t.Fatalf("%q: %v", bad, err)
 		}
 	}
 }

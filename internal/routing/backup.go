@@ -155,6 +155,7 @@ func (r Restore) Apply(ctx context.Context, blobs Blobs) (Summary, error) {
 	for _, m := range s.data.Mailboxes {
 		m.Sequence += r.SkipSequences
 	}
+	s.data.Epoch = newEpoch() // versions go back: cursors from before the restore reset
 	if err := s.persist(ctx); err != nil {
 		return Summary{}, fmt.Errorf("routing: write: %w", err)
 	}

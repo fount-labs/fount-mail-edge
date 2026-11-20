@@ -147,7 +147,7 @@ func TestProofAddressRefusesAWrongToken(t *testing.T) {
 	}
 }
 
-func TestNewOwnerWaitsAndIsAnnounced(t *testing.T) {
+func TestNewOwnerIsMailableOnceProvedAndIsAnnounced(t *testing.T) {
 	f := newOwnerFixture(t)
 	f.set(t, f.id, 1, "jane@example.com")
 	f.prove(t, "jane@example.com")
@@ -158,13 +158,12 @@ func TestNewOwnerWaitsAndIsAnnounced(t *testing.T) {
 	if !ok || n.About != "bob@example.com" || !bytes.Equal(n.Worker, f.id) {
 		t.Fatalf("jane wasn't told about bob: %+v", ns)
 	}
-	f.prove(t, "bob@example.com")
 	if f.s.OwnerProven(f.id, f.hash("bob@example.com")) {
-		t.Fatal("a new owner was mailable before the wait ended")
+		t.Fatal("a new owner was mailable before their proof reply")
 	}
-	f.clk.t = f.clk.t.Add(routing.OwnerWait)
+	f.prove(t, "bob@example.com")
 	if !f.s.OwnerProven(f.id, f.hash("bob@example.com")) {
-		t.Fatal("still waiting after OwnerWait")
+		t.Fatal("a proved new owner wasn't mailable at once")
 	}
 }
 
@@ -181,9 +180,11 @@ func TestRemovedOwnerIsTold(t *testing.T) {
 	if _, ok := find(ns, routing.NoticeOwnerRemoved, "jane@example.com"); !ok {
 		t.Fatalf("jane wasn't told she was removed: %+v", ns)
 	}
-	f.prove(t, "mallory@example.com")
+	if m, _ := f.s.Snapshot(f.id); len(m.OwnerAdds) != 1 {
+		t.Fatalf("owner adds %v, want mallory counted as a new owner", m.OwnerAdds)
+	}
 	if f.s.OwnerProven(f.id, f.hash("mallory@example.com")) {
-		t.Fatal("an owner added after emptying the list skipped the wait")
+		t.Fatal("an owner added after emptying the list was mailable before their proof reply")
 	}
 	if f.s.OwnerProven(f.id, f.hash("jane@example.com")) {
 		t.Fatal("a removed owner is still proven")

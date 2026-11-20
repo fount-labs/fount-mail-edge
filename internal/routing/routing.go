@@ -73,6 +73,17 @@ const (
 type Data struct {
 	Version   int                 `json:"version"`
 	Mailboxes map[string]*Mailbox `json:"mailboxes"` // hex(mailbox id) -> record
+
+	// Coordinator is the newest Cloud coordinator generation (coordinator.go).
+	Coordinator *Coordinator `json:"coordinator,omitempty"`
+
+	// Removed holds removed worker addresses' tombstones, by hex mailbox id
+	// (remove.go).
+	Removed map[string]*Removed `json:"removed,omitempty"`
+
+	// Epoch names this line of versions for the changes feed (changes.go). A
+	// restore from a backup picks a new one, since versions go back.
+	Epoch []byte `json:"epoch,omitempty"`
 }
 
 // Mailbox is one mailbox's routing record (design §4 "On the server"). In M2 the
@@ -98,6 +109,21 @@ type Mailbox struct {
 	// (§12). Mail still arrives and can still be fetched. PausedAt is the last change.
 	Paused   bool  `json:"paused,omitempty"`
 	PausedAt int64 `json:"paused_at,omitempty"`
+
+	// Coordinated puts the mailbox under the Cloud coordinator: its per-mailbox
+	// Device API calls must name the current generation, and the coordinator's
+	// own key may act on it (coordinator.go).
+	Coordinated bool `json:"coordinated,omitempty"`
+
+	// Lapsed pauses the worker for a lapsed payment, set by the coordinator
+	// (coordinator.go): mail is held, not bounced, for the lapse hold past the
+	// entitlement's expiry, and the worker can't send. LapsedAt is the last change.
+	Lapsed   bool  `json:"lapsed,omitempty"`
+	LapsedAt int64 `json:"lapsed_at,omitempty"`
+
+	// Changed is the routing Version of the last write that changed this record,
+	// for the changes feed (changes.go).
+	Changed uint64 `json:"changed,omitempty"`
 
 	// The license's owner state (M3, §10), kept on the handle's record only, because
 	// an owner is the license's and a new worker copies its owners. See owners.go.
@@ -142,6 +168,7 @@ type Store struct {
 	proofKey      []byte      // keys owner-proof tokens
 	connectKey    []byte      // keys connect-mail Message-IDs (connect.go)
 	newOwnerLimit int         // new owners per license per day; <= 0 is no cap
+	lapseHold     time.Duration
 	now           func() time.Time
 
 	mu    sync.Mutex
@@ -180,7 +207,7 @@ func Initialize(ctx context.Context, blobs Blobs, routingDataKey []byte) error {
 	if err != nil {
 		return err
 	}
-	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}}}
+	s := &Store{blobs: blobs, aead: aead, data: &Data{Version: 1, Mailboxes: map[string]*Mailbox{}, Epoch: newEpoch()}}
 	switch _, err := blobs.Get(ctx, ObjectKey); {
 	case err == nil:
 		return ErrObjectExists
@@ -224,7 +251,7 @@ func New(ctx context.Context, blobs Blobs, routingDataKey, addressMACKey []byte,
 		return nil, err
 	}
 	s := &Store{blobs: blobs, macKey: addressMACKey, aead: aead, ownerAEAD: ownerAEAD, proofKey: proofKey,
-		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, now: time.Now}
+		connectKey: connectKey, newOwnerLimit: DefaultNewOwnersPerDay, lapseHold: DefaultLapseHold, now: time.Now}
 	for _, o := range opts {
 		o(s)
 	}
@@ -510,9 +537,12 @@ func (s *Store) NextSequence(ctx context.Context, mailboxID []byte) (uint64, err
 	if !ok {
 		return 0, fmt.Errorf("routing: no mailbox %x for sequence", mailboxID)
 	}
+	prevChanged := m.Changed
 	m.Sequence++
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
 		m.Sequence-- // keep memory and S3 in step if the write failed
+		m.Changed = prevChanged
 		return 0, err
 	}
 	return m.Sequence, nil
@@ -524,7 +554,10 @@ func (s *Store) AddressKey(keyID string) (ed25519.PublicKey, bool) {
 	return s.key(keyID, (*Mailbox).signingKey)
 }
 func (s *Store) MailboxKey(keyID string) (ed25519.PublicKey, bool) {
-	return s.key(keyID, (*Mailbox).mailboxKey)
+	if k, ok := s.key(keyID, (*Mailbox).mailboxKey); ok {
+		return k, true
+	}
+	return s.removedMailboxKey(keyID)
 }
 func (s *Store) OwnerChangeKey(keyID string) (ed25519.PublicKey, bool) {
 	return s.key(keyID, (*Mailbox).ownerChangeKey)
@@ -558,6 +591,9 @@ func (s *Store) key(keyID string, pick func(*Mailbox) []byte) (ed25519.PublicKey
 // EntitlementExp ahead of now while a license is current or in grace, so a
 // lapsed value is the signal that even the grace is over. A "fount+<token>"
 // reply to an owner-proof mail is accepting while its token matches an owner.
+// A mailbox the coordinator paused for lapse holds mail instead of bouncing it
+// (decision 11): it stays accepting until the entitlement's expiry plus the
+// lapse hold.
 // Any other "<local>+<tag>" recipient answers as "<local>" does.
 func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatus, error) {
 	if tag, ok := proofTag(recipient); ok {
@@ -567,7 +603,10 @@ func (s *Store) Status(_ context.Context, recipient string) (smtp.RecipientStatu
 	if !ok {
 		return smtp.RecipientUnknown, nil
 	}
-	if m.EntitlementExp > 0 && time.Now().Unix() >= m.EntitlementExp {
+	if now := s.now().Unix(); m.EntitlementExp > 0 && now >= m.EntitlementExp {
+		if m.Lapsed && now < s.holdUntil(&m) {
+			return smtp.RecipientAccepting, nil
+		}
 		return smtp.RecipientExpired, nil
 	}
 	return smtp.RecipientAccepting, nil
@@ -589,16 +628,25 @@ func (s *Store) Upsert(ctx context.Context, m *Mailbox) error {
 	if err := s.refresh(ctx); err != nil {
 		return err
 	}
-	return s.put(ctx, m)
+	return s.put(ctx, m, false)
 }
 
 // put stores a record and persists, rolling back memory on a write failure.
-// Caller holds s.mu.
-func (s *Store) put(ctx context.Context, m *Mailbox) error {
+// With untomb it also drops the address's tombstone, in the same write. Caller
+// holds s.mu.
+func (s *Store) put(ctx context.Context, m *Mailbox, untomb bool) error {
 	key := hex.EncodeToString(m.MailboxID)
 	prev := s.data.Mailboxes[key]
+	tomb := s.data.Removed[key]
+	if untomb {
+		delete(s.data.Removed, key)
+	}
 	s.data.Mailboxes[key] = m
+	s.touch(m)
 	if err := s.persist(ctx); err != nil {
+		if untomb && tomb != nil {
+			s.data.Removed[key] = tomb
+		}
 		if prev != nil {
 			s.data.Mailboxes[key] = prev
 		} else {
@@ -689,6 +737,7 @@ func (s *Store) update(ctx context.Context, records []*Mailbox, change func(*Mai
 	for i, m := range records {
 		prev[i] = *m
 		change(m)
+		s.touch(m)
 	}
 	if err := s.persist(ctx); err != nil {
 		for i, m := range records {
@@ -716,7 +765,11 @@ type NewMailbox struct {
 
 // Available reports whether a handle address is free to register.
 func (s *Store) Available(_ context.Context, address string) (bool, error) {
-	_, taken := s.lookup(hex.EncodeToString(s.MailboxID(address)))
+	id := s.MailboxID(address)
+	_, taken := s.lookup(hex.EncodeToString(id))
+	if !taken {
+		_, taken = s.RemovedOf(id)
+	}
 	return !taken, nil
 }
 
@@ -732,6 +785,9 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 		return nil, err
 	}
 	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
+		return nil, ErrHandleTaken
+	}
+	if _, taken := s.removed(id); taken {
 		return nil, ErrHandleTaken
 	}
 	for _, m := range s.data.Mailboxes {
@@ -752,7 +808,7 @@ func (s *Store) Create(ctx context.Context, p NewMailbox) ([]byte, error) {
 		LicenseHash:    p.LicenseHash,
 		EntitlementExp: p.EntitlementExp,
 		Sequence:       0,
-	}); err != nil {
+	}, false); err != nil {
 		return nil, err
 	}
 	return id, nil
@@ -797,8 +853,9 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 		return nil, ErrNotHandle
 	}
 	id := s.keyedHash(p.Address)
-	if _, taken := s.data.Mailboxes[hex.EncodeToString(id)]; taken {
-		return nil, ErrHandleTaken
+	seq, tomb, err := s.reuse(id, root)
+	if err != nil {
+		return nil, err
 	}
 	if len(s.family(parent)) > MaxWorkers { // the handle's own record is in there too
 		return nil, ErrWorkerLimit
@@ -816,8 +873,8 @@ func (s *Store) AddAddress(ctx context.Context, p NewAddress) ([]byte, error) {
 		PasskeyKey:     p.PasskeyKey,
 		LicenseHash:    parent.LicenseHash,
 		EntitlementExp: parent.EntitlementExp,
-		Sequence:       0,
-	}); err != nil {
+		Sequence:       seq,
+	}, tomb); err != nil {
 		return nil, err
 	}
 	return id, nil
@@ -843,7 +900,8 @@ type RotatedKeys struct {
 // address, and a worker on a healthy device keeps them. The authorization — a
 // passkey assertion over an edge challenge and the new mailbox key's signature over
 // the new key chain — is the handler's job, checked before calling this.
-// ErrNoMailbox if the mailbox is absent.
+// ErrNoMailbox if the mailbox is absent, ErrCoordinated if it is enrolled under a
+// coordinator, whose keys only the coordinator changes.
 func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -853,6 +911,9 @@ func (s *Store) RotateKeys(ctx context.Context, mailboxID []byte, k RotatedKeys)
 	m, ok := s.data.Mailboxes[hex.EncodeToString(mailboxID)]
 	if !ok {
 		return nil, ErrNoMailbox
+	}
+	if m.Coordinated {
+		return nil, ErrCoordinated
 	}
 	family := s.family(m)
 	ids := make([][]byte, len(family))

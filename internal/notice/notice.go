@@ -281,7 +281,7 @@ func (m *Mailer) message(n routing.PendingNotice, now time.Time) ([]byte, error)
 			return nil, fmt.Errorf("new owner: %w", err)
 		}
 		subject = "A new owner was added to your Fount workers"
-		body = fmt.Sprintf(newOwnerBody, about, int(routing.OwnerWait.Hours()))
+		body = fmt.Sprintf(newOwnerBody, about)
 	case routing.NoticeOwnerRemoved:
 		subject = "You were removed as an owner of Fount workers"
 		body = removedBody
@@ -350,8 +350,8 @@ address nothing else unless you reply.
 
 const newOwnerBody = `%s was added as an owner of the Fount workers you own.
 
-After a %d-hour wait, and once they reply to their own confirmation
-email, they will get email from those workers.
+Once they reply to their own confirmation email, they will get email
+from those workers.
 
 If you didn't expect this, check the workers' owners in the Fount app,
 or ask whoever runs them.

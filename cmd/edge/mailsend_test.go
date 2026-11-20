@@ -141,7 +141,7 @@ func TestCoreSendsThroughMailSend(t *testing.T) {
 	cfg := &config.Config{MailDomain: "@fountbox.com", SendLink: "mail-send:7026"}
 	var state atomic.Pointer[sendState]
 	rt := ownerRouting{worker: "ap@fountbox.com", owner: "pat@smithcpa.com"}
-	sender, why := newCoreSender(cfg, rt, client, &state)
+	sender, why := newCoreSender(cfg, rt, client, &state, nil)
 	if sender == nil {
 		t.Fatal(why)
 	}
@@ -206,10 +206,10 @@ func TestCoreSendsThroughMailSend(t *testing.T) {
 
 func TestCoreSenderNeedsMailSendAndRouting(t *testing.T) {
 	var state atomic.Pointer[sendState]
-	if s, why := newCoreSender(&config.Config{}, fakeRouting{}, &link.SendClient{}, &state); s != nil || !strings.Contains(why, "SEND_LINK") {
+	if s, why := newCoreSender(&config.Config{}, fakeRouting{}, &link.SendClient{}, &state, nil); s != nil || !strings.Contains(why, "SEND_LINK") {
 		t.Fatalf("no link: %v %q", s != nil, why)
 	}
-	if s, why := newCoreSender(&config.Config{SendLink: "mail-send:7026"}, nil, &link.SendClient{}, &state); s != nil || why != "off: no routing" {
+	if s, why := newCoreSender(&config.Config{SendLink: "mail-send:7026"}, nil, &link.SendClient{}, &state, nil); s != nil || why != "off: no routing" {
 		t.Fatalf("no routing: %v %q", s != nil, why)
 	}
 }

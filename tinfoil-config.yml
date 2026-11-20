@@ -13,7 +13,7 @@
 # vault, which verifies this release first, and accepts only the keyset that
 # KEYSET_COMMITMENT names (see fount-mail-vault).
 
-cvm-version: 0.14.17 # https://github.com/tinfoilsh/cvmimage/releases/latest, no `v`
+cvm-version: 0.14.19 # https://github.com/tinfoilsh/cvmimage/releases/latest, no `v`
 cpus: 2
 memory: 8192
 
@@ -182,6 +182,7 @@ shim:
     - /mailbox
     - /handle/*
     - /address
+    - /address/remove
     - /routing
     - /entitlement
     - /mail
@@ -194,3 +195,15 @@ shim:
     - /pause/*
     - /send
     - /connect
+    # Cloud coordinator (fount launch-plan M)
+    - /coordinator
+    - /coordinator/generation
+    - /coordinator/lapse
+    - /coordinator/signing-key
+    - /coordinator/changes
+    - /coordinator/invite
+    - /coordinator/decryption-key
+    - /coordinator/routing
+    - /coordinator/pause
+    - /coordinator/remove
+    - /sent/query

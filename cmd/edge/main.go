@@ -53,6 +53,7 @@ import (
 	"github.com/fount-labs/fount-mail-edge/internal/s3"
 	"github.com/fount-labs/fount-mail-edge/internal/send"
 	"github.com/fount-labs/fount-mail-edge/internal/sendercheck"
+	"github.com/fount-labs/fount-mail-edge/internal/sent"
 	"github.com/fount-labs/fount-mail-edge/internal/smtp"
 	"github.com/fount-labs/fount-mail-edge/internal/store"
 )
@@ -207,9 +208,13 @@ func run(m mode) error {
 		}
 		return nil
 	}}
-	st, rt, err := storage(ctx, cfg, k, ops, checker.Check)
+	st, rt, sentRecords, err := storage(ctx, cfg, k, ops, checker.Check)
 	if err != nil {
 		return err
+	}
+	var records send.SentRecords // a nil *sent.Store must stay a nil interface
+	if sentRecords != nil {
+		records = sentRecords
 	}
 	var (
 		resolver    deviceapi.KeyResolver
@@ -240,14 +245,14 @@ func run(m mode) error {
 			checkDNS.Store(&r)
 		}
 		var why string
-		if sender, why = newCoreSender(cfg, sendRt, sendClient, &sending); sender == nil {
+		if sender, why = newCoreSender(cfg, sendRt, sendClient, &sending, records); sender == nil {
 			sending.Store(&sendState{State: why})
 		} else {
 			sending.Store(&sendState{State: "off: waiting for mail-send"})
 		}
 	} else {
 		var st sendState
-		sender, st = newSender(cfg, sendRt)
+		sender, st = newSender(cfg, sendRt, records)
 		sending.Store(&st)
 		if out, ok := transmitterOf(sender).(*send.Outbox); ok {
 			var r sendercheck.Resolver = outboxDNS{out}
@@ -274,6 +279,8 @@ func run(m mode) error {
 		RecoveryOrigin: cfg.RecoveryOrigin,
 		Sender:         sender,
 		Connector:      connector,
+
+		CoordinatorAuthority: cfg.CoordinatorAuthorityKey,
 	})
 	late.set(api)
 
@@ -311,7 +318,7 @@ func run(m mode) error {
 			go startCertLoop(ctx, cfg, k, certMgr, challenges, i)
 		}
 	}
-	go startRetentionSweep(ctx, st)
+	go startRetentionSweep(ctx, st, sentRecords)
 	switch {
 	case rt == nil:
 	case m == modeCore && sender != nil:
@@ -424,26 +431,26 @@ func tunnelListener(pins []gatewaytls.Pin, k *keys.Keys, addr string) (net.Liste
 // uses the domain suffix), and no provisioner (creation routes stay 501) —
 // enough to smoke-test the listeners. Until a mailbox is created, a production
 // edge has none, so every RCPT is correctly refused.
-func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operator.Routing, check store.SenderCheck) (store.Store, *routing.Store, error) {
+func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operator.Routing, check store.SenderCheck) (store.Store, *routing.Store, *sent.Store, error) {
 	if cfg.Dev {
 		log.Printf("edge: *** EDGE_DEV=1 — discard store, no routing; NEVER in a release ***")
-		return store.NewDiscard(), nil, nil
+		return store.NewDiscard(), nil, nil, nil
 	}
 	blobs, err := newBlobs(cfg, cfg.S3EndpointURL())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	logBlobs, err := newBlobs(cfg, cfg.BucketURL(cfg.S3BootLogBucket))
 	if err != nil {
-		return nil, nil, fmt.Errorf("boot log: %w", err)
+		return nil, nil, nil, fmt.Errorf("boot log: %w", err)
 	}
 	backupBlobs, err := newBlobs(cfg, cfg.BucketURL(cfg.S3BackupBucket))
 	if err != nil {
-		return nil, nil, fmt.Errorf("routing backup: %w", err)
+		return nil, nil, nil, fmt.Errorf("routing backup: %w", err)
 	}
 	bootID := make([]byte, 16)
 	if _, err := rand.Read(bootID); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	rt, err := ops.Load(ctx, operator.Backend{Blobs: blobs, RoutingDataKey: cfg.Secrets.RoutingDataKey, MailDomain: cfg.MailDomain},
 		func(ctx context.Context) (*routing.Store, error) {
@@ -451,16 +458,21 @@ func storage(ctx context.Context, cfg *config.Config, k *keys.Keys, ops *operato
 				routing.WithBackup(backupBlobs, k.Sign, bootID))
 		})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	log.Printf("edge: storage=s3 endpoint=%s boot-id=%x", cfg.S3EndpointURL(), bootID)
 	st := store.New(rt, blobs, k.Sign, bootID, store.WithLogBlobs(logBlobs), store.WithSenderCheck(check))
 	if bs, ok := st.(store.BootStore); ok {
 		if err := publishBoot(context.Background(), bs, bootRetries); err != nil {
-			return nil, nil, fmt.Errorf("publish boot attestation (boot-id=%x): %w", bootID, err)
+			return nil, nil, nil, fmt.Errorf("publish boot attestation (boot-id=%x): %w", bootID, err)
 		}
 	}
-	return st, rt, nil
+	records, err := sent.New(blobs, cfg.Secrets.RoutingDataKey, cfg.SentRetention)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("send records: %w", err)
+	}
+	log.Printf("edge: send records kept %s", records.Retention())
+	return st, rt, records, nil
 }
 
 // bootRetries are the waits between tries at the boot record, about a minute in all.
@@ -557,12 +569,21 @@ func startCertLoop(ctx context.Context, cfg *config.Config, k *keys.Keys, mgr *c
 // startRetentionSweep runs the §6 retention sweep once at startup and then daily,
 // expiring unfetched mail past the hold and writing a signed expiry record for
 // each. The discard store (dev) is not a Sweeper, so this is a no-op there.
-func startRetentionSweep(ctx context.Context, st store.Store) {
+func startRetentionSweep(ctx context.Context, st store.Store, records *sent.Store) {
 	sweeper, ok := st.(store.Sweeper)
 	if !ok {
 		return
 	}
 	run := func() {
+		if records != nil {
+			n, err := records.Sweep(ctx, time.Now())
+			if err != nil {
+				log.Printf("edge: send record sweep error: %v", err)
+			}
+			if n > 0 {
+				log.Printf("edge: send record sweep deleted %d record(s) past %s", n, records.Retention())
+			}
+		}
 		res, err := sweeper.Sweep(ctx, time.Now())
 		if err != nil {
 			log.Printf("edge: retention sweep error: %v", err)

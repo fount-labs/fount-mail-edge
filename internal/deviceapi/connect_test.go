@@ -263,7 +263,7 @@ func TestPutRoutingWithAConnectProof(t *testing.T) {
 		t.Fatalf("a connected owner was queued mail: %+v", ns)
 	}
 
-	// A second owner, connected the same way: proved, waiting, and announced.
+	// A second owner, connected the same way: proved, mailable, and announced.
 	id = f.connect(f.mb, "worker@fountbox.com", "bob@example.com")
 	if rec := f.put(f.mb, 2, []string{"pat@smithcpa.com", "bob@example.com"}, proofBody{"bob@example.com", id}); rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
@@ -272,8 +272,11 @@ func TestPutRoutingWithAConnectProof(t *testing.T) {
 	if len(ns) != 1 || ns[0].Kind != routing.NoticeNewOwner || ns[0].To != "pat@smithcpa.com" || ns[0].About != "bob@example.com" {
 		t.Fatalf("notices %+v", ns)
 	}
-	if o, _ := f.owner(f.mb, "bob@example.com"); o.ProvedAt == 0 || o.ActiveAt == 0 {
+	if o, _ := f.owner(f.mb, "bob@example.com"); o.ProvedAt == 0 {
 		t.Fatalf("bob: %+v", o)
+	}
+	if !f.rt.OwnerProven(f.mb.id, f.rt.MailboxID("bob@example.com")) {
+		t.Fatal("a connected new owner wasn't mailable at once")
 	}
 }
 

@@ -66,7 +66,11 @@ already stored. Detecting a swapped key on the device is planned (§9), and not 
 - Unknown recipients are rejected during SMTP, with no catch-all.
 - `<address>+<tag>@` is accepted and stored as mail for `<address>@`, with the tagged recipient
   kept in the sealed envelope. The tag is a thread's reply token, which the broker checks; the
-  edge doesn't read it. An empty tag is unknown. `fount+<token>@` is the exception: it's an
+  edge doesn't read it. An empty tag is unknown. Reply tokens also ride in the Message-IDs a
+  worker sends (`fm.<26>.<token>@<domain>`), and the edge doesn't read those either: it holds no
+  token key. A Cloud worker's tokens are a MAC under a key only the Cloud coordinator holds,
+  apart from the address keys (decision 25), so rotating the address signing key never touches
+  them and a removed admin's copy of an old signing seed can't forge one. `fount+<token>@` is the exception: it's an
   owner-proof reply, never mail for a mailbox.
 - Each message is stored whole, sealed with HPKE to the address's key, with the envelope inside
   the encryption: the sender, the recipient, the sending server's IP, and its HELO name, so the
@@ -110,6 +114,152 @@ address. Its Message-ID is a MAC the edge alone can make, over the worker, the o
 time. The response gives only when it expires; the device learns the Message-ID from the
 owner's reply, and presents it on `PUT /routing` as that owner's proof. The edge never reads
 the reply. A proof is good for 24 hours, for that worker and owner only.
+
+### Cloud coordinator
+
+These routes serve Fount's Cloud coordinator, which runs a worker's mail in an enclave. Errors
+are `{"error": "...", "code": "..."}`, and callers branch on `code`.
+
+**Generations** (fount launch-plan decision 18). One coordinator runs at a time. The Cloud vault
+signs a certificate binding a generation number to that coordinator's own Ed25519 key, and
+moves the number on with every restore and upgrade. The certificate is
+`b64url(json) "." b64url(sig)`, where the JSON is
+`{"generation": N, "coordinator_key": "<base64 32 bytes>", "issued_at": unix}` and the
+signature is Ed25519 over `"fount-coordinator-generation/v1\n" || json`, by the key in
+`COORDINATOR_AUTHORITY_KEY`. Without that key the coordinator routes answer 501. The edge keeps
+the highest generation it has seen in the routing object, so a reboot doesn't forget it.
+
+- `POST /coordinator/generation`, body `{"certificate": "..."}`, signed by the key the
+  certificate names, with `Fount-Key-Id` set to that key's hex. It moves the edge to the
+  certificate's generation. A new coordinator calls it once at start. Answers
+  `{"generation": N}`. An older generation is 409 `stale_generation`, and the current one with
+  another key is 409 `generation_conflict`.
+- `PUT /coordinator`, the same body, signed by the mailbox's address key (`Fount-Key-Id` is the
+  mailbox id). It enrolls the mailbox under the certificate's generation, moving the edge on if
+  it's newer. Repeating it is a no-op. Answers `{"mailbox_id": "<hex>", "generation": N}`.
+
+Once a mailbox is enrolled, every call signed by its address or owner-change key must
+carry `Fount-Generation: <N>`, and the signed string gains `"\n<N>"`. A missing header is 409
+`generation_required`, an older generation 409 `stale_generation`, a newer one than the edge has
+seen 409 `unknown_generation`. The passkey routes aren't fenced. The header stops a stale
+coordinator, not a key holder: anyone with the address key can name the generation. The
+coordinator routes below are signed by the current generation's key, `Fount-Key-Id` set to its
+hex, and any other key that signs one gets 409 `stale_generation`.
+
+**Sent records** (decision 14). Every `POST /send` is recorded per worker and Message-ID in S3,
+under `edge/sent/`, sealed with a key derived from the routing data key, so S3 sees neither
+the Message-ID nor the recipients. Before delivery starts the record marks the recipients being
+tried `unknown`; afterwards it holds their outcomes. A record is kept `SENT_RETENTION_DAYS`
+(default 90) after its last write, which must be longer than a coordinator restore can reach
+back, so its backup bucket must expire old versions sooner. Retries are answered from the
+record across reboots, as within one boot. If the edge stopped mid-send, the recipients stay
+`unknown` and a retry is 409 `send_in_doubt`: the edge won't send it again, and a new
+Message-ID is a new message. If the record can't be written, nothing is sent (503).
+
+- `POST /sent/query`, signed by the address key, body `{"message_ids": ["<id@host>", ...]}`
+  (1 to 100; brackets optional). Answers `{"records": [...]}` in the order asked, each
+  `{"message_id", "state", "sha256", "first_at", "updated_at", "results": [{"recipient",
+  "status", "detail"}]}`. `state` is `none` (no record), `in_progress`, `in_doubt`, `retryable`
+  (some recipient `temporary`; posting the same bytes again re-attempts only those) or `done`
+  (each `sent` or `permanent`). `sha256` is of the message bytes as posted.
+
+**Lapse hold** (decision 11). When an account's past_due grace ends, the coordinator pauses
+each enrolled worker for lapse. A worker paused for lapse can't send (`/send` 403, as for an
+expired entitlement), but SMTP keeps accepting its mail (held, in its store as usual) until the
+entitlement's expiry plus 30 days, and only then answers 550. Without the pause, an expired
+entitlement bounces at once. The hold counts from the expiry, so setting the pause again can't
+stretch it. Reads still work, so the account can export. `GET /mail` adds `"lapsed": true` and
+`"hold_until"` (unix; 0 if the entitlement has no expiry) for a worker paused for lapse.
+
+- `POST /coordinator/lapse`, signed by the current coordinator key with `Fount-Generation`,
+  body `{"mailbox_id": "<hex>", "lapsed": true|false}`. The worker must be enrolled (else 409
+  `not_coordinated`). Answers `{"mailbox_id", "lapsed", "hold_until"}`.
+
+**Address signing key rotation** (decision 25). Removing a team admin who held a worker's
+address key rotates it. It's the coordinator's call, since the old key is the one revoked; the
+new key proves it's held. Only the address signing key changes (not the mailbox, owner-change
+or passkey keys). From the next request on, the old key gets 401 on every address-key route,
+`/send` among them.
+
+- `POST /coordinator/signing-key`, signed by the current coordinator key with
+  `Fount-Generation`, body `{"mailbox_id": "<hex>", "signing_key": "<base64 Ed25519 public
+  key>", "proof": "<base64 signature>"}`, where `proof` is the new key's signature over
+  `"fount-mail-edge/v1/signing-key\x00" || mailbox id (32 bytes) || new key (32 bytes)`. The
+  worker must be enrolled (409 `not_coordinated`); a bad proof is 403; the current key again
+  is 409. Answers `{"mailbox_id", "signing_key_sha256"}` (hex).
+
+**Key custody on an enrolled mailbox** (security review 2026-11-19, H1 and M1). Once a
+mailbox is enrolled, the coordinator is its only authority. Enrolling drops the mailbox's
+owner-change key and passkey, and on an enrolled mailbox `POST /recover`, `POST /pause` (after
+the passkey verifies), `PUT /routing` and `POST /connect` answer 409 `coordinator_only`,
+whatever key signs them. `POST /address` named under an enrolled mailbox still takes the
+mailbox key, with no `Fount-Generation`: the mailbox key stays with the device that made the
+handle so it can add more workers under it, and a new address is its own record with its own
+keys, so it gives that device nothing over the enrolled one (an address already taken is 409).
+The coordinator acts through its own routes, each
+signed by the current coordinator key with `Fount-Generation` and refusing a worker that isn't
+enrolled (409 `not_coordinated`):
+
+- `POST /coordinator/decryption-key`, body `{"mailbox_id": "<hex>", "decryption_key": "<base64
+  X25519 public key>"}`. Mail stored from then on seals to the new key; mail already stored stays
+  sealed to the old one, which the coordinator keeps. The current key again is 409. Answers
+  `{"mailbox_id", "decryption_key_sha256"}`.
+- `POST /coordinator/routing`, body `{"mailbox_id": "<hex>", "version", "owners", "proofs"}`,
+  checked and answered as `PUT /routing`.
+- `POST /coordinator/pause`, body `{"mailbox_id": "<hex>", "paused": true|false}`: the same
+  pause as `POST /pause`. Answers `{"mailbox_id", "paused"}`.
+
+**Removing a worker address** (fount launch-plan X4). A deleted worker's address leaves the live
+records: it stops resolving (RCPT 550), its keys sign nothing, and it stops counting toward the
+500 workers a handle may have. A tombstone stays, holding the handle it was under, its last mail
+sequence and when it went. Only the same handle can name the address again (`POST /address`
+checks the handle), and only 30 days later, the mail retention, so mail held for the old worker
+has expired by then; before that it's 409. The new worker's sequence carries on from the old
+one, so their message, expiry and gap records never collide. A handle's own address is never
+removed (409 `handle`): it holds the license's mailbox key and owners, and a released handle
+isn't reissued. A handle keeps at most 5,000 tombstones; naming a removed address again reuses
+its own. Removing an address already removed is 200, so a lost answer is safe to retry.
+
+- `POST /address/remove`, signed by the mailbox key, body `{"mailbox_id": "<hex>"}`.
+  `Fount-Key-Id` may be any address under the handle, or the removed address itself (a
+  tombstone resolves to the handle's current mailbox key, for this route only). An enrolled
+  worker is 409 `coordinator_only`; an address under another handle is 404, as one that doesn't
+  exist. Answers `{"mailbox_id", "removed": true}`.
+- `POST /coordinator/remove`, signed by the current coordinator key with `Fount-Generation`,
+  same body and answer. The worker must be enrolled (409 `not_coordinated`).
+
+**Team invites** (decision 26). `/send` goes only to a worker's proven owners, and someone being
+invited isn't one yet. So the coordinator mails an invite from a worker's address on its own
+route, where its generation key stands in for the owner proof. The edge keeps it narrow: the
+worker is enrolled, neither paused nor lapsed, the From is the worker's own address, exactly one
+recipient (To and Cc together) outside the mail domain, one `text/plain` part (or no
+Content-Type), at most 64 KiB, and at most 20 invites per worker per day, apart from its sending
+limits (per enclave, like every limit, so a reboot refills it). An invite goes through the same
+sent records as `/send`, marked `"kind": "invite"`, so the worker's `POST /sent/query` finds it
+(its records carry `kind`) and a retry is answered from the record. The worker's own keys can't
+call it, so `/send` to a non-owner is refused as before.
+
+- `POST /coordinator/invite`, signed by the current coordinator key with `Fount-Generation`,
+  body `{"mailbox_id": "<hex>", "message": "<base64 RFC 5322 message>"}`. Answers `/send`'s
+  `{"results": [...]}` and its refusals, and also 400 `invite_refused` (not an invite's shape),
+  429 `invite_limit` with `Retry-After` (the day's invites are spent), 409 `not_coordinated`. A
+  refused invite leaves no record. These codes are stable: Desktop offers "Copy the link" on any
+  refusal.
+
+**Changes feed.** One coordinator watches all its workers in one request instead of polling
+each. Every write of the routing object bumps its version, and each mailbox record keeps the
+version of the last write that changed it: new mail (its sequence), pause, lapse, keys, owners,
+entitlement, enrollment. Both live in the routing object, so the feed survives reboots and is
+the same from any edge instance. A cursor is `<epoch hex>.<version>`; a restore from backup
+picks a new epoch, so a cursor from before it (or from ahead of the object) answers
+`reset: true` and lists from the start. Message deletions (void, expiry) aren't changes.
+
+- `POST /coordinator/changes`, signed by the current coordinator key with `Fount-Generation`,
+  body `{"cursor": "<from the last page, or empty>", "limit": n}` (default 500, max 1000).
+  Answers `{"changes": [{"mailbox_id", "changed", "sequence", "paused", "lapsed"}],
+  "cursor", "more", "reset"}`, enrolled workers only, oldest change first. One write that
+  changed several workers isn't split across pages, so a page can run past `limit`. Pass
+  `cursor` back; `more` says another page is waiting now.
 
 ## §9 Stored messages
 
